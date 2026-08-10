@@ -1,0 +1,1000 @@
+{
+  "source": "/fsx/home/jixuan.chen/qwen35-tb2-fullstack/data/external/tmax-sft-only-success/skill_tax_20260505_2.2k_combined_balanced_thinking_only_success/train-00000-of-00001.parquet",
+  "note": "Recovery demonstrations mined from Tmax SUCCESSES. These are not evidence of a defect in our harness. They answer: what does a successful recovery on this error class look like?",
+  "n_rows_scanned": 5795,
+  "counts": {
+    "class:command_not_found": 1536,
+    "class:compile_or_build_error": 54,
+    "class:connection_refused": 58,
+    "class:generic_error": 2402,
+    "class:invalid_argument": 221,
+    "class:module_not_found": 135,
+    "class:no_such_file": 1278,
+    "class:package_install_failed": 7550,
+    "class:permission_denied": 74,
+    "class:python_traceback": 642,
+    "class:syntax_error": 70,
+    "class:test_assertion_failed": 524,
+    "class:timeout": 1502,
+    "error_at_end_no_recovery": 65
+  },
+  "exemplars_per_class": {
+    "command_not_found": 8,
+    "compile_or_build_error": 8,
+    "connection_refused": 8,
+    "generic_error": 8,
+    "invalid_argument": 8,
+    "module_not_found": 8,
+    "no_such_file": 8,
+    "package_install_failed": 8,
+    "permission_denied": 8,
+    "python_traceback": 8,
+    "syntax_error": 8,
+    "test_assertion_failed": 8,
+    "timeout": 8
+  },
+  "index": {
+    "command_not_found": [
+      {
+        "error_class": "command_not_found",
+        "failed_action": "cd /home/user && python solve.py",
+        "observation": "bash: python: command not found\n\n\n(exit_code=1)",
+        "recovery_action": "cd /home/user && python3 solve.py",
+        "recovery_shape": "cd <path> && python3 solve.py",
+        "assistant_turns_to_success": 3,
+        "source_row": 37
+      },
+      {
+        "error_class": "command_not_found",
+        "failed_action": "cat /home/user/regression.txt && echo \"---\" && file /home/user/regression_plot.png",
+        "observation": "beta0: 0.3000\nbeta1: 0.0333\n---\nbash: file: command not found\n\n\n(exit_code=1)",
+        "recovery_action": "head -5 /home/user/regression_plot.png | xxd | head -1",
+        "recovery_shape": "head -<n> <path> | xxd | head -<n>",
+        "assistant_turns_to_success": 3,
+        "source_row": 41
+      },
+      {
+        "error_class": "command_not_found",
+        "failed_action": "head -5 /home/user/regression_plot.png | xxd | head -1",
+        "observation": "bash: xxd: command not found\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nwith open('/home/user/regression_plot.png', 'rb') as f:\n    header = f.read(8)\n    print('PNG header valid:', header == b'\\\\x89PNG\\\\r\\\\n\\\\x1a\\\\n')\n    print('File size:', f.seek(0, 2), 'bytes')\n\"",
+        "recovery_shape": "python3 -c \" with open('<path> 'rb') as f: header = f.read(<n>) print('PNG header valid:', header == b'\\\\x89PNG\\\\r\\\\n\\\\x",
+        "assistant_turns_to_success": 2,
+        "source_row": 41
+      },
+      {
+        "error_class": "command_not_found",
+        "failed_action": "ls -la /home/user/analyze_gc.c /home/user/regression.txt /home/user/plot.py /home/user/regression_plot.png && echo \"---\" && cat /home/user/regression.txt && echo \"---\" && file /home/user/regression_plot.png",
+        "observation": "-rw-r--r-- 1 root root  4444 May 10 09:09 /home/user/analyze_gc.c\n-rw-r--r-- 1 root root  1893 May 10 09:09 /home/user/plot.py\n-rw-r--r-- 1 root root    28 May 10 09:09 /home/user/regression.txt\n-rw-r--r-- 1 root root 53621 May 10 09:09 /home/user/regression_plot.png\n---\nbeta0: 0.3000\nbeta1: 0.0333\n---\nbash: file: command not found\n\n\n(exit_code=1)",
+        "recovery_action": "xxd /home/user/regression_plot.png | head -2",
+        "recovery_shape": "xxd <path> | head -<n>",
+        "assistant_turns_to_success": 4,
+        "source_row": 43
+      },
+      {
+        "error_class": "command_not_found",
+        "failed_action": "xxd /home/user/regression_plot.png | head -2",
+        "observation": "bash: xxd: command not found\n\n\n(exit_code=1)",
+        "recovery_action": "head -c 8 /home/user/regression_plot.png | od -A x -t x1z",
+        "recovery_shape": "head -c <n> <path> | od -A x -t x1z",
+        "assistant_turns_to_success": 2,
+        "source_row": 43
+      },
+      {
+        "error_class": "command_not_found",
+        "failed_action": "python3 /home/user/mock_api.py &\nsleep 1\ncurl -s http://127.0.0.1:8080/ 2>&1 || echo \"API is running (404 is expected for GET)\"",
+        "observation": "> > [1] 64\nTraceback (most recent call last):\n  File \"/home/user/mock_api.py\", line 22, in <module>\n    with socketserver.TCPServer((\"127.0.0.1\", 8080), K8sMockHandler) as httpd:\n  File \"/usr/lib/python3.10/socketserver.py\", line 452, in __init__\n    self.server_bind()\n  File \"/usr/lib/python3.10/socketserver.py\", line 466, in server_bind\n    self.socket.bind(self.server_address)\nOSError: [Errno 9",
+        "recovery_action": "cat > /home/user/operator.py << 'PYEOF'\n#!/usr/bin/env python3\n\"\"\"\nKubernetes Manifest Operator Script\n- Backs up existing manifests\n- Sets up port forwarding\n- Applies new manifests via interactive CLI tool\n\"\"\"\n\nimport os\nimport sys\nimport subprocess\nimport tarfile\nimport glob\nimport time\nimport pe",
+        "recovery_shape": "cat > <path> << 'PYEOF' #!<path> python3 \"\"\" Kubernetes Manifest Operator Script - Backs up existing manifests - Sets up",
+        "assistant_turns_to_success": 20,
+        "source_row": 67
+      },
+      {
+        "error_class": "command_not_found",
+        "failed_action": "cd /tmp && echo -e \"K8s0p3r@t0r\\ny\" | python3 -c \"import sys; sys.path = [p for p in sys.path if p != '/home/user']; exec(open('/home/user/k8s_apply_cli.py').read())\" /home/user/k8s/incoming/config.yaml 2>&1",
+        "observation": "Operator Password: Validating manifest syntax...\nValidation OK.\nApply manifest config.yaml? [y/N]: Connection error: HTTP Error 404: NOT FOUND\n\n\n(exit_code=1)",
+        "recovery_action": "ps aux | grep mock_api && echo \"---\" && python3 -c \"\nimport urllib.request\ntry:\n    req = urllib.request.Request('http://127.0.0.1:9090/apply', data=b'test', method='POST')\n    with urllib.request.urlopen(req) as r:\n        print(f'Response: {r.status} - {r.read()}')\nexcept Exception as e:\n    print",
+        "recovery_shape": "ps aux | grep mock_api && echo \"---\" && python3 -c \" import urllib.request try: req = urllib.request.Request('http:<path",
+        "assistant_turns_to_success": 7,
+        "source_row": 67
+      },
+      {
+        "error_class": "command_not_found",
+        "failed_action": "ps aux | grep mock_api && echo \"---\" && python3 -c \"\nimport urllib.request\ntry:\n    req = urllib.request.Request('http://127.0.0.1:9090/apply', data=b'test', method='POST')\n    with urllib.request.urlopen(req) as r:\n        print(f'Response: {r.status} - {r.read()}')\nexcept Exception as e:\n    print",
+        "observation": "> > > > > > > > root          93  0.0  0.0   3536  1536 ?        S    09:12   0:00 grep mock_api\n---\nError: HTTP Error 404: NOT FOUND\n\n\n(exit_code=0)",
+        "recovery_action": "python3 /home/user/mock_api.py &\nsleep 2\necho \"Mock API started\"\npython3 -c \"\nimport urllib.request\ntry:\n    req = urllib.request.Request('http://127.0.0.1:9090/apply', data=b'test', method='POST')\n    with urllib.request.urlopen(req) as r:\n        print(f'Response: {r.status} - {r.read()}')\nexcept ",
+        "recovery_shape": "python3 <path> & sleep <n> echo \"Mock API started\" python3 -c \" import urllib.request try: req = urllib.request.Request(",
+        "assistant_turns_to_success": 6,
+        "source_row": 67
+      }
+    ],
+    "compile_or_build_error": [
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "cd /home/user && gcc -O2 -fopenmp -lm mcmc.c -o mcmc",
+        "observation": "/usr/bin/ld: /tmp/ccWepCLC.o: in function `main':\nmcmc.c:(.text.startup+0x169): undefined reference to `log'\ncollect2: error: ld returned 1 exit status\n\n\n(exit_code=1)",
+        "recovery_action": "cd /home/user && gcc -O2 -fopenmp mcmc.c -o mcmc -lm",
+        "recovery_shape": "cd <path> && gcc -O2 -fopenmp mcmc.c -o mcmc -lm",
+        "assistant_turns_to_success": 6,
+        "source_row": 144
+      },
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "cd /home/user && gcc -O2 -fopenmp -lm mcmc.c -o mcmc && echo \"Compilation successful\"",
+        "observation": "/usr/bin/ld: /tmp/ccGo8FYz.o: in function `main':\nmcmc.c:(.text.startup+0x169): undefined reference to `log'\ncollect2: error: ld returned 1 exit status\n\n\n(exit_code=1)",
+        "recovery_action": "cd /home/user && gcc -O2 -fopenmp mcmc.c -o mcmc -lm && echo \"Compilation successful\"",
+        "recovery_shape": "cd <path> && gcc -O2 -fopenmp mcmc.c -o mcmc -lm && echo \"Compilation successful\"",
+        "assistant_turns_to_success": 6,
+        "source_row": 146
+      },
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "cd /home/user && gcc -O2 -fopenmp -lm mcmc.c -o mcmc 2>&1",
+        "observation": "/usr/bin/ld: /tmp/ccAqJOUh.o: in function `main':\nmcmc.c:(.text.startup+0x169): undefined reference to `log'\ncollect2: error: ld returned 1 exit status\n\n\n(exit_code=1)",
+        "recovery_action": "cd /home/user && gcc -O2 -fopenmp mcmc.c -o mcmc -lm 2>&1",
+        "recovery_shape": "cd <path> && gcc -O2 -fopenmp mcmc.c -o mcmc -lm <n>>&<n>",
+        "assistant_turns_to_success": 6,
+        "source_row": 147
+      },
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "cd /home/user && gcc -O2 -fopenmp -lm mcmc.c -o mcmc",
+        "observation": "/usr/bin/ld: /tmp/ccrnHOyY.o: in function `main':\nmcmc.c:(.text.startup+0x169): undefined reference to `log'\ncollect2: error: ld returned 1 exit status\n\n\n(exit_code=1)",
+        "recovery_action": "cd /home/user && gcc -O2 -fopenmp mcmc.c -lm -o mcmc",
+        "recovery_shape": "cd <path> && gcc -O2 -fopenmp mcmc.c -lm -o mcmc",
+        "assistant_turns_to_success": 14,
+        "source_row": 148
+      },
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "cd /home/user && gcc -O2 -fopenmp -lm mcmc.c -o mcmc 2>&1",
+        "observation": "/usr/bin/ld: /tmp/ccRsEBVG.o: in function `main':\nmcmc.c:(.text.startup+0x169): undefined reference to `log'\ncollect2: error: ld returned 1 exit status\n\n\n(exit_code=1)",
+        "recovery_action": "cd /home/user && gcc -O2 -fopenmp mcmc.c -lm -o mcmc 2>&1",
+        "recovery_shape": "cd <path> && gcc -O2 -fopenmp mcmc.c -lm -o mcmc <n>>&<n>",
+        "assistant_turns_to_success": 5,
+        "source_row": 149
+      },
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "bash /home/user/build.sh 2>&1",
+        "observation": "/usr/bin/ld: /tmp/ccU4P1yx.o: in function `main':\napp.c:(.text+0x23): undefined reference to `sqrt'\ncollect2: error: ld returned 1 exit status\n\n\n(exit_code=1)",
+        "recovery_action": "cat /home/user/expected.csv",
+        "recovery_shape": "cat <path>",
+        "assistant_turns_to_success": 5,
+        "source_row": 309
+      },
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "export PATH=\"/tmp/gcc_install/usr/bin:$HOME/.cargo/bin:$PATH\" && export LD_LIBRARY_PATH=\"/tmp/gcc_install/usr/lib/x86_64-linux-gnu:/tmp/gcc_install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH\" && cd /home/user/graph_optimizer && cargo build --release 2>&1 | tail -10",
+        "observation": "  cargo:warning=      |          ^~~~~~~~~~\n  cargo:warning=compilation terminated.\n\n  --- stderr\n\n\n  error occurred in cc-rs: command did not execute successfully (status code exit status: 1): LC_ALL=\"C\" \"cc\" \"-O3\" \"-ffunction-sections\" \"-fdata-sections\" \"-fPIC\" \"-m64\" \"-w\" \"-DSQLITE_CORE\" \"-DSQLITE_DEFAULT_FOREIGN_KEYS=1\" \"-DSQLITE_ENABLE_API_ARMOR\" \"-DSQLITE_ENABLE_COLUMN_METADATA\" \"-DSQLITE_EN",
+        "recovery_action": "find /tmp/gcc_install -name \"libsqlite*\" 2>/dev/null && dpkg -l | grep sqlite 2>/dev/null || echo \"checking sqlite libs\" && find / -name \"libsqlite3*\" 2>/dev/null | head -10",
+        "recovery_shape": "find <path> -name \"libsqlite*\" <n>><path> && dpkg -l | grep sqlite <n>><path> || echo \"checking sqlite libs\" && find / -",
+        "assistant_turns_to_success": 13,
+        "source_row": 778
+      },
+      {
+        "error_class": "compile_or_build_error",
+        "failed_action": "cd /home/user && echo \"Testing clean files:\" && for f in /data/clean/*.csv; do echo -n \"$f: \" && ./detector \"$f\"; done && echo \"\" && echo \"Testing evil files:\" && for f in /data/evil/*.csv; do echo -n \"$f: \" && ./detector \"$f\"; done",
+        "observation": "Testing clean files:\n/data/clean/file1.csv: /data/clean/file2.csv: Fatal error: glibc detected an invalid stdio handle\n\n\n(exit_code=1)",
+        "recovery_action": "cat > /app/libcsv/csv.h << 'EOF'\n#ifndef CSV_H\n#define CSV_H\n\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n#define CSV_MAX_COLS 256\n#define CSV_MAX_LINE 8192\n\ntypedef struct {\n    char **fields;\n    int num_fields;\n    FILE *fp;\n    char line[CSV_MAX_LINE];\n    char *fields_storage[CS",
+        "recovery_shape": "cat > <path> << 'EOF' #ifndef CSV_H #define CSV_H #include <stdio.h> #include <stdlib.h> #include <string.h> #define CSV",
+        "assistant_turns_to_success": 8,
+        "source_row": 1878
+      }
+    ],
+    "connection_refused": [
+      {
+        "error_class": "connection_refused",
+        "failed_action": "python3 -c \"\nimport requests\nfor port in [18081, 18082, 18083]:\n    try:\n        r = requests.get(f'http://localhost:{port}', timeout=2)\n        print(f'Port {port}: {r.status_code}')\n    except Exception as e:\n        print(f'Port {port}: {type(e).__name__}: {e}')\n\"",
+        "observation": "> > > > > > > > Port 18081: 200\nPort 18082: 500\nPort 18083: ConnectionError: HTTPConnectionPool(host='localhost', port=18083): Max retries exceeded with url: / (Caused by NewConnectionError(\"HTTPConnection(host='localhost', port=18083): Failed to establish a new connection: [Errno 111] Connection refused\"))\n\n\n(exit_code=0)",
+        "recovery_action": "cat > /home/user/check_uptime.py << 'EOF'\nimport requests\n\nTARGETS_FILE = \"/home/user/targets.txt\"\nSTATUS_LOG = \"/home/user/status.log\"\nTIMEOUT = 2\n\ndef check_url(url):\n    \"\"\"Check a single URL and return 'UP' or 'DOWN'.\"\"\"\n    try:\n        response = requests.get(url, timeout=TIMEOUT)\n        if r",
+        "recovery_shape": "cat > <path> << 'EOF' import requests TARGETS_FILE = \"<path> STATUS_LOG = \"<path> TIMEOUT = <n> def check_url(url): \"\"\"C",
+        "assistant_turns_to_success": 4,
+        "source_row": 322
+      },
+      {
+        "error_class": "connection_refused",
+        "failed_action": "cat > /home/user/scan_ports.py << 'PYEOF'\nimport socket\nimport json\n\nOLD_PASSWORD = \"Sup3rS3cr3tL3gacy2023!\"\nPORTS = range(8080, 8086)  # 8080 to 8085 inclusive\n\nactive_ports = []\n\nfor port in PORTS:\n    try:\n        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n        s.settimeout(3)\n     ",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > [/home/user]$ Port 8080: timeout\nPort 8081: received 'READY'\nPort 8081: sent auth, got 'OK'\n  -> Port 8081 ACCEPTED old credentials!\nPort 8082: connection refused (not listening)\nPort 8083: connection refused (not listening)\nPort 8084: received 'READY'\nPort 8084: sent auth, got 'OK'\n  ->",
+        "recovery_action": "cat /home/user/rotation_report.json",
+        "recovery_shape": "cat <path>",
+        "assistant_turns_to_success": 2,
+        "source_row": 477
+      },
+      {
+        "error_class": "connection_refused",
+        "failed_action": "# Let me check if there's a pattern - try port 9090\npython3 -c \"\nimport socket\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ntry:\n    s.connect(('127.0.0.1', 9090))\n    s.sendall(b'GET / HTTP/1.0\\r\\n\\r\\n')\n    data = s.recv(4096)\n    print('Port 9090 response:', repr(data))\nexcept Exception ",
+        "observation": "> > > > > > > > > > > > Port 9090 error: [Errno 111] Connection refused\n\n\n(exit_code=0)",
+        "recovery_action": "# Let me try to modify server.py to use SO_REUSEADDR\ncat > /home/user/server.py << 'PYEOF'\nimport http.server\nimport socketserver\nimport hashlib\n\nPORT = 8080\nEXPECTED_SEED = \"redteam_alpha_99X\"\nEXPECTED_HASH = hashlib.sha256(EXPECTED_SEED.encode()).hexdigest()\nPAYLOAD_RESPONSE = \"EXEC_SHELLCODE:0x90",
+        "recovery_shape": "# Let me try to modify server.py to use SO_REUSEADDR cat > <path> << 'PYEOF' import http.server import socketserver impo",
+        "assistant_turns_to_success": 17,
+        "source_row": 818
+      },
+      {
+        "error_class": "connection_refused",
+        "failed_action": "cat /home/user/data/logs.csv",
+        "observation": "timestamp,log_text\n2023-10-01T10:05:15Z,System started initializing modules\n2023-10-01T10:08:10Z,Module A load SUCCESS 200\n2023-10-01T10:15:00Z,Warning: network timeout on eth0\n2023-10-01T10:35:12Z,Error: connection refused eth0\n2023-10-01T10:39:55Z,Error: connection refused eth0 retry 1\n\n\n(exit_code=0)",
+        "recovery_action": "rustc --version && cargo --version",
+        "recovery_shape": "rustc --version && cargo --version",
+        "assistant_turns_to_success": 23,
+        "source_row": 1009
+      },
+      {
+        "error_class": "connection_refused",
+        "failed_action": "ls -la /home/user/ && ls -la /home/user/data/ 2>/dev/null && head -20 /home/user/data/logs.csv 2>/dev/null",
+        "observation": "total 12\ndrwxr-xr-x 3 root root   89 May 10 22:22 .\ndrwxr-xr-x 3 root root    0 May  6 14:25 ..\n-rw-r--r-- 1 root root  220 Jan  6  2022 .bash_logout\n-rw-r--r-- 1 root root 3771 Jan  6  2022 .bashrc\n-rw-r--r-- 1 root root  807 Jan  6  2022 .profile\ndrwxr-xr-x 2 root root   30 May 10 22:22 data\ntotal 4\ndrwxr-xr-x 2 root root  30 May 10 22:22 .\ndrwxr-xr-x 3 root root  89 May 10 22:22 ..\n-rw-r--r-- 1",
+        "recovery_action": "wc -l /home/user/data/logs.csv && cat /home/user/data/logs.csv",
+        "recovery_shape": "wc -l <path> && cat <path>",
+        "assistant_turns_to_success": 34,
+        "source_row": 1010
+      },
+      {
+        "error_class": "connection_refused",
+        "failed_action": "ls -la /home/user/data/ && head -20 /home/user/data/logs.csv && echo \"---\" && wc -l /home/user/data/logs.csv",
+        "observation": "total 4\ndrwxr-xr-x 2 root root  30 May 10 22:22 .\ndrwxr-xr-x 3 root root  89 May 10 22:22 ..\n-rw-r--r-- 1 root root 289 May 10 22:22 logs.csv\ntimestamp,log_text\n2023-10-01T10:05:15Z,System started initializing modules\n2023-10-01T10:08:10Z,Module A load SUCCESS 200\n2023-10-01T10:15:00Z,Warning: network timeout on eth0\n2023-10-01T10:35:12Z,Error: connection refused eth0\n2023-10-01T10:39:55Z,Error: c",
+        "recovery_action": "which rustc && rustc --version && which cargo && cargo --version",
+        "recovery_shape": "which rustc && rustc --version && which cargo && cargo --version",
+        "assistant_turns_to_success": 22,
+        "source_row": 1011
+      },
+      {
+        "error_class": "connection_refused",
+        "failed_action": "cat << 'EOF'\nLet me verify the windows and tokens:\n\nData:\n- 2023-10-01T10:05:15Z -> Window 10:00-10:10: \"system started initializing modules\"\n- 2023-10-01T10:08:10Z -> Window 10:00-10:10: \"module a load success 200\"\n- 2023-10-01T10:15:00Z -> Window 10:10-10:20: \"warning network timeout on eth0\"\n- 20",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > Let me verify the windows and tokens:\n\nData:\n- 2023-10-01T10:05:15Z -> Window 10:00-10:10: \"system started initializing modules\"\n- 2023-10-01T10:08:10Z -> Window 10:00-10:10: \"module a load success 200\"\n- 2023-10-01T10:15:00Z -> Window 10:10-10:20: \"warning network timeout on eth0\"\n- 2023-10-01T10:35:12Z -> Window 10:30-10:40: \"error connection ref",
+        "recovery_action": "echo \"=== Cargo.toml ===\" && cat /home/user/etl_processor/Cargo.toml && echo \"\" && echo \"=== main.rs ===\" && cat /home/user/etl_processor/src/main.rs && echo \"\" && echo \"=== run_etl.sh ===\" && cat /home/user/run_etl.sh && echo \"\" && echo \"=== output.jsonl ===\" && cat /home/user/output.jsonl && echo ",
+        "recovery_shape": "echo \"=== Cargo.toml ===\" && cat <path> && echo \"\" && echo \"=== main.rs ===\" && cat <path> && echo \"\" && echo \"=== run_e",
+        "assistant_turns_to_success": 3,
+        "source_row": 1012
+      },
+      {
+        "error_class": "connection_refused",
+        "failed_action": "ls -la /home/user/data/ && head -20 /home/user/data/logs.csv",
+        "observation": "total 4\ndrwxr-xr-x 2 root root  30 May 10 22:22 .\ndrwxr-xr-x 3 root root  89 May 10 22:22 ..\n-rw-r--r-- 1 root root 289 May 10 22:22 logs.csv\ntimestamp,log_text\n2023-10-01T10:05:15Z,System started initializing modules\n2023-10-01T10:08:10Z,Module A load SUCCESS 200\n2023-10-01T10:15:00Z,Warning: network timeout on eth0\n2023-10-01T10:35:12Z,Error: connection refused eth0\n2023-10-01T10:39:55Z,Error: c",
+        "recovery_action": "cat /home/user/data/logs.csv && echo \"---\" && rustc --version && cargo --version",
+        "recovery_shape": "cat <path> && echo \"---\" && rustc --version && cargo --version",
+        "assistant_turns_to_success": 26,
+        "source_row": 1013
+      }
+    ],
+    "generic_error": [
+      {
+        "error_class": "generic_error",
+        "failed_action": "echo \"=== hardened_daemon.cpp ===\"\ncat /home/user/hardened_daemon.cpp\necho \"\"\necho \"=== start_daemon.exp ===\"\ncat /home/user/start_daemon.exp\necho \"\"\necho \"=== monitor.sh ===\"\ncat /home/user/monitor.sh",
+        "observation": "> > > > > > > === hardened_daemon.cpp ===\n#include <iostream>\n#include <string>\n#include <fstream>\n#include <unistd.h>\n\nint main() {\n    // Phase 1: Enter Admin PIN\n    std::cout << \"Enter Admin PIN: \";\n    std::cout.flush();\n\n    std::string pin;\n    std::cin >> pin;\n    if (pin != \"8675309\") {\n        std::cout << \"AUTH FAILED\" << std::endl;\n        return 1;\n    }\n\n    // Phase 2: Confirm mode\n",
+        "recovery_action": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        "recovery_shape": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        "assistant_turns_to_success": 1,
+        "source_row": 10
+      },
+      {
+        "error_class": "generic_error",
+        "failed_action": "cd /home/user/sim && go build -o sim main.go && echo \"Build successful\"",
+        "observation": "# command-line-arguments\n./main.go:36:41: newline in string\n./main.go:36:41: syntax error: unexpected newline, expecting comma or )\n./main.go:37:24: newline in string\n./main.go:38:41: newline in string\n./main.go:39:20: newline in string\n./main.go:40:41: newline in string\n./main.go:41:50: newline in string\n./main.go:42:38: newline in string\n./main.go:43:31: newline in string\n./main.go:47:36: syntax",
+        "recovery_action": "cd /home/user/sim && cat main.go | sed -n '35,45p'",
+        "recovery_shape": "cd <path> && cat main.go | sed -n '<n>,45p'",
+        "assistant_turns_to_success": 11,
+        "source_row": 12
+      },
+      {
+        "error_class": "generic_error",
+        "failed_action": "cd /home/user/sim && go build -o sim main.go && ./sim",
+        "observation": "# command-line-arguments\n./main.go:41:76: newline in string\n./main.go:41:76: syntax error: unexpected newline, expecting comma or )\n./main.go:42:3: newline in string\n./main.go:43:82: syntax error: unexpected ), expecting := or = or comma\n./main.go:98:53: newline in string\n./main.go:98:53: syntax error: unexpected newline, expecting comma or )\n./main.go:99:30: newline in string\n./main.go:105:58: ne",
+        "recovery_action": "sed -n '38,45p' /home/user/sim/main.go",
+        "recovery_shape": "sed -n '<n>,45p' <path>",
+        "assistant_turns_to_success": 5,
+        "source_row": 13
+      },
+      {
+        "error_class": "generic_error",
+        "failed_action": "cd /home/user/sim && go build -o sim main.go && ./sim",
+        "observation": "# command-line-arguments\n./main.go:35:47: newline in string\n./main.go:35:47: syntax error: unexpected newline, expecting comma or )\n./main.go:36:20: newline in string\n./main.go:37:48: newline in string\n./main.go:38:21: newline in string\n./main.go:39:31: newline in string\n./main.go:40:47: newline in string\n./main.go:41:35: newline in string\n./main.go:42:31: newline in string\n./main.go:45:36: syntax",
+        "recovery_action": "cd /home/user/sim && cat > main.go << 'ENDOFGO'\npackage main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"math\"\n\t\"math/rand\"\n\t\"os\"\n\t\"sort\"\n)\n\nfunc f(x float64) float64 {\n\treturn math.Exp(-x) * math.Sin(x)\n}\n\nfunc trapezoidalRule(fn func(float64) float64, a, b float64, n int) float64 {\n\th := (b - a) / float64",
+        "recovery_shape": "cd <path> && cat > main.go << 'ENDOFGO' package main import ( \"encoding<path> \"fmt\" \"math\" \"math<path> \"os\" \"sort\" ) fun",
+        "assistant_turns_to_success": 14,
+        "source_row": 14
+      },
+      {
+        "error_class": "generic_error",
+        "failed_action": "cd /home/user/sim && go build -o sim main.go && ./sim",
+        "observation": "# command-line-arguments\n./main.go:32:33: newline in string\n./main.go:32:33: syntax error: unexpected newline, expecting comma or )\n./main.go:33:20: newline in string\n./main.go:34:34: newline in string\n./main.go:35:21: newline in string\n./main.go:36:31: newline in string\n./main.go:37:31: newline in string\n./main.go:39:39: syntax error: unexpected ) at end of statement\n./main.go:81:53: newline in s",
+        "recovery_action": "cd /home/user/sim && python3 << 'PYEOF'\ncode = r'''package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"math\"\n\t\"math/rand\"\n\t\"os\"\n\t\"sort\"\n)\n\nfunc f(x float64) float64 {\n\treturn math.Exp(-x) * math.Sin(x)\n}\n\nfunc trapezoidalRule(fn func(float64) float64, a, b float64, n int) float64 {\n\th := (b - a) / floa",
+        "recovery_shape": "cd <path> && python3 << 'PYEOF' code = r'''package main import ( \"encoding<path> \"fmt\" \"math\" \"math<path> \"os\" \"sort\" ) ",
+        "assistant_turns_to_success": 10,
+        "source_row": 14
+      },
+      {
+        "error_class": "generic_error",
+        "failed_action": "cd /home/user/sim && go build -o sim main.go && ./sim",
+        "observation": "# command-line-arguments\n./main.go:43:49: newline in string\n./main.go:43:49: syntax error: unexpected newline, expecting comma or )\n./main.go:44:20: newline in string\n./main.go:45:40: newline in string\n./main.go:46:23: newline in string\n./main.go:47:31: newline in string\n./main.go:48:49: newline in string\n./main.go:49:35: newline in string\n./main.go:50:21: newline in string\n./main.go:52:36: syntax",
+        "recovery_action": "sed -n '40,55p' /home/user/sim/main.go",
+        "recovery_shape": "sed -n '<n>,55p' <path>",
+        "assistant_turns_to_success": 19,
+        "source_row": 15
+      },
+      {
+        "error_class": "generic_error",
+        "failed_action": "cd /home/user/sim && go build -o sim main.go && echo \"Build successful\"",
+        "observation": "# command-line-arguments\n./main.go:70:26: syntax error: unexpected ) at end of statement\n./main.go:79:47: syntax error: unexpected ) at end of statement\n\n\n(exit_code=1)",
+        "recovery_action": "cd /home/user/sim && nl -ba main.go | sed -n '65,85p'",
+        "recovery_shape": "cd <path> && nl -ba main.go | sed -n '<n>,85p'",
+        "assistant_turns_to_success": 6,
+        "source_row": 16
+      },
+      {
+        "error_class": "generic_error",
+        "failed_action": "cd /home/user/sim && go build -o sim main.go 2>&1",
+        "observation": "# command-line-arguments\n./main.go:92:52: newline in string\n./main.go:92:52: syntax error: unexpected newline, expecting comma or )\n./main.go:93:8: newline in string\n./main.go:99:49: newline in string\n./main.go:99:49: syntax error: unexpected newline, expecting comma or )\n./main.go:100:8: newline in string\n./main.go:105:46: newline in string\n./main.go:105:46: syntax error: unexpected newline, expe",
+        "recovery_action": "cat /home/user/sim/main.go | sed -n '85,110p'",
+        "recovery_shape": "cat <path> | sed -n '<n>,110p'",
+        "assistant_turns_to_success": 13,
+        "source_row": 18
+      }
+    ],
+    "invalid_argument": [
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock && dpkg --configure -a 2>&1 | tail -5",
+        "observation": "dpkg: error: unable to open/create dpkg frontend lock for directory /var/lib/dpkg: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "cat > /home/user/watcher.sh << 'WATCHEOF'\n#!/bin/bash\n\nSTAGING_DIR=\"/home/user/staging\"\nBUILD_DIR=\"/home/user/build\"\nPROCESSED_DIR=\"/home/user/processed\"\nOUTPUT_FILE=\"$BUILD_DIR/output.html\"\nLOCK_FILE=\"$BUILD_DIR/output.lock\"\n\n# Process a single .md file\nprocess_md() {\n    local file=\"$1\"\n    local ",
+        "recovery_shape": "cat > <path> << 'WATCHEOF' #!<path> STAGING_DIR=\"<path> BUILD_DIR=\"<path> PROCESSED_DIR=\"<path> OUTPUT_FILE=\"$BUILD_DIR<",
+        "assistant_turns_to_success": 10,
+        "source_row": 124
+      },
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "mkdir -p /var/lib/apt/lists/partial && apt-get update -qq 2>&1 | tail -5",
+        "observation": "mkdir: cannot create directory ‘/var/lib/apt/lists/partial’: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "find / -name \"inotifywait\" 2>/dev/null && which apk 2>/dev/null && which yum 2>/dev/null",
+        "recovery_shape": "find / -name \"inotifywait\" <n>><path> && which apk <n>><path> && which yum <n>><path>",
+        "assistant_turns_to_success": 25,
+        "source_row": 126
+      },
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "mkdir -p /var/lib/apt/lists/partial && apt-get update 2>&1 | tail -10",
+        "observation": "mkdir: cannot create directory ‘/var/lib/apt/lists/partial’: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "dpkg -l | grep inotify 2>&1; find /usr -name \"inotifywait\" 2>&1; ls /usr/bin/inotify* 2>&1",
+        "recovery_shape": "dpkg -l | grep inotify <n>>&<n>; find <path> -name \"inotifywait\" <n>>&<n>; ls <path> <n>>&<n>",
+        "assistant_turns_to_success": 20,
+        "source_row": 126
+      },
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "rm -rf /var/lib/apt/lists && mkdir -p /var/lib/apt/lists/partial && apt-get update 2>&1 | tail -15",
+        "observation": "mkdir: cannot create directory ‘/var/lib/apt/lists/partial’: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "ls -la /var/lib/apt/lists/ && stat /var/lib/apt/lists/",
+        "recovery_shape": "ls -la <path> && stat <path>",
+        "assistant_turns_to_success": 17,
+        "source_row": 126
+      },
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "mkdir -p /var/lib/apt/lists/partial && apt-get update 2>&1 | tail -5",
+        "observation": "mkdir: cannot create directory ‘/var/lib/apt/lists/partial’: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "which gcc && gcc --version | head -1 && which python3 && python3 --version",
+        "recovery_shape": "which gcc && gcc --version | head -<n> && which python3 && python3 --version",
+        "assistant_turns_to_success": 12,
+        "source_row": 144
+      },
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "mkdir -p /var/lib/apt/lists/partial && apt-get update -qq 2>&1 | tail -5",
+        "observation": "mkdir: cannot create directory ‘/var/lib/apt/lists/partial’: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "ls -la /var/lib/apt/lists/",
+        "recovery_shape": "ls -la <path>",
+        "assistant_turns_to_success": 16,
+        "source_row": 145
+      },
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "mkdir -p /var/lib/apt/lists/partial && apt-get update -qq 2>&1 | tail -5",
+        "observation": "mkdir: cannot create directory ‘/var/lib/apt/lists/partial’: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "rm -rf /var/lib/apt/lists && mkdir -p /var/lib/apt/lists/partial && apt-get update -qq 2>&1 | tail -5",
+        "recovery_shape": "rm -rf <path> && mkdir -p <path> && apt-get update -qq <n>>&<n> | tail -<n>",
+        "assistant_turns_to_success": 15,
+        "source_row": 146
+      },
+      {
+        "error_class": "invalid_argument",
+        "failed_action": "rm -rf /var/lib/apt/lists && mkdir -p /var/lib/apt/lists/partial && apt-get update -qq 2>&1 | tail -5",
+        "observation": "mkdir: cannot create directory ‘/var/lib/apt/lists/partial’: Invalid argument\n\n\n(exit_code=1)",
+        "recovery_action": "which gcc && gcc --version | head -1",
+        "recovery_shape": "which gcc && gcc --version | head -<n>",
+        "assistant_turns_to_success": 14,
+        "source_row": 146
+      }
+    ],
+    "module_not_found": [
+      {
+        "error_class": "module_not_found",
+        "failed_action": "cd /tmp && echo -e \"K8s0p3r@t0r\\ny\" | python3 /home/user/k8s_apply_cli.py /home/user/k8s/incoming/config.yaml 2>&1",
+        "observation": "Traceback (most recent call last):\n  File \"/home/user/k8s_apply_cli.py\", line 4, in <module>\n    import urllib.request\n  File \"/usr/lib/python3.10/urllib/request.py\", line 84, in <module>\n    import base64\n  File \"/usr/lib/python3.10/base64.py\", line 9, in <module>\n    import re\n  File \"/usr/lib/python3.10/re.py\", line 127, in <module>\n    import functools\n  File \"/usr/lib/python3.10/functools.py\"",
+        "recovery_action": "cd /tmp && echo -e \"K8s0p3r@t0r\\ny\" | python3 /home/user/k8s_apply_cli.py /home/user/k8s/incoming/config.yaml 2>&1",
+        "recovery_shape": "cd <path> && echo -e \"K8s0p3r@t0r\\ny\" | python3 <path> <path> <n>>&<n>",
+        "assistant_turns_to_success": 10,
+        "source_row": 67
+      },
+      {
+        "error_class": "module_not_found",
+        "failed_action": "cd /tmp && echo -e \"K8s0p3r@t0r\\ny\" | python3 /home/user/k8s_apply_cli.py /home/user/k8s/incoming/config.yaml 2>&1",
+        "observation": "Traceback (most recent call last):\n  File \"/home/user/k8s_apply_cli.py\", line 4, in <module>\n    import urllib.request\n  File \"/usr/lib/python3.10/urllib/request.py\", line 84, in <module>\n    import base64\n  File \"/usr/lib/python3.10/base64.py\", line 9, in <module>\n    import re\n  File \"/usr/lib/python3.10/re.py\", line 127, in <module>\n    import functools\n  File \"/usr/lib/python3.10/functools.py\"",
+        "recovery_action": "cat > /home/user/operator.py << 'PYEOF'\n#!/usr/bin/env python3\n\"\"\"\nKubernetes Manifest Operator Script\n- Backs up existing manifests\n- Sets up port forwarding\n- Applies new manifests via interactive CLI tool\n\"\"\"\n\nimport sys\nimport os\n\n# Remove script directory from path to avoid conflict with built-",
+        "recovery_shape": "cat > <path> << 'PYEOF' #!<path> python3 \"\"\" Kubernetes Manifest Operator Script - Backs up existing manifests - Sets up",
+        "assistant_turns_to_success": 9,
+        "source_row": 67
+      },
+      {
+        "error_class": "module_not_found",
+        "failed_action": "python3 << 'PYEOF'\nimport numpy as np\nimport cv2\nimport os\n\n# Create a synthetic experiment video - 50 frames of a 1D cross-section\n# Each frame shows a 1D concentration profile as a horizontal bar\nn_frames = 50\nheight = 200\nwidth = 320\n\n# Create output directory if needed\nos.makedirs('/app', exist_",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > Traceback (most recent call last):\n  File \"<stdin>\", line 2, in <module>\nModuleNotFoundError: No module named 'cv2'\n[/home/user]$ \n\n(exit_code=1)",
+        "recovery_action": "pip install opencv-python-headless 2>&1 | tail -5",
+        "recovery_shape": "pip install opencv-python-headless <n>>&<n> | tail -<n>",
+        "assistant_turns_to_success": 6,
+        "source_row": 155
+      },
+      {
+        "error_class": "module_not_found",
+        "failed_action": "python3 -c \"import matplotlib\" 2>&1 || pip install matplotlib",
+        "observation": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'matplotlib'\nCollecting matplotlib\n  Downloading matplotlib-3.10.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (8.8 MB)\n     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.8/8.8 MB 41.0 MB/s eta 0:00:00\n\nCollecting fonttools>=4.22.0\n  Downloading fonttools-4.62.1-cp310-cp310-ma",
+        "recovery_action": "cd /home/user/workspace && python3 mcmc.py",
+        "recovery_shape": "cd <path> && python3 mcmc.py",
+        "assistant_turns_to_success": 5,
+        "source_row": 632
+      },
+      {
+        "error_class": "module_not_found",
+        "failed_action": "ls -la /home/user/workspace/libcustom_math.so && python3 -c \"import matplotlib; print('matplotlib available')\" 2>&1",
+        "observation": "-rwxr-xr-x 1 root root 15568 May 10 16:56 /home/user/workspace/libcustom_math.so\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'matplotlib'\n\n\n(exit_code=1)",
+        "recovery_action": "pip install matplotlib -q",
+        "recovery_shape": "pip install matplotlib -q",
+        "assistant_turns_to_success": 6,
+        "source_row": 633
+      },
+      {
+        "error_class": "module_not_found",
+        "failed_action": "python3 -c \"import matplotlib; print(matplotlib.__version__)\" 2>&1 || echo \"matplotlib not installed\"",
+        "observation": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'matplotlib'\nmatplotlib not installed\n\n\n(exit_code=0)",
+        "recovery_action": "pip install matplotlib 2>&1 | tail -5",
+        "recovery_shape": "pip install matplotlib <n>>&<n> | tail -<n>",
+        "assistant_turns_to_success": 7,
+        "source_row": 636
+      },
+      {
+        "error_class": "module_not_found",
+        "failed_action": "ls -la /home/user/workspace/libcustom_math.so && python3 -c \"import matplotlib; print('matplotlib version:', matplotlib.__version__)\"",
+        "observation": "-rwxr-xr-x 1 root root 15568 May 10 16:56 /home/user/workspace/libcustom_math.so\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'matplotlib'\n\n\n(exit_code=1)",
+        "recovery_action": "pip install matplotlib",
+        "recovery_shape": "pip install matplotlib",
+        "assistant_turns_to_success": 7,
+        "source_row": 637
+      },
+      {
+        "error_class": "module_not_found",
+        "failed_action": "python3 -c \"\nimport requests\nr = requests.post('http://127.0.0.1:5000/login', json={'username': 'testuser'})\nprint('Status:', r.status_code)\nprint('Cookies:', r.cookies)\nprint('AuthToken:', r.cookies.get('AuthToken'))\n\"",
+        "observation": "> > > > > > Traceback (most recent call last):\n  File \"<string>\", line 2, in <module>\nModuleNotFoundError: No module named 'requests'\n\n\n(exit_code=1)",
+        "recovery_action": "pip install requests",
+        "recovery_shape": "pip install requests",
+        "assistant_turns_to_success": 8,
+        "source_row": 797
+      }
+    ],
+    "no_such_file": [
+      {
+        "error_class": "no_such_file",
+        "failed_action": "ls -la /usr/share/zoneinfo/America/New_York 2>&1 && echo \"---\" && TZ=America/New_York python3 -c \"\nimport time, os\nos.environ['TZ'] = 'America/New_York'\ntime.tzset()\nprint(f'tzname: {time.tzname}')\nprint(f'tzoffset: {time.timezone}')\nprint(f'daylight: {time.daylight}')\nfrom datetime import datetime\n",
+        "observation": "> > > > > > > > > > > ls: cannot access '/usr/share/zoneinfo/America/New_York': No such file or directory\n\n\n(exit_code=1)",
+        "recovery_action": "ls /usr/share/zoneinfo/ 2>&1 | head -20",
+        "recovery_shape": "ls <path> <n>>&<n> | head -<n>",
+        "assistant_turns_to_success": 8,
+        "source_row": 9
+      },
+      {
+        "error_class": "no_such_file",
+        "failed_action": "ls /usr/share/zoneinfo/ 2>&1 | head -20",
+        "observation": "ls: cannot access '/usr/share/zoneinfo/': No such file or directory\n\n\n(exit_code=1)",
+        "recovery_action": "cat > /home/user/app/process_logs.py << 'EOF'\nimport os\nfrom datetime import datetime, timezone\n\ndef process():\n    with open('/home/user/app/events.txt', 'r') as f, open('/home/user/app/output.log', 'w') as out:\n        for line in f:\n            parts = line.strip().split(',')\n            if len(p",
+        "recovery_shape": "cat > <path> << 'EOF' import os from datetime import datetime, timezone def process(): with open('<path> 'r') as f, open",
+        "assistant_turns_to_success": 7,
+        "source_row": 9
+      },
+      {
+        "error_class": "no_such_file",
+        "failed_action": "ls -la /app/random_walk_sim && file /app/random_walk_sim",
+        "observation": "ls: cannot access '/app/random_walk_sim': No such file or directory\n\n\n(exit_code=1)",
+        "recovery_action": "find /app -type f 2>/dev/null | head -20",
+        "recovery_shape": "find <path> -type f <n>><path> | head -<n>",
+        "assistant_turns_to_success": 15,
+        "source_row": 46
+      },
+      {
+        "error_class": "no_such_file",
+        "failed_action": "ls -la /app 2>&1; echo \"---\"; ls -la /home/user/ 2>&1",
+        "observation": "ls: cannot access '/app': No such file or directory\n---\ntotal 12\ndrwxr-xr-x 2 root root   73 May 10 09:02 .\ndrwxr-xr-x 3 root root    0 May  6 14:25 ..\n-rw-r--r-- 1 root root  220 Jan  6  2022 .bash_logout\n-rw-r--r-- 1 root root 3771 Jan  6  2022 .bashrc\n-rw-r--r-- 1 root root  807 Jan  6  2022 .profile\n\n\n(exit_code=0)",
+        "recovery_action": "mkdir -p /app",
+        "recovery_shape": "mkdir -p <path>",
+        "assistant_turns_to_success": 11,
+        "source_row": 46
+      },
+      {
+        "error_class": "no_such_file",
+        "failed_action": "ls -la /app/random_walk_sim && file /app/random_walk_sim",
+        "observation": "ls: cannot access '/app/random_walk_sim': No such file or directory\n\n\n(exit_code=1)",
+        "recovery_action": "ls -la /app/ 2>/dev/null || echo \"No /app directory\"; ls -la /home/user/ 2>/dev/null || echo \"No /home/user directory\"",
+        "recovery_shape": "ls -la <path> <n>><path> || echo \"No <path> directory\"; ls -la <path> <n>><path> || echo \"No <path> directory\"",
+        "assistant_turns_to_success": 13,
+        "source_row": 47
+      },
+      {
+        "error_class": "no_such_file",
+        "failed_action": "cat > /app/random_walk_sim.c << 'EOF'\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n// A simple random walk simulation on a generated graph\n// Output format:\n//   E <u> <v>  - edges\n//   V <u>      - visit to node u\n\n#define MAX_NODES 100\n#define MAX_EDGES 500\n\ntypedef struct {\n    int",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > bash: /app/random_walk_sim.c: No such file or directory\n[/home/user]$ cc1: fatal error: /app/random_walk_sim.c: No such file or directory\ncompilation terminated.\n[/ho",
+        "recovery_action": "ls -la /app/; stat /app/; touch /app/test 2>&1",
+        "recovery_shape": "ls -la <path> stat <path> touch <path> <n>>&<n>",
+        "assistant_turns_to_success": 14,
+        "source_row": 48
+      },
+      {
+        "error_class": "no_such_file",
+        "failed_action": "ls -la /app/; stat /app/; touch /app/test 2>&1",
+        "observation": "ls: cannot access '/app/': No such file or directory\nstat: cannot statx '/app/': No such file or directory\ntouch: cannot touch '/app/test': No such file or directory\n\n\n(exit_code=1)",
+        "recovery_action": "mkdir -p /app && ls -la /app/",
+        "recovery_shape": "mkdir -p <path> && ls -la <path>",
+        "assistant_turns_to_success": 13,
+        "source_row": 48
+      },
+      {
+        "error_class": "no_such_file",
+        "failed_action": "ls -la /app/random_walk_sim && file /app/random_walk_sim",
+        "observation": "ls: cannot access '/app/random_walk_sim': No such file or directory\n\n\n(exit_code=1)",
+        "recovery_action": "find / -name \"random_walk_sim\" 2>/dev/null",
+        "recovery_shape": "find / -name \"random_walk_sim\" <n>><path>",
+        "assistant_turns_to_success": 13,
+        "source_row": 51
+      }
+    ],
+    "package_install_failed": [
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "cat /home/user/lu_solver.c",
+        "observation": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <omp.h>\n\nint main(int argc, char *argv[]) {\n    if (argc < 2) {\n        printf(\"Usage: %s <matrix.csv>\\n\", argv[0]);\n        return 1;\n    }\n\n    FILE *f = fopen(argv[1], \"r\");\n    if (!f) return 1;\n\n    double A[3][3];\n    char line[256];\n    int row = 0;\n    while (fgets(line, sizeof(line), f) && row < 3) {\n        sscanf(line, ",
+        "recovery_action": "cat /home/user/input_matrix.csv",
+        "recovery_shape": "cat <path>",
+        "assistant_turns_to_success": 7,
+        "source_row": 0
+      },
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "date && echo \"---\" && echo $TZ && echo \"---\" && python3 -c \"\nimport os, time\nprint('os.environ TZ:', os.environ.get('TZ', 'not set'))\nprint('time.tzname:', time.tzname)\n\"",
+        "observation": "> > > > Sun May 10 09:03:36 PDT 2026\n---\n\n---\nos.environ TZ: not set\ntime.tzname: ('PST', 'PDT')\n\n\n(exit_code=0)",
+        "recovery_action": "sed -i 's/TZ=America\\/New_York/TZ=UTC/' /home/user/app/config.env && cat /home/user/app/config.env",
+        "recovery_shape": "sed -i 's<path> <path> && cat <path>",
+        "assistant_turns_to_success": 8,
+        "source_row": 6
+      },
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "python3 -c \"\nimport os, time\nfrom datetime import datetime\n\n# Test with America/New_York\nos.environ['TZ'] = 'America/New_York'\ntime.tzset()\ndt1 = datetime.strptime('2023-11-05 00:30:00', '%Y-%m-%d %H:%M:%S')\nts1 = int(dt1.timestamp())\nprint(f'TZ=America/New_York: {ts1}')\n\n# Test with UTC\nos.environ[",
+        "observation": "> > > > > > > > > > > > > > > > > > > TZ=America/New_York: 1699144200\nTZ=UTC: 1699144200\nDifference: 0 seconds\n\n\n(exit_code=0)",
+        "recovery_action": "bash /home/user/app/run.sh 2>&1 || echo \"Script crashed with exit code $?\"",
+        "recovery_shape": "bash <path> <n>>&<n> || echo \"Script crashed with exit code $?\"",
+        "assistant_turns_to_success": 12,
+        "source_row": 9
+      },
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "source /home/user/app/config.env && export TZ && echo \"TZ=$TZ\" && python3 -c \"\nimport time\ntime.tzset()\nprint(f'timezone: {time.tzname}')\nprint(f'tzoffset: {time.timezone}')\nfrom datetime import datetime\ndt = datetime.strptime('2023-11-05 00:30:00', '%Y-%m-%d %H:%M:%S')\nprint(f'timestamp: {int(dt.ti",
+        "observation": "> > > > > > > > TZ=America/New_York\ntimezone: ('America', 'America')\ntzoffset: 0\ntimestamp: 1699144200\n\n\n(exit_code=0)",
+        "recovery_action": "date -u -d \"2023-11-05 00:30:00\" +%s && date -u -d \"2023-11-05 01:30:00\" +%s && date -u -d \"2023-11-05 02:30:00\" +%s",
+        "recovery_shape": "date -u -d \"<n>-<n>-<n> <n>:<n>:<n>\" +%s && date -u -d \"<n>-<n>-<n> <n>:<n>:<n>\" +%s && date -u -d \"<n>-<n>-<n> <n>:<n>:",
+        "assistant_turns_to_success": 10,
+        "source_row": 9
+      },
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "echo -e \"8675309\\nenforcing\" | timeout 3 /home/user/hardened_daemon; echo \"Exit code: $?\"",
+        "observation": "Enter Admin PIN: Confirm mode (safe/enforcing): Daemon started successfully.\nExit code: 124\n\n\n(exit_code=0)",
+        "recovery_action": "timeout 5 /usr/bin/expect /home/user/start_daemon.exp; echo \"Expect exit code: $?\"",
+        "recovery_shape": "timeout <n> <path> <path> echo \"Expect exit code: $?\"",
+        "assistant_turns_to_success": 9,
+        "source_row": 10
+      },
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "timeout 5 /usr/bin/expect /home/user/start_daemon.exp; echo \"Expect exit code: $?\"",
+        "observation": "spawn /home/user/hardened_daemon\nEnter Admin PIN: 8675309\nConfirm mode (safe/enforcing): enforcing\nDaemon started successfully.\nExpect exit code: 124\n\n\n(exit_code=0)",
+        "recovery_action": "rm -f /home/user/heartbeat.log /home/user/monitor.log && /home/user/monitor.sh &\necho \"Monitor PID: $!\"\nsleep 3\necho \"--- After 3 seconds ---\"\necho \"Heartbeat log contents:\"\ncat /home/user/heartbeat.log\necho \"\"\necho \"Monitor log contents:\"\ncat /home/user/monitor.log 2>/dev/null || echo \"(empty or no",
+        "recovery_shape": "rm -f <path> <path> && <path> & echo \"Monitor PID: $!\" sleep <n> echo \"--- After <n> seconds ---\" echo \"Heartbeat log co",
+        "assistant_turns_to_success": 8,
+        "source_row": 10
+      },
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "cd /home/user/sim && cat main.go | sed -n '35,45p'",
+        "observation": "\n\tfmt.Printf(\"Analytical numerical: %.10f\n\", analyticalNumerical)\n\tfmt.Printf(\"Analytical exact:     %.10f\n\", analyticalExact)\n\tfmt.Printf(\"Difference:           %.10e\n\", math.Abs(analyticalNumerical-analyticalExact))\n\tfmt.Printf(\"Validation passed:    %v\n\", analyticalValidationPassed)\n\n\t// 2. Monte Carlo Simulation & Convergence\n\n\n(exit_code=0)",
+        "recovery_action": "cd /home/user/sim && python3 << 'PYEOF'\ncontent = r'''package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"math\"\n\t\"math/rand\"\n\t\"os\"\n\t\"sort\"\n)\n\n// f(x) = e^(-x) * sin(x)\nfunc f(x float64) float64 {\n\treturn math.Exp(-x) * math.Sin(x)\n}\n\n// trapezoidalRule computes the definite integral of f from a to b\n//",
+        "recovery_shape": "cd <path> && python3 << 'PYEOF' content = r'''package main import ( \"encoding<path> \"fmt\" \"math\" \"math<path> \"os\" \"sort\"",
+        "assistant_turns_to_success": 10,
+        "source_row": 12
+      },
+      {
+        "error_class": "package_install_failed",
+        "failed_action": "sed -n '40,55p' /home/user/sim/main.go",
+        "observation": "\tanalyticalSolution := (1 + math.Exp(-math.Pi)) / 2\n\tvalidationPassed := math.Abs(numericalResult-analyticalSolution) < 1e-4\n\n\tfmt.Printf(\"Numerical integral (0 to pi): %.10f\n\", numericalResult)\n\tfmt.Printf(\"Analytical solution: %.10f\n\", analyticalSolution)\n\tfmt.Printf(\"Difference: %.10e\n\", math.Abs(numericalResult-analyticalSolution))\n\tfmt.Printf(\"Validation passed: %v\n\", validationPassed)\n\n\trng ",
+        "recovery_action": "python3 << 'PYEOF'\ncontent = r'''package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"math\"\n\t\"math/rand\"\n\t\"os\"\n\t\"sort\"\n)\n\nfunc f(x float64) float64 {\n\treturn math.Exp(-x) * math.Sin(x)\n}\n\nfunc trapezoidalRule(a, b float64, n int) float64 {\n\th := (b - a) / float64(n)\n\tsum := 0.5 * (f(a) + f(b))\n\tfor i :=",
+        "recovery_shape": "python3 << 'PYEOF' content = r'''package main import ( \"encoding<path> \"fmt\" \"math\" \"math<path> \"os\" \"sort\" ) func f(x f",
+        "assistant_turns_to_success": 18,
+        "source_row": 15
+      }
+    ],
+    "permission_denied": [
+      {
+        "error_class": "permission_denied",
+        "failed_action": "python3 -c \"\nimport os\nbin_dir = '/home/user/storage_pool/bin'\nfor filename in os.listdir(bin_dir):\n    print(f'File: {filename}, has dot: {\\\".\\\" in filename}')\n    filepath = os.path.join(bin_dir, filename)\n    with open(filepath, 'rb') as f:\n        magic = f.read(4)\n        print(f'  Magic: {magi",
+        "observation": "> > > > > > > > > > > > > > > > > File: legacy_worker, has dot: False\n  Magic: b'\\x7fELF'\n  Is ELF\nTraceback (most recent call last):\n  File \"<string>\", line 15, in <module>\nPermissionError: [Errno 13] Permission denied\n\n\n(exit_code=1)",
+        "recovery_action": "cat > /home/user/disk_analyzer.py << 'PYEOF'\n#!/usr/bin/env python3\n\"\"\"Disk analyzer script to identify space-wasting files in storage pool.\"\"\"\n\nimport gzip\nimport json\nimport mmap\nimport os\n\nSTORAGE_POOL = \"/home/user/storage_pool\"\nREPORT_PATH = \"/home/user/cleanup_report.json\"\n\n\ndef find_redundant",
+        "recovery_shape": "cat > <path> << 'PYEOF' #!<path> python3 \"\"\"Disk analyzer script to identify space-wasting files in storage pool.\"\"\" imp",
+        "assistant_turns_to_success": 13,
+        "source_row": 25
+      },
+      {
+        "error_class": "permission_denied",
+        "failed_action": "python3 -c \"\nimport mmap, os\n\nfilepath = '/home/user/storage_pool/bin/legacy_worker'\nfile_size = os.path.getsize(filepath)\nprint(f'File size: {file_size}')\n\n# Try with explicit length\nwith open(filepath, 'rb') as f:\n    mm = mmap.mmap(f.fileno(), file_size)\n    content = mm.read()\n    print(f'Mapped",
+        "observation": "> > > > > > > > > > > > > > > > File size: 165\nTraceback (most recent call last):\n  File \"<string>\", line 10, in <module>\nPermissionError: [Errno 13] Permission denied\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport mmap, os\n\nfilepath = '/home/user/storage_pool/bin/legacy_worker'\nfile_size = os.path.getsize(filepath)\nprint(f'File size: {file_size}')\n\n# Try with explicit length and ACCESS_READ\nwith open(filepath, 'r+b') as f:\n    mm = mmap.mmap(f.fileno(), 0)\n    print(f'Mapped successfully')",
+        "recovery_shape": "python3 -c \" import mmap, os filepath = '<path> file_size = os.path.getsize(filepath) print(f'File size: {file_size}') #",
+        "assistant_turns_to_success": 7,
+        "source_row": 25
+      },
+      {
+        "error_class": "permission_denied",
+        "failed_action": "cd /home/user/project && ./build.sh",
+        "observation": "bash: ./build.sh: Permission denied\n\n\n(exit_code=1)",
+        "recovery_action": "chmod +x /home/user/project/build.sh && cd /home/user/project && ./build.sh",
+        "recovery_shape": "chmod +x <path> && cd <path> && .<path>",
+        "assistant_turns_to_success": 3,
+        "source_row": 134
+      },
+      {
+        "error_class": "permission_denied",
+        "failed_action": "cd /home/user/project && ./build.sh && echo \"---\" && cat build_success.log",
+        "observation": "bash: ./build.sh: Permission denied\n\n\n(exit_code=1)",
+        "recovery_action": "chmod +x /home/user/project/build.sh && cd /home/user/project && ./build.sh && echo \"---\" && cat build_success.log",
+        "recovery_shape": "chmod +x <path> && cd <path> && .<path> && echo \"---\" && cat build_success.log",
+        "assistant_turns_to_success": 2,
+        "source_row": 139
+      },
+      {
+        "error_class": "permission_denied",
+        "failed_action": "sudo apt-get update -qq && sudo apt-get install -y -qq libsqlite3-dev nlohmann-json3-dev g++ 2>&1 | tail -5",
+        "observation": "E: setgroups 65534 failed - setgroups (1: Operation not permitted)\nE: setegid 65534 failed - setegid (22: Invalid argument)\nE: seteuid 100 failed - seteuid (22: Invalid argument)\nE: setgroups 0 failed - setgroups (1: Operation not permitted)\nW: chown to _apt:root of directory /var/lib/apt/lists/partial failed - SetupAPTPartialDirectory (22: Invalid argument)\nW: chown to _apt:root of directory /var",
+        "recovery_action": "dpkg -l | grep -E \"sqlite3|nlohmann|g\\+\\+\" 2>/dev/null; which g++; g++ --version 2>&1 | head -2; pkg-config --cflags --libs sqlite3 2>/dev/null || echo \"no pkg-config for sqlite3\"; ls /usr/include/sqlite3.h 2>/dev/null || echo \"no sqlite3.h\"; ls /usr/include/nlohmann/json.hpp 2>/dev/null || echo \"no",
+        "recovery_shape": "dpkg -l | grep -E \"sqlite3|nlohmann|g\\+\\+\" <n>><path> which g++; g++ --version <n>>&<n> | head -<n>; pkg-config --cflags",
+        "assistant_turns_to_success": 13,
+        "source_row": 362
+      },
+      {
+        "error_class": "permission_denied",
+        "failed_action": "sudo apt-get update -qq && sudo apt-get install -y -qq libsqlite3-dev nlohmann-json3-dev g++ 2>&1 | tail -5",
+        "observation": "E: setgroups 65534 failed - setgroups (1: Operation not permitted)\nE: setegid 65534 failed - setegid (22: Invalid argument)\nE: seteuid 100 failed - seteuid (22: Invalid argument)\nE: setgroups 0 failed - setgroups (1: Operation not permitted)\nW: chown to _apt:root of directory /var/lib/apt/lists/partial failed - SetupAPTPartialDirectory (22: Invalid argument)\nW: chown to _apt:root of directory /var",
+        "recovery_action": "which g++ && g++ --version | head -1 && dpkg -l | grep -E \"sqlite3|nlohmann\" 2>/dev/null",
+        "recovery_shape": "which g++ && g++ --version | head -<n> && dpkg -l | grep -E \"sqlite3|nlohmann\" <n>><path>",
+        "assistant_turns_to_success": 18,
+        "source_row": 366
+      },
+      {
+        "error_class": "permission_denied",
+        "failed_action": "sudo apt-get update -qq && sudo apt-get install -y -qq nlohmann-json3-dev 2>&1 | tail -5",
+        "observation": "E: setgroups 65534 failed - setgroups (1: Operation not permitted)\nE: setegid 65534 failed - setegid (22: Invalid argument)\nE: seteuid 100 failed - seteuid (22: Invalid argument)\nE: setgroups 0 failed - setgroups (1: Operation not permitted)\nW: chown to _apt:root of directory /var/lib/apt/lists/partial failed - SetupAPTPartialDirectory (22: Invalid argument)\nW: chown to _apt:root of directory /var",
+        "recovery_action": "mkdir -p /usr/local/include/nlohmann && curl -sL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp -o /usr/local/include/nlohmann/json.hpp 2>&1 | head -5 && ls -la /usr/local/include/nlohmann/",
+        "recovery_shape": "mkdir -p <path> && curl -sL https:<path> -o <path> <n>>&<n> | head -<n> && ls -la <path>",
+        "assistant_turns_to_success": 12,
+        "source_row": 368
+      },
+      {
+        "error_class": "permission_denied",
+        "failed_action": "expect /home/user/capacity_planner/bin/backup.exp",
+        "observation": "spawn /home/user/interactive_backup.sh\ncouldn't execute \"/home/user/interactive_backup.sh\": permission denied\n    while executing\n\"spawn /home/user/interactive_backup.sh\"\n    (file \"/home/user/capacity_planner/bin/backup.exp\" line 3)\n\n\n(exit_code=1)",
+        "recovery_action": "chmod +x /home/user/interactive_backup.sh && expect /home/user/capacity_planner/bin/backup.exp",
+        "recovery_shape": "chmod +x <path> && expect <path>",
+        "assistant_turns_to_success": 3,
+        "source_row": 641
+      }
+    ],
+    "python_traceback": [
+      {
+        "error_class": "python_traceback",
+        "failed_action": "bash /home/user/app/run.sh 2>&1 || echo \"Script crashed with exit code $?\"",
+        "observation": "Traceback (most recent call last):\n  File \"/home/user/app/process_logs.py\", line 13, in <module>\n    process()\n  File \"/home/user/app/process_logs.py\", line 7, in process\n    ts_str, level, msg = line.strip().split(',')\nValueError: not enough values to unpack (expected 3, got 1)\nScript crashed with exit code 1\n\n\n(exit_code=0)",
+        "recovery_action": "source /home/user/app/config.env && export TZ && echo \"TZ=$TZ\" && python3 -c \"\nimport time\ntime.tzset()\nprint(f'timezone: {time.tzname}')\nprint(f'tzoffset: {time.timezone}')\nfrom datetime import datetime\ndt = datetime.strptime('2023-11-05 00:30:00', '%Y-%m-%d %H:%M:%S')\nprint(f'timestamp: {int(dt.ti",
+        "recovery_shape": "source <path> && export TZ && echo \"TZ=$TZ\" && python3 -c \" import time time.tzset() print(f'timezone: {time.tzname}') p",
+        "assistant_turns_to_success": 11,
+        "source_row": 9
+      },
+      {
+        "error_class": "python_traceback",
+        "failed_action": "cd /home/user && python3 operator.py 2>&1",
+        "observation": "Traceback (most recent call last):\n  File \"/home/user/operator.py\", line 11, in <module>\n    import subprocess\n  File \"/usr/lib/python3.10/subprocess.py\", line 50, in <module>\n    import threading\n  File \"/usr/lib/python3.10/threading.py\", line 6, in <module>\n    import functools\n  File \"/usr/lib/python3.10/functools.py\", line 18, in <module>\n    from collections import namedtuple\n  File \"/usr/lib",
+        "recovery_action": "cd /tmp && python3 /home/user/operator.py 2>&1",
+        "recovery_shape": "cd <path> && python3 <path> <n>>&<n>",
+        "assistant_turns_to_success": 17,
+        "source_row": 67
+      },
+      {
+        "error_class": "python_traceback",
+        "failed_action": "cd /tmp && python3 /home/user/operator.py 2>&1",
+        "observation": "Traceback (most recent call last):\n  File \"/home/user/operator.py\", line 11, in <module>\n    import subprocess\n  File \"/usr/lib/python3.10/subprocess.py\", line 50, in <module>\n    import threading\n  File \"/usr/lib/python3.10/threading.py\", line 6, in <module>\n    import functools\n  File \"/usr/lib/python3.10/functools.py\", line 18, in <module>\n    from collections import namedtuple\n  File \"/usr/lib",
+        "recovery_action": "cat > /home/user/operator.py << 'PYEOF'\n#!/usr/bin/env python3\n\"\"\"\nKubernetes Manifest Operator Script\n- Backs up existing manifests\n- Sets up port forwarding\n- Applies new manifests via interactive CLI tool\n\"\"\"\n\nimport sys\n# Remove script directory from path to avoid conflict with built-in 'operato",
+        "recovery_shape": "cat > <path> << 'PYEOF' #!<path> python3 \"\"\" Kubernetes Manifest Operator Script - Backs up existing manifests - Sets up",
+        "assistant_turns_to_success": 16,
+        "source_row": 67
+      },
+      {
+        "error_class": "python_traceback",
+        "failed_action": "/home/user/venv/bin/python3 << 'PYEOF'\nimport speech_recognition as sr\n\n# Test with the audio file\nrecognizer = sr.Recognizer()\nrecognizer.energy_threshold = 100  # Lower threshold\n\nwith sr.AudioFile(\"/app/speech.wav\") as source:\n    audio = recognizer.record(source)\n\nprint(f\"Audio duration: {audio.",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > Traceback (most recent call last):\n  File \"<stdin>\", line 10, in <module>\nAttributeError: 'AudioData' object has no attribute 'duration'\n[/home/user]$ \n\n(exit_code=1)",
+        "recovery_action": "/home/user/venv/bin/python3 << 'PYEOF'\nimport speech_recognition as sr\n\n# Test with the audio file\nrecognizer = sr.Recognizer()\nrecognizer.energy_threshold = 100  # Lower threshold\n\nwith sr.AudioFile(\"/app/speech.wav\") as source:\n    audio = recognizer.record(source)\n\nprint(f\"Audio get_rms: {audio.g",
+        "recovery_shape": "<path> << 'PYEOF' import speech_recognition as sr # Test with the audio file recognizer = sr.Recognizer() recognizer.ene",
+        "assistant_turns_to_success": 12,
+        "source_row": 142
+      },
+      {
+        "error_class": "python_traceback",
+        "failed_action": "/home/user/venv/bin/python3 << 'PYEOF'\nimport speech_recognition as sr\n\n# Test with the audio file\nrecognizer = sr.Recognizer()\nrecognizer.energy_threshold = 100  # Lower threshold\n\nwith sr.AudioFile(\"/app/speech.wav\") as source:\n    audio = recognizer.record(source)\n\nprint(f\"Audio get_rms: {audio.g",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > Traceback (most recent call last):\n  File \"<stdin>\", line 10, in <module>\nAttributeError: 'AudioData' object has no attribute 'get_rms'\n[/home/user]$ \n\n(exit_code=1)",
+        "recovery_action": "/home/user/venv/bin/python3 << 'PYEOF'\nimport speech_recognition as sr\n\nrecognizer = sr.Recognizer()\nrecognizer.energy_threshold = 50\n\nwith sr.AudioFile(\"/app/speech.wav\") as source:\n    audio = recognizer.record(source)\n\nprint(f\"Frame rate: {audio.sample_rate}\")\nprint(f\"Frame width: {audio.sample_w",
+        "recovery_shape": "<path> << 'PYEOF' import speech_recognition as sr recognizer = sr.Recognizer() recognizer.energy_threshold = <n> with sr",
+        "assistant_turns_to_success": 11,
+        "source_row": 142
+      },
+      {
+        "error_class": "python_traceback",
+        "failed_action": "sed -i \"s/print(f\\\"Sample rate: {sample_rate}, Samples: {len(audio_data_raw), dtype: {audio_data_raw.dtype}\\\")/print(f\\\"Sample rate: {sample_rate}, Samples: {len(audio_data_raw)}, dtype: {audio_data_raw.dtype}\\\")/\" /home/user/analyze_audio.py && source /home/user/venv/bin/activate && python3 /home/u",
+        "observation": "Phase 2: Transcription...\nTraceback (most recent call last):\n  File \"/home/user/analyze_audio.py\", line 16, in <module>\n    transcript = recognizer.recognize_sphinx(audio_data)\n  File \"/home/user/venv/lib/python3.10/site-packages/speech_recognition/recognizers/pocketsphinx.py\", line 66, in recognize\n    config = pocketsphinx.Config()\nAttributeError: module 'pocketsphinx.pocketsphinx' has no attrib",
+        "recovery_action": "source /home/user/venv/bin/activate && python3 -c \"import pocketsphinx; print(dir(pocketsphinx))\" 2>&1",
+        "recovery_shape": "source <path> && python3 -c \"import pocketsphinx; print(dir(pocketsphinx))\" <n>>&<n>",
+        "assistant_turns_to_success": 5,
+        "source_row": 143
+      },
+      {
+        "error_class": "python_traceback",
+        "failed_action": "python3 << 'PYEOF'\nimport numpy as np\nfrom PIL import Image\n\n# Generate 60 frames of a 1D cross-section video\n# Each frame is a 2D image where the middle row represents the 1D profile\nwidth = 200\nheight = 100\n\nframes = []\nfor frame_idx in range(60):\n    img = np.zeros((height, width, 3), dtype=np.ui",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > Traceback (most recent call last):\n  File \"<stdin>\", line 20, in <module>\nValueError: could not broadcast input array from shape (200,) into shape (200,3)\n[/home/user]$ \n\n(exit_code=1)",
+        "recovery_action": "python3 << 'PYEOF'\nimport numpy as np\nfrom PIL import Image\n\n# Generate 60 frames of a 1D cross-section video\nwidth = 200\nheight = 100\n\nframes = []\nfor frame_idx in range(60):\n    img = np.zeros((height, width, 3), dtype=np.uint8)\n    x = np.linspace(0, 2*np.pi, width)\n    \n    # Create a smooth wav",
+        "recovery_shape": "python3 << 'PYEOF' import numpy as np from PIL import Image # Generate <n> frames of a 1D cross-section video width = <n",
+        "assistant_turns_to_success": 8,
+        "source_row": 156
+      },
+      {
+        "error_class": "python_traceback",
+        "failed_action": "python3 << 'PYEOF'\nimport numpy as np\nfrom PIL import Image\n\n# Generate 60 frames of a 1D cross-section video\nwidth = 200\nheight = 100\n\nframes = []\nfor frame_idx in range(60):\n    img = np.zeros((height, width, 3), dtype=np.uint8)\n    x = np.linspace(0, 2*np.pi, width)\n    \n    # Create a smooth wav",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > Traceback (most recent call last):\n  File \"/usr/local/lib/python3.10/dist-packages/PIL/Image.py\", line 2668, in save\n    format = EXTENSION[ext]\nKeyError: '.mp4'\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"<stdin>\", line 26, in <module>\n  File \"/usr/local/lib/py",
+        "recovery_action": "python3 << 'PYEOF'\nimport numpy as np\nfrom PIL import Image\nimport subprocess\nimport os\n\n# Generate 60 frames of a 1D cross-section video\nwidth = 200\nheight = 100\ntmpdir = '/tmp/frames'\nos.makedirs(tmpdir, exist_ok=True)\n\nfor frame_idx in range(60):\n    img = np.zeros((height, width, 3), dtype=np.ui",
+        "recovery_shape": "python3 << 'PYEOF' import numpy as np from PIL import Image import subprocess import os # Generate <n> frames of a 1D cr",
+        "assistant_turns_to_success": 7,
+        "source_row": 156
+      }
+    ],
+    "syntax_error": [
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"\nimport mmap\nimport os\n\nfilepath = '/home/user/storage_pool/bin/legacy_worker'\nwith open(filepath, 'rb') as f:\n    f.seek(0, 2)\n    file_size = f.tell()\n    print(f'File size: {file_size}')\n    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:\n        print(f'First 4 bytes: {",
+        "observation": "> > > > > > > > > > > > > >   File \"<string>\", line 12\n    print(f'Is ELF: {mm[0:4] == b\"\\x7fELF\"}')\n                                            ^\nSyntaxError: f-string expression part cannot include a backslash\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport mmap\nimport os\n\nfilepath = '/home/user/storage_pool/bin/legacy_worker'\nwith open(filepath, 'rb') as f:\n    f.seek(0, 2)\n    file_size = f.tell()\n    print(f'File size: {file_size}')\n    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:\n        print(f'First 4 bytes: {",
+        "recovery_shape": "python3 -c \" import mmap import os filepath = '<path> with open(filepath, 'rb') as f: f.seek(<n>, <n>) file_size = f.tel",
+        "assistant_turns_to_success": 9,
+        "source_row": 27
+      },
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"\nimport mmap\nimport os\n\nbin_dir = '/home/user/storage_pool/bin'\nfor fname in os.listdir(bin_dir):\n    if '.' in fname:\n        continue\n    filepath = os.path.join(bin_dir, fname)\n    if not os.path.isfile(filepath):\n        continue\n    with open(filepath, 'rb') as f:\n        header = f",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > >   File \"<string>\", line 14\n    print(f'{fname}: header={header}, is_elf={header == b\"\\x7fELF\"}')\n                                                                    ^\nSyntaxError: f-string expression part cannot include a backslash\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport mmap\nimport os\n\nbin_dir = '/home/user/storage_pool/bin'\nelf_magic = b'\\x7fELF'\nfor fname in os.listdir(bin_dir):\n    if '.' in fname:\n        continue\n    filepath = os.path.join(bin_dir, fname)\n    if not os.path.isfile(filepath):\n        continue\n    with open(filepath, 'rb') a",
+        "recovery_shape": "python3 -c \" import mmap import os bin_dir = '<path> elf_magic = b'\\x7fELF' for fname in os.listdir(bin_dir): if '.' in ",
+        "assistant_turns_to_success": 10,
+        "source_row": 28
+      },
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"\nimport mmap, os\nfor f in ['legacy_worker', 'active_worker', 'old_daemon', 'script_runner']:\n    path = f'/home/user/storage_pool/bin/{f}'\n    with open(path, 'rb') as fh:\n        magic = fh.read(4)\n        print(f'{f}: first4={magic}, is_elf={magic == b\\\"\\\\x7fELF\\\"}')\n\"",
+        "observation": "> > > > > > >   File \"<string>\", line 7\n    print(f'{f}: first4={magic}, is_elf={magic == b\"\\x7fELF\"}')\n                                                              ^\nSyntaxError: f-string expression part cannot include a backslash\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport mmap, os\nelf_magic = b'\\x7fELF'\nfor f in ['legacy_worker', 'active_worker', 'old_daemon', 'script_runner']:\n    path = f'/home/user/storage_pool/bin/{f}'\n    with open(path, 'rb') as fh:\n        magic = fh.read(4)\n        print(f'{f}: first4={magic}, is_elf={magic == elf_magic}')",
+        "recovery_shape": "python3 -c \" import mmap, os elf_magic = b'\\x7fELF' for f in ['legacy_worker', 'active_worker', 'old_daemon', 'script_ru",
+        "assistant_turns_to_success": 6,
+        "source_row": 29
+      },
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"\nimport mmap\nfilepath = '/home/user/storage_pool/bin/legacy_worker'\nwith open(filepath, 'rb') as f:\n    magic = f.read(4)\n    print(f'Magic: {magic}')\n    print(f'Is ELF: {magic == b\\\"\\\\x7fELF\\\"}')\n    f.seek(0)\n    try:\n        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m",
+        "observation": "> > > > > > > > > > > > > >   File \"<string>\", line 7\n    print(f'Is ELF: {magic == b\"\\x7fELF\"}')\n                                          ^\nSyntaxError: f-string expression part cannot include a backslash\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport mmap\nfilepath = '/home/user/storage_pool/bin/legacy_worker'\nelf_magic = b'\\x7fELF'\nwith open(filepath, 'rb') as f:\n    magic = f.read(4)\n    print('Magic:', magic)\n    print('Is ELF:', magic == elf_magic)\n    f.seek(0)\n    try:\n        with mmap.mmap(f.fileno(), 0, access=mmap.AC",
+        "recovery_shape": "python3 -c \" import mmap filepath = '<path> elf_magic = b'\\x7fELF' with open(filepath, 'rb') as f: magic = f.read(<n>) p",
+        "assistant_turns_to_success": 8,
+        "source_row": 30
+      },
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"import sqlite3; conn = sqlite3.connect('/home/user/translations.db'); cursor = conn.cursor(); cursor.execute('SELECT * FROM strings'); print('Columns:', [desc[0] for desc in cursor.description]); rows = cursor.fetchall(); print('Number of rows:', len(rows)); for row in rows[:5]: print(ro",
+        "observation": "  File \"<string>\", line 1\n    import sqlite3; conn = sqlite3.connect('/home/user/translations.db'); cursor = conn.cursor(); cursor.execute('SELECT * FROM strings'); print('Columns:', [desc[0] for desc in cursor.description]); rows = cursor.fetchall(); print('Number of rows:', len(rows)); for row in rows[:5]: print(row); conn.close()\n                                                                 ",
+        "recovery_action": "python3 << 'EOF'\nimport sqlite3\nconn = sqlite3.connect('/home/user/translations.db')\ncursor = conn.cursor()\ncursor.execute('SELECT * FROM strings')\nprint('Columns:', [desc[0] for desc in cursor.description])\nrows = cursor.fetchall()\nprint('Number of rows:', len(rows))\nfor row in rows[:5]:\n    print(",
+        "recovery_shape": "python3 << 'EOF' import sqlite3 conn = sqlite3.connect('<path> cursor = conn.cursor() cursor.execute('SELECT * FROM stri",
+        "assistant_turns_to_success": 4,
+        "source_row": 359
+      },
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"\nimport os\nfor f in ['good_bin1', 'good_bin2', 'fake_bin', 'readme.txt']:\n    path = f'/tmp/test_extract/{f}'\n    with open(path, 'rb') as fh:\n        data = fh.read()\n    print(f'{f}: first 16 bytes = {data[:16].hex()}, starts with ELF: {data[:4] == b\\\"\\\\x7fELF\\\"}')\n\"",
+        "observation": "> > > > > > >   File \"<string>\", line 7\n    print(f'{f}: first 16 bytes = {data[:16].hex()}, starts with ELF: {data[:4] == b\"\\x7fELF\"}')\n                                                                                               ^\nSyntaxError: f-string expression part cannot include a backslash\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport os\nelf_magic = b'\\x7fELF'\nfor f in ['good_bin1', 'good_bin2', 'fake_bin', 'readme.txt']:\n    path = '/tmp/test_extract/' + f\n    with open(path, 'rb') as fh:\n        data = fh.read()\n    is_elf = data[:4] == elf_magic\n    print(f'{f}: first 16 bytes = {data[:16].hex()}, starts wi",
+        "recovery_shape": "python3 -c \" import os elf_magic = b'\\x7fELF' for f in ['good_bin1', 'good_bin2', 'fake_bin', 'readme.txt']: path = '<pa",
+        "assistant_turns_to_success": 6,
+        "source_row": 539
+      },
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"\nimport os\n\n# Check inodes for hard links\nfor name in ['good_bin1', 'good_bin2']:\n    safe_path = f'/home/user/safe_extract/{name}'\n    safe_inode = os.stat(safe_path).st_ino\n    # Find matching repo file\n    for repo_file in os.listdir('/home/user/repo'):\n        repo_path = f'/home/use",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > >   File \"<string>\", line 19\n    print(f'{name} header: {header.hex()} (ELF={header == b\"\\x7fELF\"})')\n                                                                       ^\nSyntaxError: f-string expression part cannot include a backslash\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport os\n\nELF_MAGIC = b'\\x7fELF'\n\n# Check inodes for hard links\nfor name in ['good_bin1', 'good_bin2']:\n    safe_path = f'/home/user/safe_extract/{name}'\n    safe_inode = os.stat(safe_path).st_ino\n    for repo_file in os.listdir('/home/user/repo'):\n        repo_path = f'/home/user/repo",
+        "recovery_shape": "python3 -c \" import os ELF_MAGIC = b'\\x7fELF' # Check inodes for hard links for name in ['good_bin1', 'good_bin2']: safe",
+        "assistant_turns_to_success": 2,
+        "source_row": 541
+      },
+      {
+        "error_class": "syntax_error",
+        "failed_action": "python3 -c \"\nimport os\n\n# Verify ELF headers\nfor f in ['good_bin1', 'good_bin2']:\n    path = f'/home/user/safe_extract/{f}'\n    with open(path, 'rb') as fh:\n        data = fh.read(4)\n        print(f'{f}: starts with {data} -> ELF: {data == b\\\"\\\\x7fELF\\\"} ')\n\n# Verify readme content\nwith open('/home/",
+        "observation": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > >   File \"<string>\", line 9\n    print(f'{f}: starts with {data} -> ELF: {data == b\"\\x7fELF\"} ')\n                                                                  ^\nSyntaxError: f-string expression part cannot include a backslash\n\n\n(exit_code=1)",
+        "recovery_action": "python3 -c \"\nimport os, hashlib\n\n# Verify ELF headers\nelf_magic = b'\\x7fELF'\nfor f in ['good_bin1', 'good_bin2']:\n    path = '/home/user/safe_extract/' + f\n    with open(path, 'rb') as fh:\n        data = fh.read(4)\n        is_elf = data == elf_magic\n        print(f'{f}: starts with {data} -> ELF: {i",
+        "recovery_shape": "python3 -c \" import os, hashlib # Verify ELF headers elf_magic = b'\\x7fELF' for f in ['good_bin1', 'good_bin2']: path = ",
+        "assistant_turns_to_success": 2,
+        "source_row": 542
+      }
+    ],
+    "test_assertion_failed": [
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cat /home/user/analyze.c",
+        "observation": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n\n#define MAX_NODES 1000\n#define MAX_EDGES 5000\n\ntypedef struct {\n    int u, v;\n} Edge;\n\nint main(void) {\n    // Step 1: Execute the simulation\n    FILE *fp = popen(\"/app/random_walk_sim 42 1000000\", \"r\");\n    if (!fp) {\n        fprintf(stderr, \"Failed to run simulation\\n\");\n        return 1;\n    }\n\n    // Data structures\n",
+        "recovery_action": "echo \"=== Checking all required files ===\" && ls -la /home/user/analyze /home/user/analyze.c /home/user/tvd_result.txt /app/random_walk_sim && echo \"=== Content of tvd_result.txt ===\" && cat /home/user/tvd_result.txt && echo \"=== Verification complete ===\"",
+        "recovery_shape": "echo \"=== Checking all required files ===\" && ls -la <path> <path> <path> <path> && echo \"=== Content of tvd_result.txt ",
+        "assistant_turns_to_success": 2,
+        "source_row": 48
+      },
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cat /tmp/agent_env_bza6y772/_writable_home_user/analyze.c",
+        "observation": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n\n#define MAX_NODES 10000\n\nint main(void) {\n    char command[] = \"/app/random_walk_sim 42 1000000\";\n    FILE *fp;\n    char line[256];\n    \n    // Arrays to store graph and visit data\n    int *degree = calloc(MAX_NODES, sizeof(int));\n    long long *visits = calloc(MAX_NODES, sizeof(long long));\n    int *edge_u = calloc(MAX_",
+        "recovery_action": "ls -la /app/random_walk_sim 2>/dev/null; ls -la /app/ 2>/dev/null",
+        "recovery_shape": "ls -la <path> <n>><path> ls -la <path> <n>><path>",
+        "assistant_turns_to_success": 14,
+        "source_row": 49
+      },
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cat /home/user/analyze.c",
+        "observation": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n\n#define MAX_NODES 10000\n#define MAX_EDGES 100000\n\nint main(void) {\n    char command[] = \"/app/random_walk_sim 42 1000000\";\n    FILE *fp;\n    char line[256];\n\n    // Arrays to store graph and visit data\n    int *degree = calloc(MAX_NODES, sizeof(int));\n    long long *visits = calloc(MAX_NODES, sizeof(long long));\n    int ",
+        "recovery_action": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        "recovery_shape": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        "assistant_turns_to_success": 1,
+        "source_row": 49
+      },
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cd /tmp && python3 /home/user/operator.py 2>&1",
+        "observation": "============================================================\nKubernetes Manifest Operator\n============================================================\n\n[Step 1] Creating backup...\nCreating backup of /home/user/k8s/active/...\nBackup created at /home/user/k8s_backup.tar.gz\n\n[Step 2] Setting up port forwarding...\nPort forwarding already active on 9090\n\n[Step 3] Applying incoming manifests...\nFound 2 ",
+        "recovery_action": "cd /tmp && echo -e \"K8s0p3r@t0r\\ny\" | python3 /home/user/k8s_apply_cli.py /home/user/k8s/incoming/config.yaml 2>&1",
+        "recovery_shape": "cd <path> && echo -e \"K8s0p3r@t0r\\ny\" | python3 <path> <path> <n>>&<n>",
+        "assistant_turns_to_success": 11,
+        "source_row": 67
+      },
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cd /home/user/pipeline && cat processor/src/main.rs",
+        "observation": "use std::fs;\nuse std::path::Path;\n\nfn main() {\n    let manifest_content = fs::read_to_string(\"../manifest.json\")\n        .expect(\"Failed to read manifest.json\");\n\n    // Simple parsing, assuming valid JSON array of strings for the sake of the task\n    let files: Vec<String> = manifest_content\n        .trim()\n        .trim_matches(|c| c == '[' || c == ']')\n        .split(',')\n        .map(|s| s.tri",
+        "recovery_action": "cd /home/user/pipeline && git bisect start && git bisect bad HEAD && git bisect good 971dc23",
+        "recovery_shape": "cd <path> && git bisect start && git bisect bad HEAD && git bisect good 971dc23",
+        "assistant_turns_to_success": 13,
+        "source_row": 92
+      },
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cd /home/user/pipeline && cat processor/src/main.rs",
+        "observation": "use std::fs;\nuse std::path::Path;\n\nfn main() {\n    let manifest_content = fs::read_to_string(\"../manifest.json\")\n        .expect(\"Failed to read manifest.json\");\n\n    // Simple parsing, assuming valid JSON array of strings for the sake of the task\n    let files: Vec<String> = manifest_content\n        .trim()\n        .trim_matches(|c| c == '[' || c == ']')\n        .split(',')\n        .map(|s| s.tri",
+        "recovery_action": "cd /home/user/pipeline && python3 generate.py && cargo run --manifest-path processor/Cargo.toml 2>&1",
+        "recovery_shape": "cd <path> && python3 generate.py && cargo run --manifest-path processor<path> <n>>&<n>",
+        "assistant_turns_to_success": 19,
+        "source_row": 93
+      },
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cat /home/user/pipeline/processor/src/main.rs",
+        "observation": "use std::fs;\nuse std::path::Path;\n\nfn main() {\n    let manifest_content = fs::read_to_string(\"../manifest.json\")\n        .expect(\"Failed to read manifest.json\");\n\n    // Simple parsing, assuming valid JSON array of strings for the sake of the task\n    let files: Vec<String> = manifest_content\n        .trim()\n        .trim_matches(|c| c == '[' || c == ']')\n        .split(',')\n        .map(|s| s.tri",
+        "recovery_action": "cd /home/user/pipeline && git show 971dc23:generate.py",
+        "recovery_shape": "cd <path> && git show 971dc23:generate.py",
+        "assistant_turns_to_success": 18,
+        "source_row": 94
+      },
+      {
+        "error_class": "test_assertion_failed",
+        "failed_action": "cd /home/user/pipeline && cat processor/src/main.rs",
+        "observation": "use std::fs;\nuse std::path::Path;\n\nfn main() {\n    let manifest_content = fs::read_to_string(\"../manifest.json\")\n        .expect(\"Failed to read manifest.json\");\n\n    // Simple parsing, assuming valid JSON array of strings for the sake of the task\n    let files: Vec<String> = manifest_content\n        .trim()\n        .trim_matches(|c| c == '[' || c == ']')\n        .split(',')\n        .map(|s| s.tri",
+        "recovery_action": "cd /home/user/pipeline && git log --format=\"%H %s\"",
+        "recovery_shape": "cd <path> && git log --format=\"%H %s\"",
+        "assistant_turns_to_success": 14,
+        "source_row": 96
+      }
+    ],
+    "timeout": [
+      {
+        "error_class": "timeout",
+        "failed_action": "find / -name \"random_walk_sim\" 2>/dev/null",
+        "observation": "Command timed out. Partial output:\n\n\n(exit_code=1)",
+        "recovery_action": "ls -la /app 2>&1; echo \"---\"; ls -la /home/user/ 2>&1",
+        "recovery_shape": "ls -la <path> <n>>&<n>; echo \"---\"; ls -la <path> <n>>&<n>",
+        "assistant_turns_to_success": 12,
+        "source_row": 46
+      },
+      {
+        "error_class": "timeout",
+        "failed_action": "find / -name \"random_walk_sim\" 2>/dev/null",
+        "observation": "Command timed out. Partial output:\n\n\n(exit_code=1)",
+        "recovery_action": "mkdir -p /app",
+        "recovery_shape": "mkdir -p <path>",
+        "assistant_turns_to_success": 11,
+        "source_row": 47
+      },
+      {
+        "error_class": "timeout",
+        "failed_action": "find / -name \"random_walk*\" 2>/dev/null; find / -name \"*.c\" -path \"*/app/*\" 2>/dev/null; ls -la /",
+        "observation": "Command timed out. Partial output:\n\n\n(exit_code=1)",
+        "recovery_action": "ls -la /app 2>/dev/null; ls -la /opt 2>/dev/null; which gcc 2>/dev/null; which cc 2>/dev/null",
+        "recovery_shape": "ls -la <path> <n>><path> ls -la <path> <n>><path> which gcc <n>><path> which cc <n>><path>",
+        "assistant_turns_to_success": 16,
+        "source_row": 48
+      },
+      {
+        "error_class": "timeout",
+        "failed_action": "ls -la /app/ 2>/dev/null; which random_walk_sim 2>/dev/null; find / -name \"random_walk_sim\" 2>/dev/null | head -5",
+        "observation": "Command timed out. Partial output:\n\n\n(exit_code=1)",
+        "recovery_action": "ls -la /app/ 2>/dev/null; ls -la /home/user/ 2>/dev/null",
+        "recovery_shape": "ls -la <path> <n>><path> ls -la <path> <n>><path>",
+        "assistant_turns_to_success": 23,
+        "source_row": 49
+      },
+      {
+        "error_class": "timeout",
+        "failed_action": "find / -name \"random_walk_sim\" 2>/dev/null",
+        "observation": "Command timed out. Partial output:\n\n\n(exit_code=1)",
+        "recovery_action": "ls -la /app/ 2>/dev/null || echo \"No /app directory\"",
+        "recovery_shape": "ls -la <path> <n>><path> || echo \"No <path> directory\"",
+        "assistant_turns_to_success": 12,
+        "source_row": 51
+      },
+      {
+        "error_class": "timeout",
+        "failed_action": "cat /home/user/live_logs/app/db.log",
+        "observation": "2023-11-01 08:15:30 | ERROR | Connection timeout\n2023-11-01 08:16:00 | WARN | Retrying connection\n\n\n(exit_code=0)",
+        "recovery_action": "cat /home/user/live_logs/system.log && echo \"---\" && cat /home/user/live_logs/web_ui/frontend.log",
+        "recovery_shape": "cat <path> && echo \"---\" && cat <path>",
+        "assistant_turns_to_success": 8,
+        "source_row": 60
+      },
+      {
+        "error_class": "timeout",
+        "failed_action": "echo \"=== system.jsonl ===\" && cat /home/user/archive_mount/system.jsonl && echo \"=== app/db.jsonl ===\" && cat /home/user/archive_mount/app/db.jsonl && echo \"=== web_ui/frontend.jsonl ===\" && cat /home/user/archive_mount/web_ui/frontend.jsonl",
+        "observation": "=== system.jsonl ===\n{\"time\": \"2023-11-01 00:00:01\", \"lvl\": \"DEBUG\", \"msg\": \"Cron job started\"}\n=== app/db.jsonl ===\n{\"time\": \"2023-11-01 08:15:30\", \"lvl\": \"ERROR\", \"msg\": \"Connection timeout\"}\n{\"time\": \"2023-11-01 08:16:00\", \"lvl\": \"WARN\", \"msg\": \"Retrying connection\"}\n=== web_ui/frontend.jsonl ===\n{\"time\": \"2023-11-01 09:00:00\", \"lvl\": \"INFO\", \"msg\": \"User login\"}\n\n\n(exit_code=0)",
+        "recovery_action": "echo \"=== Original files still exist ===\" && ls -la /home/user/live_logs/app/db.log /home/user/live_logs/system.log /home/user/live_logs/web_ui/frontend.log && echo \"=== No .tmp files ===\" && find /home/user/archive_mount -name \"*.tmp\" 2>/dev/null | wc -l && echo \"=== Directory structure ===\" && fin",
+        "recovery_shape": "echo \"=== Original files still exist ===\" && ls -la <path> <path> <path> && echo \"=== No .tmp files ===\" && find <path> ",
+        "assistant_turns_to_success": 3,
+        "source_row": 60
+      },
+      {
+        "error_class": "timeout",
+        "failed_action": "find /home/user/archive_mount -type f && echo \"---\" && cat /home/user/archive_mount/system.jsonl && echo \"---\" && cat /home/user/archive_mount/app/db.jsonl && echo \"---\" && cat /home/user/archive_mount/web_ui/frontend.jsonl",
+        "observation": "/home/user/archive_mount/system.jsonl\n/home/user/archive_mount/app/db.jsonl\n/home/user/archive_mount/web_ui/frontend.jsonl\n---\n{\"time\": \"2023-11-01 00:00:01\", \"lvl\": \"DEBUG\", \"msg\": \"Cron job started\"}\n---\n{\"time\": \"2023-11-01 08:15:30\", \"lvl\": \"ERROR\", \"msg\": \"Connection timeout\"}\n{\"time\": \"2023-11-01 08:16:00\", \"lvl\": \"WARN\", \"msg\": \"Retrying connection\"}\n---\n{\"time\": \"2023-11-01 09:00:00\", \"lvl",
+        "recovery_action": "cat /home/user/done.txt && echo \"\" && find /home/user/archive_mount -name \"*.tmp\" -type f",
+        "recovery_shape": "cat <path> && echo \"\" && find <path> -name \"*.tmp\" -type f",
+        "assistant_turns_to_success": 2,
+        "source_row": 61
+      }
+    ]
+  }
+}

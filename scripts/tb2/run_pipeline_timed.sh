@@ -25,7 +25,12 @@ set -euo pipefail
 # A failed stage stops the pipeline immediately; timings.json still records
 # every stage that ran (including the failed one) so partial runs are not lost.
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Resolve scripts/ whether this file lives in scripts/ or scripts/tb2/
+_HX_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+while [[ ! -f "$_HX_SCRIPTS/_common.sh" && "$_HX_SCRIPTS" != "/" ]]; do
+  _HX_SCRIPTS="$(dirname "$_HX_SCRIPTS")"
+done
+ROOT="$(cd "$_HX_SCRIPTS/.." && pwd)"
 MODEL_SIZE="${1:-${MODEL_SIZE:-4b}}"
 case "$MODEL_SIZE" in 4b|9b) ;; *) echo "usage: run_pipeline_timed.sh {4b|9b}" >&2; exit 2 ;; esac
 
@@ -52,7 +57,7 @@ mkdir -p "$RUN_ROOT" "$LOG_ROOT"
 # if the evolve stage's meta-agent key isn't actually resolvable. Mirrors
 # the exact fallback evolve.sh uses (OPENAI_API_KEY, else SFG_API_KEY).
 _key_check="$(
-  source "$_HX_SCRIPTS/_common.sh" 2>/dev/null || source "$ROOT/scripts/_common.sh" >/dev/null
+  source "$_HX_SCRIPTS/_common.sh" >/dev/null
   printf '%s' "${OPENAI_API_KEY:-${SFG_API_KEY:-}}"
 )"
 if [[ -z "$_key_check" ]]; then

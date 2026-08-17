@@ -3,9 +3,13 @@
 # Invoked by h200_rl_smoke.sbatch on a GPU node.
 set -Eeuo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+_HX_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+while [[ ! -f "$_HX_SCRIPTS/_common.sh" && "$_HX_SCRIPTS" != "/" ]]; do
+  _HX_SCRIPTS="$(dirname "$_HX_SCRIPTS")"
+done
+ROOT="$(cd "$_HX_SCRIPTS/.." && pwd)"
 cd "$ROOT"
-source "$_HX_SCRIPTS/_common.sh" 2>/dev/null || source "$ROOT/scripts/_common.sh"
+source "$_HX_SCRIPTS/_common.sh"
 
 PY="${RL_PYTHON:-${SFT_PYTHON:-${PYTHON_BIN:-$(python_bin)}}}"
 export PYTHON_BIN="$PY"

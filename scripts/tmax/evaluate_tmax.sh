@@ -4,37 +4,18 @@
 # Default task set = 102 tasks covered by qwen35_9b_tmax_only200 (train-on-test).
 #
 # Usage:
-#   # base 9B on all 102 tasks
-#   MODEL_SIZE=9b JOB_NAME=tmax-base9b \
-#     bash scripts/evaluate_tmax.sh
-#
-#   # SFT adapter
-#   MODEL_SIZE=9b EVAL_SFT=1 \
-#     LORA_PATH=$PWD/outputs/sft/qwen35_9b_tmax_only200 \
-#     LORA_NAME=qwen35-9b-tmax200 \
-#     JOB_NAME=tmax-sft200 \
-#     bash scripts/evaluate_tmax.sh
-#
-#   # smoke: 2 tasks, 1 GPU
-#   MODEL_SIZE=9b GPU_POOL=0 LIMIT=2 JOB_NAME=tmax-smoke \
-#     bash scripts/evaluate_tmax.sh
+#   MODEL_SIZE=9b JOB_NAME=tmax-base9b bash scripts/tmax/evaluate_tmax.sh
+#   MODEL_SIZE=9b EVAL_SFT=1 LORA_PATH=... LORA_NAME=... JOB_NAME=tmax-sft \
+#     bash scripts/tmax/evaluate_tmax.sh
 #
 # Env:
-#   TASKS_JSON     default recipe/tb2_evolver/tasks_tmax_only200.json
-#   ENVS_JSONL     default .../qwen35_9b_tmax_only200/eval_task_set_with_envs.jsonl
-#   GPU_POOL       if set, starts vLLM pool via with_server_pool.sh
-#   TMAX_CONCURRENT  parallel docker+agent workers (default 1; try 2)
-#   TMAX_MAX_STEPS   agent steps (default 80)
-#   LIMIT          only first N tasks
-#   RESUME=1       skip tasks that already have result.json
-#   SKIP_VLLM=1    do not start servers; use existing TB2_API_BASE / endpoints
+#   TASKS_JSON / ENVS_JSONL / GPU_POOL / TMAX_CONCURRENT / TMAX_MAX_STEPS /
+#   LIMIT / RESUME / SKIP_VLLM / HARNESS_CONFIG / MODEL_OVERRIDE
 
 set -euo pipefail
 
-# Capture BEFORE sourcing _common.sh: that file defaults TASKS_JSON to the TB2
-# sample16 list, which would otherwise win over this script's tmax default and
-# then fail with "task ids missing from eval_task_set_with_envs.jsonl".
-# Resolve scripts/ whether this file lives in scripts/, scripts/tb2/, or scripts/tmax/
+# Capture BEFORE sourcing _common.sh: that file defaults TASKS_JSON to a TB2
+# list, which would otherwise override this script's tmax defaults.
 _HX_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 while [[ ! -f "$_HX_SCRIPTS/_common.sh" && "$_HX_SCRIPTS" != "/" ]]; do
   _HX_SCRIPTS="$(dirname "$_HX_SCRIPTS")"
@@ -45,11 +26,6 @@ _TMAX_DEFAULT_ENVS="$_ROOT_EARLY/recipe/tb2_sft/data/qwen35_9b_tmax_only200/eval
 _CALLER_TASKS_JSON="${TMAX_TASKS_JSON:-${TASKS_JSON:-}}"
 _CALLER_ENVS_JSONL="${ENVS_JSONL:-}"
 
-# Resolve scripts/ whether this file lives in scripts/, scripts/tb2/, or scripts/tmax/
-_HX_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-while [[ ! -f "$_HX_SCRIPTS/_common.sh" && "$_HX_SCRIPTS" != "/" ]]; do
-  _HX_SCRIPTS="$(dirname "$_HX_SCRIPTS")"
-done
 source "$_HX_SCRIPTS/_common.sh"
 
 export TASKS_JSON="${_CALLER_TASKS_JSON:-$_TMAX_DEFAULT_TASKS}"
@@ -58,7 +34,6 @@ JOB_NAME="${JOB_NAME:-tmax-eval-${MODEL_TAG}-${MODEL_SIZE}-$(date +%Y%m%d-%H%M%S
 export TB2_TEMPERATURE="${TB2_TEMPERATURE:-0}"
 export TMAX_MAX_STEPS="${TMAX_MAX_STEPS:-80}"
 export TMAX_CONCURRENT="${TMAX_CONCURRENT:-1}"
-# Cap per-call generation so a length-loop cannot stall a round for hours.
 export TMAX_MAX_TOKENS="${TMAX_MAX_TOKENS:-4096}"
 
 if [[ "${EVAL_SFT:-0}" == "1" ]]; then
@@ -74,8 +49,6 @@ extra=()
 [[ "${LIMIT:-0}" != "0" ]] && extra+=(--limit "$LIMIT")
 [[ "${RESUME:-0}" == "1" ]] && extra+=(--resume)
 [[ -n "${TASK_ID:-}" ]] && extra+=(--task-id "$TASK_ID")
-# Tmax agent resolves sibling system_prompt.txt next to this YAML (processors
-# in the YAML are currently NOT applied by recipe/tmax_eval/agent_loop.py).
 if [[ -n "${HARNESS_CONFIG:-}" ]]; then
   require_file "$HARNESS_CONFIG"
   extra+=(--harness-config "$HARNESS_CONFIG")
@@ -109,7 +82,6 @@ if [[ "${SKIP_VLLM:-0}" == "1" ]]; then
 elif [[ -n "${GPU_POOL:-}" ]]; then
   bash "$ROOT/scripts/with_server_pool.sh" -- "${cmd[@]}"
 else
-  # Single-GPU path via with_server.sh if present
   if [[ -f "$ROOT/scripts/with_server.sh" ]]; then
     bash "$ROOT/scripts/with_server.sh" -- "${cmd[@]}"
   else
@@ -118,14 +90,17 @@ else
   fi
 fi
 
+SUMMARY="$ROOT/.benchmarks/tmax/$JOB_NAME/summary.json"
 echo
-echo "Results: $ROOT/.benchmarks/tmax/$JOB_NAME/summary.json"
-column -t <("$PY" - <<PY
-import json
+echo "Results: $SUMMARY"
+if [[ -f "$SUMMARY" ]]; then
+  # Quoted heredoc — no bash quote nesting with Python f-strings.
+  SUMMARY_PATH="$SUMMARY" "$PY" - <<'PY' | column -t || true
+import json, os
 from pathlib import Path
-s=json.loads(Path("$ROOT/.benchmarks/tmax/$JOB_NAME/summary.json").read_text())
+s = json.loads(Path(os.environ["SUMMARY_PATH"]).read_text())
 print(f"passed\t{s['n_passed']}/{s['n_tasks']}\t{s['pass_rate']:.3f}")
-for d,v in s.get("by_domain",{}).items():
+for d, v in s.get("by_domain", {}).items():
     print(f"{d}\t{v['passed']}/{v['total']}")
 PY
-) || true
+fi

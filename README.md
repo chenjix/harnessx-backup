@@ -1,81 +1,58 @@
-# HarnessX × Tmax coevolve (+ SFT + GRPO)
+# HarnessX — TB2 + Tmax coevolve
 
-Pipeline for **Qwen3.5-9B** on Tmax:
+Two closed loops share one codebase:
 
-```
-evolve(50) → corpus → SFT(LoRA) → [optional GRPO/DPPO on ≤100] → holdout(102) → ratchet
-```
+| Loop | Scripts | Eval | Train extras |
+|------|---------|------|--------------|
+| **Tmax** | `scripts/tmax/` | Docker Tmax (`recipe/tmax_eval`) | LoRA SFT + optional open-instruct GRPO |
+| **TB2** | `scripts/tb2/` | Harbor TB2 | LoRA SFT + optional slime replay-GRPO |
 
-Holdout-102 is **eval-only** (never used for SFT corpus filter targets beyond exclusion, never for RL train).
+See **[docs/PIPELINES.md](docs/PIPELINES.md)** for the split and launch commands.
+Data notes: **[docs/DATA.md](docs/DATA.md)**.
 
 ## Layout
 
 ```text
 harnessx/                 agent runtime + meta-harness
-benchmarks/               TB2 Harbor helpers still used by processors
-configs/                  baseline_tmax_harness.yaml + prompts
-recipe/tb2_evolver/       gated harness evolve (Tmax tasks)
+benchmarks/               TB2 Harbor adapter (still used by some processors)
+configs/
+  baseline_harness.yaml       # TB2
+  baseline_tmax_harness.yaml  # Tmax
+recipe/tb2_evolver/       gated harness evolve (both loops)
+  tasks/tb2/  tasks/tmax/
 recipe/tb2_sft/           SFT / RL dataset builders + LoRA trainer
-recipe/tmax_eval/         Docker Tmax eval (evaluate_tmax)
-tmax/training/open-instruct/   official-style grpo_fast / DPPO
-scripts/                  launchers
-scripts/slurm/            sbatch wrappers
-docs/                     data setup notes
+recipe/tmax_eval/         Tmax Docker eval
+recipe/slime/             TB2 offline replay-GRPO
+tmax/training/open-instruct/   Tmax online GRPO/DPPO
+scripts/{tb2,tmax,slurm/tmax}/
 ```
-
-## Splits
-
-| Split | Tasks | Path |
-|-------|------:|------|
-| Evolve | 50 | `recipe/tb2_evolver/tasks_tmax_evolve50_list.json` + `recipe/tb2_sft/data/tmax_evolve50/` (local) |
-| Holdout | 102 | `recipe/tb2_evolver/tasks_tmax_only200.json` |
-| RL train | ≤100 | taxonomy parquet → `build_tmax_rl_dataset --from-taxonomy` (excludes holdout; prefers evolve-50) |
-
-See `docs/DATA.md` for taxonomy / HF download.
 
 ## Quick start
 
 ```bash
-cd /path/to/harnessx-backup
-cp .env.example .env   # secrets stay local; never commit
-# install deps into your venv (vLLM, peft, ray for RL, …)
+cp .env.example .env   # never commit
 bash scripts/doctor.sh
 ```
 
-### Coevolve (8× H200)
+**Tmax coevolve (8×H200):**
 
 ```bash
-sbatch scripts/slurm/h200_tmax_coevolve.sbatch
-# with online GRPO after each SFT attempt:
-sbatch --export=ALL,ENABLE_RL=1,RL_N_TASKS=100,RL_EPISODES=512,REPLICATE=2 \
-  scripts/slurm/h200_tmax_coevolve.sbatch
+sbatch scripts/slurm/tmax/h200_tmax_coevolve.sbatch
 ```
 
-### RL smoke (2× H200)
+**TB2 coevolve:**
 
 ```bash
-sbatch scripts/slurm/h200_rl_smoke.sbatch
+REPLICATE=1 bash scripts/tb2/run_loop_step3.sh
 ```
 
-### Key scripts
+**Tmax RL smoke:**
 
-| Script | Role |
-|--------|------|
-| `scripts/run_loop_tmax_coevolve.sh` | outer harness ↔ SFT (+ optional RL) loop |
-| `scripts/evolve_tmax.sh` | evolve-50 |
-| `scripts/evaluate_tmax.sh` | holdout-102 |
-| `scripts/train_sft.sh` | LoRA SFT |
-| `scripts/train_rl_grpo.sh` | open-instruct `grpo_fast` + Vanillux sandbox |
-| `scripts/merge_sft_adapter.sh` | LoRA → full weights for RL init |
-| `scripts/smoke_rl_grpo.sh` | tiny end-to-end RL check |
+```bash
+sbatch scripts/slurm/tmax/h200_rl_smoke.sbatch
+```
 
-More RL notes: `recipe/tb2_sft/RL_AFTER_SFT.md`.
+## Not in git
 
-## Agent stacks
-
-- **Evolve / holdout / SFT trajs**: HarnessX + vLLM
-- **Online RL rollouts**: `swerl_vanillux_sandbox` (official Tmax-style); not bit-identical to HarnessX
-
-## What is not in git
-
-`outputs/`, `logs/`, `.benchmarks/`, built `recipe/tb2_sft/data/`, weights, parquet, `.env`, and heavy `tmax/evaluation_assets/` (local only).
+`outputs/`, `logs/`, `.benchmarks/`, built `recipe/tb2_sft/data/`, weights,
+parquet, `.env`, `tmax/evaluation_assets/`.

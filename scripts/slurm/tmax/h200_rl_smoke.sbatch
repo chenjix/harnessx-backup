@@ -7,11 +7,11 @@
 #   3) run a tiny grpo_fast job (few episodes, short context)
 #
 # Submit:
-#   sbatch /fsx/home/jixuan.chen/h200_rl_smoke.sbatch
+#   sbatch scripts/slurm/tmax/h200_rl_smoke.sbatch
 #
 # Slightly larger smoke (still short):
 #   sbatch --export=ALL,RL_N_TASKS=16,RL_EPISODES=32 \
-#     /fsx/home/jixuan.chen/h200_rl_smoke.sbatch
+#     scripts/slurm/tmax/h200_rl_smoke.sbatch
 #
 # Full 100-task dataset build only (no train) — not this script; use:
 #   RL_N_TASKS=100 python -m recipe.tb2_sft.src.build_tmax_rl_dataset --from-taxonomy --name tmax_rl_train100
@@ -79,4 +79,4 @@ echo "  RL_GPUS              : $RL_GPUS"
 echo "  ADAPTER_DIR          : $ADAPTER_DIR"
 echo "  RL_OUTPUT_DIR        : $RL_OUTPUT_DIR"
 
-exec bash "$REPO/scripts/smoke_rl_grpo.sh"
+exec bash "$REPO/scripts/tmax/smoke_rl_grpo.sh"

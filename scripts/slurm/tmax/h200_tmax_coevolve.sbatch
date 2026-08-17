@@ -1,16 +1,16 @@
 #!/bin/bash
 # Tmax harness ↔ SFT co-evolution (multi-iter), one chain, 8× H200.
 #
-#   sbatch /fsx/home/jixuan.chen/h200_tmax_coevolve.sbatch
-#   REPLICATE=2 sbatch --export=ALL /fsx/home/jixuan.chen/h200_tmax_coevolve.sbatch
+#   sbatch /fsx/home/jixuan.chen/scripts/slurm/tmax/h200_tmax_coevolve.sbatch
+#   REPLICATE=2 sbatch --export=ALL /fsx/home/jixuan.chen/scripts/slurm/tmax/h200_tmax_coevolve.sbatch
 #
 # Smoke (1 iter, 2 evolve rounds):
 #   sbatch --export=ALL,N_ITERS=1,EVOLVE_ROUNDS=2,MAX_SFT_RETRIES=0 \
-#     /fsx/home/jixuan.chen/h200_tmax_coevolve.sbatch
+#     /fsx/home/jixuan.chen/scripts/slurm/tmax/h200_tmax_coevolve.sbatch
 #
 # Warm-start from proven SFT-500:
 #   sbatch --export=ALL,INIT_LORA_PATH=/fsx/home/jixuan.chen/harnessx-backup/outputs/sft/qwen35_9b_tmax_only500_on102_v2 \
-#     /fsx/home/jixuan.chen/h200_tmax_coevolve.sbatch
+#     /fsx/home/jixuan.chen/scripts/slurm/tmax/h200_tmax_coevolve.sbatch
 #
 #SBATCH --job-name=tmax-coevolve
 #SBATCH --account=interactive-ai
@@ -88,4 +88,4 @@ rt = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION_NAME
 print("bedrock-runtime OK", rt.meta.region_name)
 PY
 
-exec bash "$REPO/scripts/run_loop_tmax_coevolve.sh"
+exec bash "$REPO/scripts/tmax/run_loop_tmax_coevolve.sh"

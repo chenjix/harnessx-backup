@@ -369,7 +369,7 @@ def main() -> int:
         pairs = F.expand_turn_pairs(rec, max_pairs=args.max_pairs_per_traj)
         if not pairs:
             return None
-        longest = max(len(p["prompt"]) + len(p["response"]) for p in pairs)
+        longest = max(F.pair_char_len(p) for p in pairs)
         return dict(meta=tmeta, messages=msgs, env=str(meta.get("task")),
                     n_tools=n_tools, n_err_obs=n_err_obs, recovers=recovers,
                     longest=longest)

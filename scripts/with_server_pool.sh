@@ -58,5 +58,5 @@ export TB2_ENDPOINTS_FILE="$ENDPOINTS_FILE"
 # Fallback for any code path that only knows about a single endpoint.
 export TB2_API_BASE="$first_endpoint"
 export TB2_MODEL="$MODEL"
-[[ -n "${LORA_PATH:-}" ]] && export TB2_MODEL="${LORA_NAME:-qwen35-${MODEL_SIZE}-sft}"
+[[ -n "${LORA_PATH:-}" ]] && export TB2_MODEL="${LORA_NAME:-${MODEL_TAG}-${MODEL_SIZE}-sft}"
 "$@"

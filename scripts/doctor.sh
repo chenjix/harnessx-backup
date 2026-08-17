@@ -35,11 +35,35 @@ else
   fail=1
 fi
 
-if [[ -n "${OPENAI_API_KEY:-${SFG_API_KEY:-}}" ]]; then
-  echo "OK   meta-agent API key present (value hidden)"
-else
-  echo "MISS OPENAI_API_KEY or SFG_API_KEY (required for evolve)"
-fi
+# What counts as "meta-agent auth is present" depends on the backend. A
+# bedrock/* meta-model signs with SigV4 from the ambient credential chain and
+# has no API key at all, so the unconditional key check reported MISS for a
+# setup that works — the one kind of false alarm that trains you to ignore the
+# doctor.
+case "${META_MODEL:-openai/gpt-5.5}" in
+  bedrock/*)
+    if "$(python_bin)" -c "import botocore.session,sys; sys.exit(0 if botocore.session.get_session().get_credentials() else 1)" 2>/dev/null; then
+      echo "OK   meta-agent AWS credentials resolve (${META_MODEL}, SigV4 — no API key)"
+    else
+      echo "MISS AWS credentials for ${META_MODEL} (Bedrock uses SigV4, not a key)"
+      fail=1
+    fi
+    ;;
+  anthropic/*)
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+      echo "OK   ANTHROPIC_API_KEY present (value hidden)"
+    else
+      echo "MISS ANTHROPIC_API_KEY (required for ${META_MODEL})"
+    fi
+    ;;
+  *)
+    if [[ -n "${OPENAI_API_KEY:-${SFG_API_KEY:-}}" ]]; then
+      echo "OK   meta-agent API key present (value hidden)"
+    else
+      echo "MISS OPENAI_API_KEY or SFG_API_KEY (required for evolve)"
+    fi
+    ;;
+esac
 
 if command -v squeue >/dev/null 2>&1; then
   echo
@@ -49,10 +73,33 @@ fi
 
 echo
 echo "SFT environment:"
-if [[ -f "${CONDA_SH:-/fsx/home/jixuan.chen/miniconda3/etc/profile.d/conda.sh}" ]]; then
+if [[ -n "${SFT_PYTHON:-}" ]]; then
+  # SFT_PYTHON bypasses conda entirely (train_sft.sh), so conda's absence is
+  # not a finding — what matters is that this interpreter has the trainer deps.
+  if [[ -x "$SFT_PYTHON" ]]; then
+    sft_missing="$("$SFT_PYTHON" - <<'PY'
+import importlib
+missing = []
+for m in ("trl", "peft", "datasets", "transformers", "torch"):
+    try:
+        importlib.import_module(m)
+    except Exception:
+        missing.append(m)
+print(" ".join(missing))
+PY
+)"
+    if [[ -z "$sft_missing" ]]; then
+      echo "OK   SFT_PYTHON $SFT_PYTHON (trl/peft/datasets/transformers/torch)"
+    else
+      echo "MISS SFT deps in SFT_PYTHON ($SFT_PYTHON): $sft_missing"
+    fi
+  else
+    echo "MISS SFT_PYTHON is not executable: $SFT_PYTHON"
+  fi
+elif [[ -f "${CONDA_SH:-/fsx/home/jixuan.chen/miniconda3/etc/profile.d/conda.sh}" ]]; then
   echo "OK   conda initialization"
 else
-  echo "MISS conda initialization"
+  echo "MISS conda initialization (and SFT_PYTHON unset)"
 fi
 
 echo

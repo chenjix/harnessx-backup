@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 
 from ..core.events import Message, ModelResponseEvent, ToolSchema, Usage
@@ -12,20 +13,25 @@ from .base import BaseModelProvider
 
 logger = logging.getLogger(__name__)
 
-_throttle_lock = None
 _last_request_time = 0.0
 _MIN_REQUEST_INTERVAL = 1.0
+# asyncio.Lock is bound to the event loop that created it. Tmax eval runs many
+# tasks via ThreadPoolExecutor + asyncio.run() (one loop per thread), so a
+# module-level asyncio.Lock blows up with "is bound to a different event loop".
+# Use a threading.Lock for the throttle critical section instead.
+_throttle_thread_lock = threading.Lock()
 
 
 async def _throttle():
-    global _throttle_lock, _last_request_time
-    if _throttle_lock is None:
-        _throttle_lock = asyncio.Lock()
-    async with _throttle_lock:
-        elapsed = time.monotonic() - _last_request_time
-        if elapsed < _MIN_REQUEST_INTERVAL:
-            await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
-        _last_request_time = time.monotonic()
+    global _last_request_time
+    while True:
+        with _throttle_thread_lock:
+            now = time.monotonic()
+            wait = _MIN_REQUEST_INTERVAL - (now - _last_request_time)
+            if wait <= 0:
+                _last_request_time = now
+                return
+        await asyncio.sleep(wait)
 
 
 _ANTHROPIC_MODEL_PREFIXES = ("claude-", "anthropic/")

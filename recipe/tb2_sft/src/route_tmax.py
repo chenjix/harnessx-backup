@@ -164,7 +164,7 @@ def build_sft(
         if not pairs:
             drops["no_supervisable_turn"] += 1
             continue
-        longest = max(len(p["prompt"]) + len(p["response"]) for p in pairs)
+        longest = max(F.pair_char_len(p) for p in pairs)
 
         cells[(_short(t["domain"]), _short(t["task_complexity"]))].append(
             {

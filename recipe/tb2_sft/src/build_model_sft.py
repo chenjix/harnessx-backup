@@ -103,6 +103,16 @@ def main() -> int:
         help="Max Tmax trajectories kept per Tmax task id, for diversity (default: 2).",
     )
     ap.add_argument(
+        "--tmax-task-allowlist",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON with a task_ids list (e.g. tasks_tmax_only200.json). "
+            "When set, only Tmax trajectories for those task ids are sampled — "
+            "used to grow N while keeping train-on-test eval on a fixed task set."
+        ),
+    )
+    ap.add_argument(
         "--tmax-only",
         action="store_true",
         default=False,
@@ -132,6 +142,24 @@ def main() -> int:
     if args.tmax_n > 0:
         if args.tmax_parquet is None or not args.tmax_parquet.is_file():
             raise SystemExit(f"--tmax-n={args.tmax_n} requires --tmax-parquet pointing at an existing file")
+        allowlist: set[str] | None = None
+        if args.tmax_task_allowlist is not None:
+            if not args.tmax_task_allowlist.is_file():
+                raise SystemExit(f"--tmax-task-allowlist not found: {args.tmax_task_allowlist}")
+            allow_obj = json.loads(args.tmax_task_allowlist.read_text())
+            if isinstance(allow_obj, dict) and "task_ids" in allow_obj:
+                allowlist = {str(t) for t in allow_obj["task_ids"]}
+            elif isinstance(allow_obj, list):
+                allowlist = {
+                    str(t if isinstance(t, str) else t.get("task_id") or t.get("id"))
+                    for t in allow_obj
+                }
+            else:
+                raise SystemExit(
+                    f"--tmax-task-allowlist must be a JSON list or object with task_ids: "
+                    f"{args.tmax_task_allowlist}"
+                )
+            print(f"tmax_external: task allowlist size={len(allowlist)} from {args.tmax_task_allowlist}")
         tmax_trainable, tmax_provenance = tmax_source.load_tmax_trajectories(
             args.tmax_parquet,
             n=args.tmax_n,
@@ -139,7 +167,10 @@ def main() -> int:
             min_tools=args.min_tools,
             max_tools=args.max_tools,
             per_task=args.tmax_per_task,
+            task_allowlist=allowlist,
         )
+        if allowlist is not None:
+            tmax_provenance["task_allowlist_path"] = str(args.tmax_task_allowlist)
         print(
             f"tmax_external: requested={args.tmax_n} selected={len(tmax_trainable)} "
             f"(available_after_gates_and_dedupe={tmax_provenance['available_after_gates_and_dedupe']}, "

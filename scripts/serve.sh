@@ -20,7 +20,7 @@ fi
 LORA_ARGS=()
 SERVED_MODEL="$MODEL"
 if [[ -n "${LORA_PATH:-}" ]]; then
-  LORA_NAME="${LORA_NAME:-qwen35-${MODEL_SIZE}-sft}"
+  LORA_NAME="${LORA_NAME:-${MODEL_TAG}-${MODEL_SIZE}-sft}"
   LORA_ARGS=(--enable-lora --max-lora-rank 32 --lora-modules "$LORA_NAME=$LORA_PATH")
   SERVED_MODEL="$LORA_NAME"
 fi

@@ -91,6 +91,7 @@ class EnvironmentContextInjector(MultiHookProcessor):
         inject_integrity_rules: bool = True,
         show_project_dir: bool = True,
     ) -> None:
+        self._working_dir_explicit = working_dir is not None
         self._working_dir = working_dir or os.getcwd()
         self._project_dir = os.getcwd() if show_project_dir else None
         self._timeout = timeout_seconds
@@ -178,7 +179,9 @@ class EnvironmentContextInjector(MultiHookProcessor):
 
     async def on_task_start(self, event: TaskStartEvent):
         self._start_time = time.monotonic()
-        if event.workspace is not None:
+        # Honor an explicitly configured working_dir (e.g. Tmax /home/user) —
+        # do not overwrite it with a host-side Workspace.root (/app, etc.).
+        if event.workspace is not None and not self._working_dir_explicit:
             try:
                 self._working_dir = str(Path(event.workspace.root).expanduser().resolve())
             except Exception:

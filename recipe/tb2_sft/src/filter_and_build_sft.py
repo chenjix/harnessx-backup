@@ -366,23 +366,80 @@ def _messages_to_sft_record(meta: TrialMeta, messages: list[dict[str, Any]], wei
     return records_payload
 
 
+def _normalize_tool_arguments(arguments: Any) -> Any:
+    """Qwen chat_template requires ``arguments`` to be a mapping (``|items``)."""
+    if isinstance(arguments, dict):
+        return arguments
+    if arguments is None:
+        return {}
+    if isinstance(arguments, str):
+        s = arguments.strip()
+        if not s:
+            return {}
+        try:
+            parsed = json.loads(s)
+        except Exception:
+            return {"_raw": arguments}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"value": parsed}
+    return arguments
+
+
+def normalize_messages_for_chat_template(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rewrite trajectory messages so ``apply_chat_template`` accepts them."""
+    out: list[dict[str, Any]] = []
+    for raw in messages:
+        msg = dict(raw)
+        if msg.get("content") is None:
+            msg["content"] = ""
+        elif not isinstance(msg["content"], str):
+            msg["content"] = json.dumps(msg["content"], ensure_ascii=False)
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            fixed: list[dict[str, Any]] = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tc = dict(tc)
+                if isinstance(tc.get("function"), dict):
+                    fn = dict(tc["function"])
+                    fn["arguments"] = _normalize_tool_arguments(fn.get("arguments"))
+                    tc["function"] = fn
+                elif "arguments" in tc:
+                    tc["arguments"] = _normalize_tool_arguments(tc.get("arguments"))
+                fixed.append(tc)
+            msg["tool_calls"] = fixed
+        out.append(msg)
+    return out
+
+
 def expand_turn_pairs(record: dict[str, Any], max_pairs: int = 8) -> list[dict[str, Any]]:
-    """Expand a trajectory into supervised turn pairs (prompt/response)."""
-    messages = record["messages"]
+    """Expand a trajectory into supervised turn pairs.
+
+    Each pair is emitted in TRL's conversational prompt/completion form so the
+    trainer can ``apply_chat_template`` and mask the prompt (official Tmax /
+    open-instruct style). Legacy string fields ``prompt_text`` / ``response``
+    are kept for char-length filters in older builders.
+    """
+    messages = normalize_messages_for_chat_template(record["messages"])
     pairs: list[dict[str, Any]] = []
     for i, m in enumerate(messages):
         if m.get("role") != "assistant":
             continue
-        # Prompt = all prior messages rendered as chat-ish text.
         prior = messages[:i]
-        response_obj = m
-        prompt = render_chat(prior)
-        response = render_assistant(response_obj)
+        # Structured assistant turn (keep tool_calls); chat template renders XML.
+        asst = dict(m)
+        response = render_assistant(asst)
         if len(response.strip()) < 4:
             continue
         pairs.append(
             {
-                "prompt": prompt,
+                # Conversational columns consumed by train_sft_lora.py / TRL.
+                "prompt": prior,
+                "completion": [asst],
+                # Legacy string views (length gates, debugging).
+                "prompt_text": render_chat(prior),
                 "response": response,
                 "task": record["task"],
                 "run": record["run"],
@@ -396,6 +453,18 @@ def expand_turn_pairs(record: dict[str, Any], max_pairs: int = 8) -> list[dict[s
         if len(pairs) >= max_pairs:
             break
     return pairs
+
+
+def pair_char_len(pair: dict[str, Any]) -> int:
+    """Character length for filtering; works for new and legacy pair shapes."""
+    if isinstance(pair.get("prompt_text"), str) and isinstance(pair.get("response"), str):
+        return len(pair["prompt_text"]) + len(pair["response"])
+    prompt = pair.get("prompt")
+    if isinstance(prompt, list):
+        completion = pair.get("completion") or []
+        asst = completion[0] if completion else {}
+        return len(render_chat(prompt)) + len(render_assistant(asst if isinstance(asst, dict) else {}))
+    return len(str(prompt or "")) + len(str(pair.get("response") or pair.get("completion") or ""))
 
 
 def render_chat(messages: list[dict[str, Any]]) -> str:

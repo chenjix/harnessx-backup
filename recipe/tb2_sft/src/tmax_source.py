@@ -95,6 +95,7 @@ def load_tmax_trajectories(
     min_tools: int = 2,
     max_tools: int = 60,
     per_task: int = 2,
+    task_allowlist: set[str] | None = None,
 ) -> tuple[list[tuple[F.TrialMeta, list[dict[str, Any]]]], dict[str, Any]]:
     """Return up to *n* ``(TrialMeta, messages)`` tuples sampled from Tmax's
     only-success trajectories, plus a provenance dict for the build report.
@@ -102,17 +103,26 @@ def load_tmax_trajectories(
     Sampling is shuffle-then-gate-then-dedupe(per_task)-then-take(n), so the
     result is a reproducible (seeded) near-random draw across Tmax's task
     pool, capped at *per_task* solutions per Tmax task id for diversity.
+
+    When *task_allowlist* is set, only trajectories whose metadata task id is
+    in that set are eligible (used to grow N while staying on the same eval
+    task set, e.g. the 102 tasks from tmax_only200).
     """
     df = pd.read_parquet(parquet_path)
     rng = random.Random(seed)
     order = list(df.index)
     rng.shuffle(order)
 
+    allow = {str(t) for t in task_allowlist} if task_allowlist else None
     candidates: list[tuple[F.TrialMeta, list[dict[str, Any]]]] = []
-    skipped = {"tool_gate": 0, "no_tools": 0, "ctrl_c": 0}
+    skipped = {"tool_gate": 0, "no_tools": 0, "ctrl_c": 0, "not_in_allowlist": 0}
     for idx in order:
         row = df.loc[idx]
         meta_raw = dict(row["metadata"])
+        task_id = str(meta_raw.get("task") or meta_raw.get("run_id") or idx)
+        if allow is not None and task_id not in allow:
+            skipped["not_in_allowlist"] += 1
+            continue
         if bool(meta_raw.get("has_ctrl_c")):
             skipped["ctrl_c"] += 1
             continue
@@ -127,7 +137,6 @@ def load_tmax_trajectories(
             skipped["tool_gate"] += 1
             continue
 
-        task_id = str(meta_raw.get("task") or meta_raw.get("run_id") or idx)
         trial_name = str(meta_raw.get("trial_name") or task_id)
         tmeta = F.TrialMeta(
             run="allenai/tmax-sft:only_success",
@@ -149,7 +158,33 @@ def load_tmax_trajectories(
     # Spread across distinct Tmax tasks rather than letting one task's
     # multiple recorded solutions ("__sol1", "__sol2", ...) crowd out others.
     candidates = F.dedupe_by_task(candidates, per_task=per_task)
-    selected = candidates[:n]
+
+    # With an allowlist (sample-size ablation on a fixed eval task set), take a
+    # round-robin across tasks so growing N does not accidentally drop tasks
+    # that would have been covered by the smaller N draw.
+    if allow is not None and candidates:
+        by_task: dict[str, list[tuple[F.TrialMeta, list[dict[str, Any]]]]] = {}
+        for item in candidates:
+            by_task.setdefault(item[0].task, []).append(item)
+        # Deterministic task order from seed (not alphabetical — keep diversity).
+        task_order = list(by_task.keys())
+        rng.shuffle(task_order)
+        selected = []
+        depth = 0
+        while len(selected) < n:
+            progressed = False
+            for tid in task_order:
+                bucket = by_task[tid]
+                if depth < len(bucket):
+                    selected.append(bucket[depth])
+                    progressed = True
+                    if len(selected) >= n:
+                        break
+            if not progressed:
+                break
+            depth += 1
+    else:
+        selected = candidates[:n]
 
     provenance = {
         "source": "allenai/tmax-sft (skill_tax_20260505_2.2k_combined_balanced_thinking_only_success)",
@@ -160,6 +195,8 @@ def load_tmax_trajectories(
         "skipped": skipped,
         "seed": seed,
         "per_task_cap": per_task,
+        "task_allowlist_n": len(allow) if allow is not None else None,
+        "selection": "round_robin_by_task" if allow is not None else "prefix_after_dedupe",
         "tasks": sorted({m.task for m, _ in selected}),
     }
     return selected, provenance

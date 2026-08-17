@@ -64,6 +64,7 @@ _load_env_file(_PROJECT_ENV)
 from harnessx.core.model_config import ModelConfig
 from harnessx.meta_harness import MetaAgent
 from recipe.tb2_evolver.tb2_trajspec import TB2RoundAdapter, read_per_task_results
+from recipe.tb2_evolver.tmax_adapter import TmaxRoundAdapter
 
 
 def _save_state(state_path: Path, state: dict) -> None:
@@ -151,6 +152,30 @@ def _make_provider(model: str, provider_id: str = None):
             base_url=os.environ.get("ANTHROPIC_API_BASE"),
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
         )
+
+    # AWS Bedrock (``bedrock/us.anthropic.claude-opus-4-8``, ``bedrock/qwen...``).
+    # Auth is SigV4 from the ambient credential chain — on this cluster the
+    # SageMaker execution role — so there is no API key to pass, and none of the
+    # gateway plumbing below applies:
+    #   * X-Api-Key / X-Model-Provider-Id are Salesforce-Gateway-specific headers.
+    #     Bedrock ignores unknown headers at best; at worst injecting them
+    #     perturbs the signed request. Send neither.
+    #   * an explicit api_key would override litellm's SigV4 resolution and 401.
+    # Region comes from AWS_REGION_NAME (litellm's own name for it), falling back
+    # to the standard AWS_REGION/AWS_DEFAULT_REGION, then us-west-2.
+    if model.startswith("bedrock/"):
+        region = (
+            os.environ.get("AWS_REGION_NAME")
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "us-west-2"
+        )
+        bedrock_kwargs: dict = {"aws_region_name": region}
+        meta_reasoning_effort = (os.environ.get("META_REASONING_EFFORT") or "").strip()
+        if meta_reasoning_effort:
+            bedrock_kwargs["reasoning_effort"] = meta_reasoning_effort
+        return LiteLLMProvider(model, **bedrock_kwargs)
+
     extra_headers: dict[str, str] = {}
     if provider_id:
         extra_headers["X-Model-Provider-Id"] = provider_id
@@ -209,6 +234,44 @@ def _auth_preflight(model: str, provider_id: str | None) -> None:
                 f"- checked env: {', '.join(required)}\n"
                 "Set `ANTHROPIC_API_KEY` (gateway keys are fine if your base_url routes through a proxy)."
             )
+    elif model.startswith("bedrock/"):
+        # Bedrock authenticates with SigV4 from the ambient credential chain
+        # (env vars, ~/.aws, or an instance/execution role), so scanning for a
+        # *_API_KEY env var proves nothing — the generic branch below would
+        # reject a perfectly working setup, or pass one that has no credentials
+        # at all just because some unrelated key happens to be exported.
+        # Resolve real credentials instead, which is the thing that matters.
+        region = (
+            os.environ.get("AWS_REGION_NAME")
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "us-west-2"
+        )
+        try:
+            import botocore.session
+
+            creds = botocore.session.get_session().get_credentials()
+        except Exception as exc:  # pragma: no cover - botocore always present with litellm
+            raise RuntimeError(
+                f"Bedrock model selected ({model}) but botocore is unavailable: {exc}"
+            ) from exc
+        if creds is None:
+            raise RuntimeError(
+                "Bedrock provider selected but no AWS credentials could be resolved.\n"
+                f"- model: {model}\n"
+                f"- region: {region}\n"
+                "Bedrock uses SigV4, not an API key. Provide credentials via an\n"
+                "instance/execution role, ~/.aws/credentials, or AWS_ACCESS_KEY_ID +\n"
+                "AWS_SECRET_ACCESS_KEY, then re-run.\n"
+                "Verify with: python -c \"import boto3;"
+                "print(boto3.client('sts', region_name='" + region + "').get_caller_identity())\""
+            )
+        logger.info(
+            "Bedrock auth preflight OK: model=%s region=%s credential_method=%s",
+            model,
+            region,
+            getattr(creds, "method", "unknown"),
+        )
     else:
         prefix = (model.split("/", 1)[0] if "/" in model else "").lower()
         prefix_candidates: dict[str, list[str]] = {
@@ -716,6 +779,17 @@ async def main() -> None:
         help="Output tag under recipe/terminal_bench_2_with_metav2/runs/",
     )
     parser.add_argument(
+        "--eval-backend",
+        choices=("tb2", "tmax"),
+        default=os.environ.get("EVOLVE_EVAL_BACKEND", "tb2"),
+        help="Rollout backend: tb2 (Harbor) or tmax (Docker taxonomy tasks)",
+    )
+    parser.add_argument(
+        "--tmax-envs-jsonl",
+        default=None,
+        help="Required when --eval-backend tmax: per-task env jsonl with container_def/tests",
+    )
+    parser.add_argument(
         "--tasks",
         default=str(_RECIPE_DIR / "tasks.json"),
         help="JSON file containing a list of task name strings (default: recipe dir tasks.json)",
@@ -759,6 +833,16 @@ async def main() -> None:
         type=int,
         default=DEFAULT_EVOLVE_WALL_CLOCK_S,
         help=f"Meta-agent wall-clock cap in seconds (default: {DEFAULT_EVOLVE_WALL_CLOCK_S})",
+    )
+    parser.add_argument(
+        "--noop-on-meta-fail",
+        action=argparse.BooleanOptionalAction,
+        default=_env_str("EVOLVE_NOOP_ON_META_FAIL", "0") not in {"0", "false", "False", ""},
+        help=(
+            "On meta-agent timeout / missing config.yaml, promote a byte-copy of the "
+            "incumbent config and continue instead of failing the whole run "
+            "(env EVOLVE_NOOP_ON_META_FAIL)."
+        ),
     )
     parser.add_argument(
         "--no-require-evidence",
@@ -927,6 +1011,8 @@ async def main() -> None:
             raise FileNotFoundError(f"Resume requested but R0 baseline config not found: {baseline_config}")
         if tasks_json.is_file():
             task_names = json.loads(tasks_json.read_text(encoding="utf-8"))
+            if isinstance(task_names, dict) and "task_ids" in task_names:
+                task_names = list(task_names["task_ids"])
         if args.trajectory_mode == "reuse" and (subset_dir / "_manifest.json").is_file():
             manifest = json.loads((subset_dir / "_manifest.json").read_text(encoding="utf-8"))
             trial_count = manifest.get("num_trials")
@@ -946,6 +1032,12 @@ async def main() -> None:
     else:
         r0_round_dir.mkdir(parents=True, exist_ok=True)
         task_names = json.loads(tasks_json.read_text(encoding="utf-8"))
+        if isinstance(task_names, dict) and "task_ids" in task_names:
+            task_names = list(task_names["task_ids"])
+        if not isinstance(task_names, list) or not task_names:
+            raise ValueError(
+                f"--tasks must be a non-empty JSON list (or object with task_ids): {tasks_json}"
+            )
 
         picked: list[Path] = []
         if r0_dir is not None and r0_dir.is_dir():
@@ -1061,6 +1153,30 @@ async def main() -> None:
             )
             logger.info("Seeded baseline config from %s → %s (%d asset(s) copied: %s)",
                         src, baseline_config, len(copied), ", ".join(copied) or "none")
+        elif args.eval_backend == "tmax":
+            src = Path(_PROJECT_ROOT) / "configs" / "baseline_tmax_harness.yaml"
+            if not src.is_file():
+                src = Path(_PROJECT_ROOT) / "configs" / "baseline_harness.yaml"
+            baseline_config = r0_round_dir / "config.yaml"
+            copied = _materialize_config_bundle(
+                src, baseline_config, r0_round_dir / "assets"
+            )
+            seed_prompt = Path(_PROJECT_ROOT) / "configs" / "tmax_system_prompt.txt"
+            if seed_prompt.is_file():
+                shutil.copy2(seed_prompt, r0_round_dir / "system_prompt.txt")
+            (r0_round_dir / "baseline_provenance.json").write_text(
+                json.dumps(
+                    {
+                        "seeded_from": str(src),
+                        "assets_copied": copied,
+                        "eval_backend": "tmax",
+                        "system_prompt": str(seed_prompt) if seed_prompt.is_file() else None,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            logger.info("Seeded Tmax baseline from %s → %s", src, baseline_config)
         else:
             baseline_config = _dump_baseline_config(
                 r0_round_dir,
@@ -1091,20 +1207,40 @@ async def main() -> None:
         require_evidence=not args.no_require_evidence,
     )
 
-    adapter = TB2RoundAdapter(
-        baseline_config=baseline_config,
-        trajectories_root=trajectories_root,
-        task_names=task_names,
-        r0_trajectories=r0_dir if (r0_dir is not None and args.trajectory_mode == "rerun") else None,
-        run_mode=args.trajectory_mode,
-        strict_round_trajectories=not args.allow_round_fallback,
-        repo_root=Path(_PROJECT_ROOT),
-        eval_script=Path(args.tb2_eval_script),
-        eval_concurrent=args.tb2_eval_concurrent,
-        eval_resume=args.tb2_eval_resume,
-        endpoints_file=Path(args.tb2_endpoints_file) if args.tb2_endpoints_file else None,
-        eval_max_steps=args.tb2_max_steps,
-    )
+    adapter: TB2RoundAdapter | TmaxRoundAdapter
+    if args.eval_backend == "tmax":
+        if not args.tmax_envs_jsonl:
+            raise SystemExit("--eval-backend tmax requires --tmax-envs-jsonl")
+        if not task_names:
+            raise SystemExit("--eval-backend tmax requires a non-empty --tasks JSON list")
+        adapter = TmaxRoundAdapter(
+            baseline_config=baseline_config,
+            task_names=task_names,
+            envs_jsonl=Path(args.tmax_envs_jsonl),
+            tasks_json=tasks_json,
+            r0_trajectories=r0_dir if (r0_dir is not None and args.trajectory_mode == "rerun") else None,
+            repo_root=Path(_PROJECT_ROOT),
+            eval_concurrent=args.tb2_eval_concurrent,
+            eval_resume=args.tb2_eval_resume,
+            endpoints_file=Path(args.tb2_endpoints_file) if args.tb2_endpoints_file else None,
+            eval_max_steps=args.tb2_max_steps,
+            seed_system_prompt=Path(_PROJECT_ROOT) / "configs" / "tmax_system_prompt.txt",
+        )
+    else:
+        adapter = TB2RoundAdapter(
+            baseline_config=baseline_config,
+            trajectories_root=trajectories_root,
+            task_names=task_names,
+            r0_trajectories=r0_dir if (r0_dir is not None and args.trajectory_mode == "rerun") else None,
+            run_mode=args.trajectory_mode,
+            strict_round_trajectories=not args.allow_round_fallback,
+            repo_root=Path(_PROJECT_ROOT),
+            eval_script=Path(args.tb2_eval_script),
+            eval_concurrent=args.tb2_eval_concurrent,
+            eval_resume=args.tb2_eval_resume,
+            endpoints_file=Path(args.tb2_endpoints_file) if args.tb2_endpoints_file else None,
+            eval_max_steps=args.tb2_max_steps,
+        )
 
     # Load or initialise evolve state.
     if args.resume:
@@ -1396,13 +1532,90 @@ async def main() -> None:
             last_rx_output_dir = round_evolve_dir
             last_promoted = Path(current_config).resolve()
         except Exception as exc:
+            msg = str(exc)
+            soft = bool(getattr(args, "noop_on_meta_fail", False)) and (
+                "timed out" in msg
+                or "did not produce" in msg
+                or "no config.yaml" in msg
+            )
             failed_at = int(time.time())
+            if soft:
+                logger.error(
+                    "[R%d→R%d] meta-agent failed (%s: %s) — no-op promoting incumbent and continuing",
+                    input_round,
+                    output_round,
+                    type(exc).__name__,
+                    msg,
+                )
+                try:
+                    round_evolve_dir = evolve_dir / f"R{output_round}"
+                    round_evolve_dir.mkdir(parents=True, exist_ok=True)
+                    # Leave a breadcrumb next to the missing config.
+                    (round_evolve_dir / "_meta_scratch").mkdir(parents=True, exist_ok=True)
+                    (round_evolve_dir / "_meta_scratch" / "META_FAIL_NOOP.md").write_text(
+                        f"# Meta fail → no-op\n\n`{type(exc).__name__}`: {msg}\n",
+                        encoding="utf-8",
+                    )
+                    # Ensure validate-less promotion path has a config.yaml.
+                    noop_yaml = round_evolve_dir / "config.yaml"
+                    if not noop_yaml.is_file():
+                        shutil.copy2(evaluated_config, noop_yaml)
+                    promoted_config = adapter.promote_round_output(
+                        run_root=run_root,
+                        output_round=output_round,
+                        rx_output_dir=round_evolve_dir,
+                        output_config=noop_yaml,
+                    ).resolve()
+                    current_config = promoted_config
+                    rr = {
+                        "input_round": input_round,
+                        "output_round": output_round,
+                        "input_config": str(evaluated_config),
+                        "gated_config": str(evaluated_config),
+                        "trajectories_dir": str(trajectories_dir),
+                        "rx_output_dir": str(round_evolve_dir),
+                        "output_config": str(noop_yaml.resolve()),
+                        "promoted_config": str(promoted_config),
+                        "changed": False,
+                        "elapsed_s": 0.0,
+                        "score": score,
+                        "gate_decision": "noop_on_meta_fail",
+                        "gate_reason": f"{type(exc).__name__}: {msg}",
+                    }
+                    bsf = _best_to_state_dict(best_round)
+                    if bsf is not None:
+                        rr["best_so_far"] = bsf
+                        state["best_so_far"] = bsf
+                    history = state.setdefault("history", [])
+                    history.append(rr)
+                    state["status"] = "running"
+                    state["next_input_round"] = output_round
+                    state["last_output_round"] = output_round
+                    state["last_output_config"] = str(current_config)
+                    state["updated_at_epoch_s"] = failed_at
+                    state["full_task_results"] = full_task_results
+                    state["last_error"] = {
+                        "input_round": input_round,
+                        "output_round": output_round,
+                        "error_type": type(exc).__name__,
+                        "error_message": msg,
+                        "failed_at_epoch_s": failed_at,
+                        "recovered_as": "noop",
+                    }
+                    _save_state(state_path, state)
+                    last_rx_output_dir = round_evolve_dir
+                    last_promoted = Path(current_config).resolve()
+                    continue
+                except Exception as recover_exc:  # noqa: BLE001
+                    logger.exception(
+                        "noop-on-meta-fail recovery also failed: %s", recover_exc
+                    )
             state["status"] = "failed"
             state["last_error"] = {
                 "input_round": input_round,
                 "output_round": output_round,
                 "error_type": type(exc).__name__,
-                "error_message": str(exc),
+                "error_message": msg,
                 "failed_at_epoch_s": failed_at,
             }
             state["updated_at_epoch_s"] = failed_at

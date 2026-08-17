@@ -139,10 +139,24 @@ async def grep_tool(
     from ...sandbox.base import get_current_sandbox
 
     sandbox = get_current_sandbox()
-    if not Path(path).is_absolute() and sandbox is not None:
-        base = (Path(sandbox.workspace_path) / path).resolve()
+    raw_path = Path(path)
+    if raw_path.is_absolute():
+        base = raw_path.expanduser().resolve()
+    elif sandbox is not None:
+        ws = Path(sandbox.workspace_path).expanduser().resolve()
+        # Same footgun as Glob: meta sandbox used to root at `/`.
+        if ws == Path("/"):
+            base = (Path.cwd() / raw_path).resolve()
+        else:
+            base = (ws / raw_path).resolve()
     else:
-        base = Path(path).resolve()
+        base = raw_path.resolve()
+
+    if base == Path("/"):
+        return (
+            "Error: refusing to Grep from filesystem root '/'. "
+            "Pass an explicit `path` under the repo or an absolute project path."
+        )
 
     if type and type in _TYPE_GLOBS:
         file_globs = _TYPE_GLOBS[type]

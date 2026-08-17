@@ -8,7 +8,7 @@ shift
 
 PORT="${PORT:-8200}"
 SERVED_MODEL="$MODEL"
-[[ -n "${LORA_PATH:-}" ]] && SERVED_MODEL="${LORA_NAME:-qwen35-${MODEL_SIZE}-sft}"
+[[ -n "${LORA_PATH:-}" ]] && SERVED_MODEL="${LORA_NAME:-${MODEL_TAG}-${MODEL_SIZE}-sft}"
 SERVER_LOG="${SERVER_LOG:-$LOG_ROOT/vllm.log}"
 mkdir -p "$(dirname "$SERVER_LOG")"
 

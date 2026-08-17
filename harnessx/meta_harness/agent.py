@@ -67,21 +67,42 @@ _DEFAULT_MAX_STEPS = 500
 
 
 class _MetaAgentSandboxProvider:
+    """Sandbox for the meta-agent.
+
+    Absolute paths must remain readable (trajectories, package skills, etc.),
+    but relative Glob/Grep/Read must NOT anchor at filesystem root — that made
+    ``Glob(pattern='**/skills/...')`` walk all of ``/fsx/home`` for ~2h and
+    kill an overnight evolve via wall-clock cancel.
+    """
+
     def __init__(self, output_dir: Path | None = None) -> None:
         self._cwd = str(Path(output_dir).expanduser().resolve()) if output_dir is not None else None
 
     async def acquire(self, hint_id=None, workspace=None):  # noqa: ANN001
+        import os
+
         from ..sandbox.local import LocalSandbox
 
         default_cwd = self._cwd
+        # Prefer process cwd (evolve scripts ``cd`` into the repo) so relative
+        # globs stay inside the checkout. Fall back to output_dir, never ``/``.
+        search_root = Path(os.getcwd()).resolve()
+        if not search_root.is_dir():
+            search_root = Path(default_cwd).resolve() if default_cwd else Path.cwd()
 
         class _MetaSandbox(LocalSandbox):
+            def resolve(self, path: str) -> str:
+                p = Path(path).expanduser()
+                if p.is_absolute():
+                    return str(p.resolve())
+                return LocalSandbox.resolve(self, str(p))
+
             async def exec(self, command, *args, **kwargs):  # noqa: ANN001
                 if "cwd" not in kwargs and not args:
-                    kwargs["cwd"] = default_cwd
+                    kwargs["cwd"] = default_cwd or str(search_root)
                 return await LocalSandbox.exec(self, command, *args, **kwargs)
 
-        return _MetaSandbox(root="/", mode="isolated")
+        return _MetaSandbox(root=search_root, mode="isolated")
 
     async def release(self, sandbox) -> None:  # noqa: ANN001
         pass
@@ -622,13 +643,33 @@ class MetaAgent:
         )
 
         # --- Run the agent turn -------------------------------------------
+        # Do NOT use asyncio.wait_for alone: run_loop swallows CancelledError
+        # (maps it to exit_reason=interrupted) so wait_for never raises
+        # TimeoutError and a hung Glob/Bash can burn the whole overnight job.
         t0 = time.time()
         timed_out = False
+        run_task = asyncio.create_task(harness.run(task))
         try:
-            await asyncio.wait_for(harness.run(task), timeout=self.wall_clock_s)
-        except asyncio.TimeoutError:
-            timed_out = True
-            logger.warning("[evolve] wall_clock timeout after %.0fs", self.wall_clock_s)
+            done, _pending = await asyncio.wait({run_task}, timeout=self.wall_clock_s)
+            if run_task not in done:
+                timed_out = True
+                logger.warning("[evolve] wall_clock timeout after %.0fs — cancelling meta-agent", self.wall_clock_s)
+                run_task.cancel()
+                # Don't block forever if a tool thread (e.g. pathlib.glob) ignores cancel.
+                try:
+                    await asyncio.wait({run_task}, timeout=30.0)
+                except Exception:
+                    logger.debug("[evolve] meta-agent cleanup after timeout raised", exc_info=True)
+                if not run_task.done():
+                    logger.warning("[evolve] meta-agent still running after cancel; abandoning task")
+            else:
+                # Propagate unexpected harness failures.
+                exc = run_task.exception()
+                if exc is not None:
+                    raise exc
+        finally:
+            if not run_task.done():
+                run_task.cancel()
         elapsed = time.time() - t0
 
         if timed_out:
@@ -654,6 +695,21 @@ class MetaAgent:
                 output_dir=output_dir,
                 elapsed=elapsed,
             )
+            # If we burned most of the wall clock and still have no config, the
+            # agent was almost certainly cancelled mid-tool (Glob/Bash hang) —
+            # surface that as a timeout so callers can no-op and continue.
+            if elapsed >= 0.9 * self.wall_clock_s:
+                timeout_md = scratch_dir / "TIMEOUT.md"
+                timeout_md.write_text(
+                    "# Evolve Timeout (soft)\n\n"
+                    f"Meta-agent ran {elapsed:.1f}s (≥ 90% of wall-clock "
+                    f"{self.wall_clock_s:.0f}s) and exited without "
+                    f"`config.yaml` (see {findings_path}). Treating as timeout.\n",
+                    encoding="utf-8",
+                )
+                raise RuntimeError(
+                    f"meta-agent timed out after {elapsed:.1f}s (no config.yaml); see {timeout_md}"
+                )
             raise RuntimeError(
                 f"meta-agent finished after {elapsed:.1f}s but did not produce {out_yaml}. Inspect {findings_path}."
             )

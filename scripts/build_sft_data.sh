@@ -14,9 +14,9 @@ TMAX_N="${TMAX_N:-0}"
 # <10% of training pairs anyway, which makes attribution ambiguous.
 TMAX_ONLY="${TMAX_ONLY:-0}"
 if [[ "$TMAX_ONLY" == "1" ]]; then
-  DEFAULT_DATASET_NAME="qwen35_${MODEL_SIZE}_tmax_only${TMAX_N}"
+  DEFAULT_DATASET_NAME="${MODEL_TAG}_${MODEL_SIZE}_tmax_only${TMAX_N}"
 else
-  DEFAULT_DATASET_NAME="qwen35_${MODEL_SIZE}_own_success"
+  DEFAULT_DATASET_NAME="${MODEL_TAG}_${MODEL_SIZE}_own_success"
   [[ "$TMAX_N" -gt 0 ]] && DEFAULT_DATASET_NAME="${DEFAULT_DATASET_NAME}_plus_tmax${TMAX_N}"
 fi
 DATASET_NAME="${SFT_DATASET_NAME:-$DEFAULT_DATASET_NAME}"
@@ -32,6 +32,11 @@ if [[ "$TMAX_N" -gt 0 ]]; then
     --tmax-seed "${TMAX_SEED:-42}"
     --tmax-per-task "${TMAX_PER_TASK:-2}"
   )
+  if [[ -n "${TMAX_TASK_ALLOWLIST:-}" ]]; then
+    require_file "$TMAX_TASK_ALLOWLIST"
+    tmax_args+=(--tmax-task-allowlist "$TMAX_TASK_ALLOWLIST")
+    echo "Restricting Tmax sample to task allowlist: $TMAX_TASK_ALLOWLIST"
+  fi
   echo "Mixing in $TMAX_N external Tmax trajectories from $TMAX_PARQUET"
 fi
 

@@ -182,7 +182,7 @@ def _safe_partial_pairs(
     prefix_fraction: float,
 ) -> list[dict[str, Any]]:
     """Extract conservative non-error tool turns from a failed trajectory."""
-    messages = record["messages"]
+    messages = F.normalize_messages_for_chat_template(record["messages"])
     prefix_limit = max(1, int(len(messages) * prefix_fraction))
     pairs: list[dict[str, Any]] = []
 
@@ -199,12 +199,16 @@ def _safe_partial_pairs(
         if not observations or any(ERROR_OBS_RE.search(obs) for obs in observations):
             continue
 
-        response = F.render_assistant(msg)
+        asst = dict(msg)
+        response = F.render_assistant(asst)
         if len(response.strip()) < 4:
             continue
+        prior = messages[:i]
         pairs.append(
             {
-                "prompt": F.render_chat(messages[:i]),
+                "prompt": prior,
+                "completion": [asst],
+                "prompt_text": F.render_chat(prior),
                 "response": response,
                 "task": record["task"],
                 "run": record["run"],
@@ -229,9 +233,13 @@ def _dedupe_pairs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for row in rows:
-        sig = hashlib.sha256(
-            (str(row.get("prompt")) + "\0" + str(row.get("response"))).encode()
-        ).hexdigest()
+        left = row.get("prompt_text", row.get("prompt"))
+        right = row.get("response", row.get("completion"))
+        if not isinstance(left, str):
+            left = json.dumps(left, ensure_ascii=False, sort_keys=True)
+        if not isinstance(right, str):
+            right = json.dumps(right, ensure_ascii=False, sort_keys=True)
+        sig = hashlib.sha256((left + "\0" + right).encode()).hexdigest()
         if sig in seen:
             continue
         seen.add(sig)

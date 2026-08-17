@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""Build an open-instruct / SWERL RL dataset from Tmax taxonomy tasks.
+
+Default policy for coevolve RL
+------------------------------
+* Train on up to ``--n-tasks`` (default **100**) tasks drawn from the 2.2k
+  taxonomy parquet, **excluding** the 102-task holdout.
+* Prefer keeping the evolve-50 set inside the RL pool (same seed tasks the
+  harness already sees), then fill the remainder stratified by domain.
+* Never accept the holdout env JSONL as ``--envs-jsonl``.
+
+Writes under ``--out-root/--name``::
+
+  train.jsonl          # open-instruct local mixer (preferred)
+  hf_dataset/          # datasets.save_to_disk copy
+  task_data/<task_id>/ # instruction.md, tests/test.sh, setup.sh
+  task-data.tar.gz
+  tasks_list.json      # task id list for provenance
+  summary.json
+
+Example::
+
+  python -m recipe.tb2_sft.src.build_tmax_rl_dataset \\
+    --from-taxonomy --n-tasks 100 --seed 42 \\
+    --name tmax_rl_train100
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import os
+import random
+import tarfile
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_TAXONOMY = _ROOT / "data/external/tmax-taxonomy/data/train-00000-of-00001.parquet"
+_DEFAULT_HOLDOUT = _ROOT / "recipe/tb2_evolver/tasks_tmax_only200.json"
+_DEFAULT_EVOLVE = _ROOT / "recipe/tb2_evolver/tasks_tmax_evolve50_list.json"
+_HOLDOUT_ENVS = _ROOT / "recipe/tb2_sft/data/qwen35_9b_tmax_only200/eval_task_set_with_envs.jsonl"
+
+SYSTEM_PROMPT = (
+    "You are a helpful coding assistant. You have access to a bash terminal. "
+    "Use it to explore the codebase, understand the problem, implement a solution, "
+    "and verify it works. When you are confident your solution is correct, submit "
+    "by running: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+)
+
+
+def _load_task_ids(path: Path | None) -> list[str]:
+    if path is None or not path.is_file():
+        return []
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, dict):
+        items = raw.get("tasks") or raw.get("task_ids") or raw.get("task_names") or []
+        if not items and all(isinstance(k, str) and k.startswith("task_") for k in raw):
+            items = list(raw.keys())
+    else:
+        items = []
+    out: list[str] = []
+    for x in items:
+        if isinstance(x, str):
+            out.append(x)
+        elif isinstance(x, dict):
+            tid = x.get("task_id") or x.get("name") or x.get("id") or x.get("task")
+            if tid:
+                out.append(str(tid))
+    return out
+
+
+def parse_container_def(container_def: str) -> tuple[str, str]:
+    image = "python:3.12-slim"
+    for line in container_def.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("From:"):
+            image = stripped.split(":", 1)[1].strip()
+            break
+    in_post = False
+    post_lines: list[str] = []
+    for line in container_def.splitlines():
+        if line.strip() == "%post":
+            in_post = True
+            continue
+        if line.strip().startswith("%") and in_post:
+            break
+        if in_post:
+            post_lines.append(line)
+    return image, "\n".join(post_lines).strip()
+
+
+def make_test_sh(test_final_state: str) -> str:
+    return f"""#!/bin/bash
+set -e
+mkdir -p /logs/verifier
+
+cat << 'TEST_EOF' > /tmp/test_final_state.py
+{test_final_state}
+TEST_EOF
+
+if python3 -m pytest /tmp/test_final_state.py -x --tb=short 2>&1; then
+    echo "1" > /logs/verifier/reward.txt
+else
+    echo "0" > /logs/verifier/reward.txt
+fi
+"""
+
+
+def make_setup_sh(post_commands: str) -> str:
+    return f"""#!/bin/bash
+set -e
+{post_commands}
+"""
+
+
+def _write_text(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, mode)
+
+
+def _add_tar_file(tar: tarfile.TarFile, path: str, content: str, mode: int = 0o755) -> None:
+    data = content.encode("utf-8")
+    info = tarfile.TarInfo(name=path)
+    info.size = len(data)
+    info.mode = mode
+    tar.addfile(info, io.BytesIO(data))
+
+
+def _row_to_record(row: dict[str, Any]) -> dict[str, Any] | None:
+    task_id = str(row.get("task_id") or "")
+    description = str(row.get("description") or "")
+    test_final = str(row.get("test_final_state") or "")
+    container_def = str(row.get("container_def") or "")
+    if not task_id or not description or not test_final:
+        return None
+    image, _ = parse_container_def(container_def)
+    return {
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": description},
+        ],
+        "ground_truth": task_id,
+        "dataset": "passthrough",
+        "env_config": {"env_name": "swerl_sandbox", "task_id": task_id, "image": image},
+        "source": "tmax_taxonomy_rl_train",
+        "domain": row.get("domain"),
+        # keep raw fields for env jsonl export / debugging
+        "_raw": {
+            "task_id": task_id,
+            "description": description,
+            "domain": row.get("domain"),
+            "task_complexity": row.get("task_complexity"),
+            "container_def": container_def,
+            "test_final_state": test_final,
+            "test_initial_state": row.get("test_initial_state"),
+        },
+    }
+
+
+def select_from_taxonomy(
+    *,
+    taxonomy_parquet: Path,
+    exclude: set[str],
+    prefer_ids: list[str],
+    n_tasks: int,
+    seed: int,
+) -> list[dict[str, Any]]:
+    try:
+        import pandas as pd
+    except ImportError as e:
+        raise SystemExit("ERROR: pandas required to read taxonomy parquet") from e
+
+    df = pd.read_parquet(taxonomy_parquet)
+    by_id = {str(r["task_id"]): r for r in df.to_dict(orient="records")}
+
+    chosen: list[str] = []
+    for tid in prefer_ids:
+        if tid in exclude:
+            continue
+        if tid in by_id and tid not in chosen:
+            chosen.append(tid)
+        if len(chosen) >= n_tasks:
+            break
+
+    remaining_need = n_tasks - len(chosen)
+    if remaining_need > 0:
+        pool = [tid for tid in by_id if tid not in exclude and tid not in chosen]
+        # Stratify by domain when possible.
+        buckets: dict[str, list[str]] = defaultdict(list)
+        for tid in pool:
+            dom = str(by_id[tid].get("domain") or "unknown")
+            buckets[dom].append(tid)
+        rng = random.Random(seed)
+        for b in buckets.values():
+            rng.shuffle(b)
+        domains = sorted(buckets.keys())
+        picked: list[str] = []
+        while len(picked) < remaining_need and any(buckets[d] for d in domains):
+            for d in domains:
+                if len(picked) >= remaining_need:
+                    break
+                if buckets[d]:
+                    picked.append(buckets[d].pop())
+        chosen.extend(picked)
+
+    rows: list[dict[str, Any]] = []
+    for tid in chosen[:n_tasks]:
+        rec = _row_to_record(by_id[tid])
+        if rec:
+            rows.append(rec)
+    return rows
+
+
+def load_from_envs_jsonl(path: Path, exclude: set[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            raw = json.loads(line)
+            tid = str(raw.get("task_id") or "")
+            if tid in exclude:
+                continue
+            rec = _row_to_record(raw)
+            if rec:
+                rows.append(rec)
+    return rows
+
+
+def write_dataset(records: list[dict[str, Any]], out_dir: Path) -> dict[str, Any]:
+    if not records:
+        raise SystemExit("ERROR: no RL tasks to write")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    task_data_dir = out_dir / "task_data"
+    if task_data_dir.exists():
+        import shutil
+
+        shutil.rmtree(task_data_dir)
+    task_data_dir.mkdir(parents=True, exist_ok=True)
+    tar_path = out_dir / "task-data.tar.gz"
+
+    clean_records: list[dict[str, Any]] = []
+    env_rows: list[dict[str, Any]] = []
+    with tarfile.open(tar_path, mode="w:gz") as tar:
+        for rec in records:
+            raw = rec.pop("_raw")
+            task_id = raw["task_id"]
+            description = raw["description"]
+            test_final = raw["test_final_state"]
+            container_def = raw["container_def"]
+            _, post_commands = parse_container_def(container_def)
+
+            task_dir = task_data_dir / task_id
+            _write_text(task_dir / "instruction.md", description)
+            _write_text(task_dir / "tests" / "test.sh", make_test_sh(test_final), mode=0o755)
+            if post_commands:
+                _write_text(task_dir / "setup.sh", make_setup_sh(post_commands), mode=0o755)
+
+            _add_tar_file(tar, f"{task_id}/instruction.md", description, mode=0o644)
+            _add_tar_file(tar, f"{task_id}/tests/test.sh", make_test_sh(test_final))
+            if post_commands:
+                _add_tar_file(tar, f"{task_id}/setup.sh", make_setup_sh(post_commands))
+
+            clean_records.append(rec)
+            env_rows.append(
+                {
+                    "task_id": task_id,
+                    "domain": raw.get("domain"),
+                    "task_complexity": raw.get("task_complexity"),
+                    "description": description,
+                    "container_def": container_def,
+                    "test_final_state": test_final,
+                    "test_initial_state": raw.get("test_initial_state"),
+                }
+            )
+
+    # open-instruct prefers local .jsonl mixer paths
+    train_jsonl = out_dir / "train.jsonl"
+    with train_jsonl.open("w", encoding="utf-8") as fh:
+        for rec in clean_records:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    envs_jsonl = out_dir / "eval_task_set_with_envs.jsonl"
+    with envs_jsonl.open("w", encoding="utf-8") as fh:
+        for row in env_rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    tasks_list = {
+        "name": out_dir.name,
+        "n_tasks": len(clean_records),
+        "task_ids": [r["ground_truth"] for r in clean_records],
+        "by_domain": {},
+    }
+    dom_counts: dict[str, int] = defaultdict(int)
+    for r in clean_records:
+        dom_counts[str(r.get("domain") or "unknown")] += 1
+    tasks_list["by_domain"] = dict(sorted(dom_counts.items()))
+    (out_dir / "tasks_list.json").write_text(json.dumps(tasks_list, indent=2) + "\n", encoding="utf-8")
+
+    try:
+        from datasets import Dataset
+
+        ds = Dataset.from_list(clean_records)
+        ds_dir = out_dir / "hf_dataset"
+        if ds_dir.exists():
+            import shutil
+
+            shutil.rmtree(ds_dir)
+        ds.save_to_disk(str(ds_dir))
+        hf_path = str(ds_dir)
+    except Exception as e:  # noqa: BLE001 — optional
+        hf_path = None
+        print(f"WARN: could not save hf_dataset ({e}); train.jsonl is enough for open-instruct")
+
+    summary = {
+        "n_tasks": len(clean_records),
+        "train_jsonl": str(train_jsonl),
+        "envs_jsonl": str(envs_jsonl),
+        "hf_dataset": hf_path,
+        "task_data_dir": str(task_data_dir),
+        "task_data_tarball": str(tar_path),
+        "tasks_list": str(out_dir / "tasks_list.json"),
+        "task_ids": [r["ground_truth"] for r in clean_records],
+        "by_domain": tasks_list["by_domain"],
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"wrote {out_dir}: n_tasks={len(clean_records)} "
+        f"train.jsonl + task_data/ domains={dict(tasks_list['by_domain'])}"
+    )
+    return summary
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--name", required=True)
+    ap.add_argument("--out-root", type=Path, default=_ROOT / "recipe/tb2_sft/data")
+    ap.add_argument("--exclude-tasks", type=Path, default=_DEFAULT_HOLDOUT)
+    ap.add_argument("--n-tasks", type=int, default=100, help="Target RL train size (default 100)")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--from-taxonomy",
+        action="store_true",
+        help="Sample from taxonomy parquet (recommended for RL-100).",
+    )
+    ap.add_argument("--taxonomy-parquet", type=Path, default=_DEFAULT_TAXONOMY)
+    ap.add_argument(
+        "--prefer-tasks",
+        type=Path,
+        default=_DEFAULT_EVOLVE,
+        help="Task ids to keep first (default: evolve-50 list).",
+    )
+    ap.add_argument(
+        "--envs-jsonl",
+        type=Path,
+        default=None,
+        help="Optional explicit envs jsonl (must not be holdout-102).",
+    )
+    args = ap.parse_args()
+
+    exclude = set(_load_task_ids(args.exclude_tasks))
+    prefer = _load_task_ids(args.prefer_tasks)
+
+    if args.envs_jsonl is not None:
+        envs = args.envs_jsonl
+        if envs.resolve() == _HOLDOUT_ENVS.resolve():
+            raise SystemExit(
+                "REFUSING: envs-jsonl is the 102-task holdout file. "
+                "RL must train on a non-holdout pool (use --from-taxonomy)."
+            )
+        if not envs.is_file():
+            raise SystemExit(f"ERROR: missing envs jsonl: {envs}")
+        records = load_from_envs_jsonl(envs, exclude)
+        if args.n_tasks and len(records) > args.n_tasks:
+            rng = random.Random(args.seed)
+            # keep prefer ids, then fill
+            by_id = {r["ground_truth"]: r for r in records}
+            chosen = [by_id[t] for t in prefer if t in by_id][: args.n_tasks]
+            rest = [r for r in records if r["ground_truth"] not in {c["ground_truth"] for c in chosen}]
+            rng.shuffle(rest)
+            records = chosen + rest[: max(0, args.n_tasks - len(chosen))]
+    else:
+        # default path: taxonomy → 100
+        if not args.taxonomy_parquet.is_file():
+            raise SystemExit(f"ERROR: taxonomy parquet missing: {args.taxonomy_parquet}")
+        records = select_from_taxonomy(
+            taxonomy_parquet=args.taxonomy_parquet,
+            exclude=exclude,
+            prefer_ids=prefer,
+            n_tasks=args.n_tasks,
+            seed=args.seed,
+        )
+
+    # Safety: no holdout leakage
+    leaked = [r["ground_truth"] for r in records if r["ground_truth"] in exclude]
+    if leaked:
+        raise SystemExit(f"ERROR: holdout leakage in RL set: {leaked[:5]}")
+
+    out_dir = args.out_root / args.name
+    write_dataset(records, out_dir)
+
+
+if __name__ == "__main__":
+    main()

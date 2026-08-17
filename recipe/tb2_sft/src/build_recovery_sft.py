@@ -90,18 +90,33 @@ def recovery_pairs(
     for i, m in enumerate(messages):
         if i <= critical or m.get("role") != "assistant":
             continue
-        prompt = F.render_chat(messages[:i])
-        response = F.render_assistant(m)
+        prior = messages[:i]
+        asst = dict(m)
+        if asst.get("content") is None:
+            asst["content"] = ""
+        elif not isinstance(asst["content"], str):
+            asst["content"] = json.dumps(asst["content"], ensure_ascii=False)
+        response = F.render_assistant(asst)
         if len(response.strip()) < 4:
             continue
-        if len(prompt) + len(response) > max_chars:
+        prompt_text = F.render_chat(prior)
+        if len(prompt_text) + len(response) > max_chars:
             # Trim the oldest context rather than dropping a good demonstration;
             # the critical event and everything after it must survive the trim.
             keep_from = max(0, critical - 4)
-            prompt = F.render_chat(messages[keep_from:i])
-            if len(prompt) + len(response) > max_chars:
+            prior = messages[keep_from:i]
+            prompt_text = F.render_chat(prior)
+            if len(prompt_text) + len(response) > max_chars:
                 continue
-        out.append(dict(prompt=prompt, response=response, turn_index=i))
+        out.append(
+            dict(
+                prompt=prior,
+                completion=[asst],
+                prompt_text=prompt_text,
+                response=response,
+                turn_index=i,
+            )
+        )
         if len(out) >= max_pairs:
             break
     return out
@@ -193,7 +208,7 @@ def main() -> int:
                            quality_score=1.0, weight=1.0, n_tool_turns=r.get("n_tool_calls", 0),
                            n_recovered_tools=0, messages=messages)
                 pairs = F.expand_turn_pairs(rec, max_pairs=args.max_pairs_per_traj)
-                pairs = [p for p in pairs if len(p["prompt"]) + len(p["response"]) <= args.max_chars]
+                pairs = [p for p in pairs if F.pair_char_len(p) <= args.max_chars]
                 kind = "clean_success"
 
             if not pairs:
@@ -201,12 +216,16 @@ def main() -> int:
                 continue
 
             for p in pairs:
-                records.append(dict(
-                    prompt=p["prompt"], response=p["response"],
+                row = dict(
+                    prompt=p["prompt"],
+                    completion=p.get("completion"),
+                    prompt_text=p.get("prompt_text"),
+                    response=p.get("response"),
                     task=task, run=trial.parent.name, reward=1.0, weight=1.0,
                     source_bucket=f"own_{kind}", quality_score=1.0,
                     turn_index=p.get("turn_index", 0),
-                ))
+                )
+                records.append(row)
             stats[kind] += 1
             per_task_kept[task] += 1
 
@@ -319,13 +338,15 @@ def main() -> int:
                                    weight=1.0, n_tool_turns=ntc, n_recovered_tools=0,
                                    messages=msgs)
                         ps = F.expand_turn_pairs(rec, max_pairs=args.max_pairs_per_traj)
-                        ps = [q for q in ps
-                              if len(q["prompt"]) + len(q["response"]) <= args.max_chars]
+                        ps = [q for q in ps if F.pair_char_len(q) <= args.max_chars]
                         if not ps:
                             continue
                         for q in ps:
                             records.append(dict(
-                                prompt=q["prompt"], response=q["response"],
+                                prompt=q["prompt"],
+                                completion=q.get("completion"),
+                                prompt_text=q.get("prompt_text"),
+                                response=q.get("response"),
                                 task=str(md.get("task")), run="allenai/tmax-sft:only_success",
                                 reward=1.0, weight=1.0, source_bucket="tmax_deficit_topup",
                                 quality_score=1.0, turn_index=q.get("turn_index", 0),

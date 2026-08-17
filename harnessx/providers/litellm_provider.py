@@ -24,6 +24,28 @@ _log = logging.getLogger(__name__)
 _RL_MAX_RETRIES = 5
 _RL_BACKOFF = (15.0, 30.0, 60.0, 120.0, 240.0)
 
+# Transient server-side failures, retried on a tighter schedule than 429s.
+# Bedrock in particular answers with a bare 503 (``BedrockException -`` with an
+# empty body) under capacity pressure. litellm maps that to
+# ServiceUnavailableError, which used to escape this provider uncaught: the
+# runloop swallowed it as ``exit_reason="error"`` and the meta-agent returned
+# without writing config.yaml, so one capacity blip failed a whole evolve round
+# (and with it the pipeline) after the caller had already paid for the rollout.
+_TRANSIENT_MAX_RETRIES = 5
+_TRANSIENT_BACKOFF = (5.0, 15.0, 30.0, 60.0, 120.0)
+
+
+def _transient_errors(litellm_mod) -> tuple[type[BaseException], ...]:
+    """Retryable non-429 exception classes, tolerating litellm version drift."""
+    exc = litellm_mod.exceptions
+    names = (
+        "ServiceUnavailableError",  # 503 — Bedrock capacity blips land here
+        "InternalServerError",  # 500
+        "APIConnectionError",
+        "Timeout",
+    )
+    return tuple(c for c in (getattr(exc, n, None) for n in names) if c is not None)
+
 
 _ANTHROPIC_MODEL_PREFIXES = ("claude-", "anthropic/")
 
@@ -229,6 +251,19 @@ class LiteLLMProvider(AgenticMixin, BaseModelProvider):
                     "LiteLLMProvider: 429 rate limit on attempt %d/%d, retrying in %.0fs — %s",
                     attempt + 1,
                     _RL_MAX_RETRIES,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+            except _transient_errors(litellm) as exc:
+                if attempt >= _TRANSIENT_MAX_RETRIES:
+                    raise
+                delay = _TRANSIENT_BACKOFF[min(attempt, len(_TRANSIENT_BACKOFF) - 1)]
+                _log.warning(
+                    "LiteLLMProvider: transient %s on attempt %d/%d, retrying in %.0fs — %s",
+                    type(exc).__name__,
+                    attempt + 1,
+                    _TRANSIENT_MAX_RETRIES,
                     delay,
                     exc,
                 )

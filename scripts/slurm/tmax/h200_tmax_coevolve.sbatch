@@ -65,6 +65,7 @@ export TMAX_MAX_TOKENS="${TMAX_MAX_TOKENS:-4096}"
 export ENABLE_RL="${ENABLE_RL:-0}"
 export RL_EPISODES="${RL_EPISODES:-512}"
 export RL_N_TASKS="${RL_N_TASKS:-100}"
+export INSTALL_RL_DEPS="${INSTALL_RL_DEPS:-1}"
 
 mkdir -p /fsx/home/jixuan.chen/logs "$REPO/outputs/tmax_coevolve"
 

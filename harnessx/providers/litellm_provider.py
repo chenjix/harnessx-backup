@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import re
 from typing import Callable
 
 from ..core.events import Message, ModelResponseEvent, ToolSchema, Usage
@@ -92,6 +93,10 @@ def _delta_get(delta: object, key: str):
     if isinstance(delta, dict):
         return delta.get(key)
     return getattr(delta, key, None)
+
+
+# Model families whose API takes `max_completion_tokens` in place of `max_tokens`.
+_NEEDS_MAX_COMPLETION_TOKENS = re.compile(r"(^|/)(gpt-5|o[1-4])(\b|[-.])", re.IGNORECASE)
 
 
 class LiteLLMProvider(AgenticMixin, BaseModelProvider):
@@ -202,6 +207,15 @@ class LiteLLMProvider(AgenticMixin, BaseModelProvider):
             kwargs["tools"] = litellm_tools
         if "max_tokens" not in kwargs and self.max_output_tokens is not None:
             kwargs["max_tokens"] = self.max_output_tokens
+        # The gpt-5 / o-series families reject `max_tokens` outright:
+        #   "Unsupported parameter: 'max_tokens' is not supported with this model.
+        #    Use 'max_completion_tokens' instead."
+        # litellm rewrites this automatically only for model names in its own map;
+        # a gateway-hosted name like `openai/gpt-5.5` is not, so every meta-agent
+        # call would fail with a 400 before doing any work. Translate rather than
+        # drop, so the output cap still applies.
+        if _NEEDS_MAX_COMPLETION_TOKENS.search(self.model) and "max_tokens" in kwargs:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
 
         for attempt in range(_RL_MAX_RETRIES + 1):
             try:

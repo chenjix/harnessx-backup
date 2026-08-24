@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -31,6 +32,43 @@ def image_tag(task_id: str, container_def: str) -> str:
     return f"tmax-eval:{safe}-{h}"
 
 
+_SHARED_BASE_OK: bool | None = None
+
+
+def _shared_base_tag() -> str | None:
+    """Tag of an image holding the preamble every taxonomy def repeats, if usable.
+
+    Set ``TMAX_SHARED_BASE_TAG`` (see scripts/tmax/prebuild_tmax_images.sh
+    SHARED_BASE=1) to rebase task images onto it. Every taxonomy container_def is
+    ``FROM ubuntu:22.04`` plus a %post that reinstalls python3/pip/pytest, and the
+    whole %post becomes one layer — so without this each task image carries its
+    own ~0.4G copy of the same interpreter. Rebasing keeps the per-task layer down
+    to what the task itself adds, which is the difference between ~60G and ~15G
+    for a 152-task set. The image TAG is unchanged either way.
+    """
+    global _SHARED_BASE_OK
+    tag = (os.environ.get("TMAX_SHARED_BASE_TAG") or "").strip()
+    if not tag:
+        return None
+    if _SHARED_BASE_OK is None:
+        _SHARED_BASE_OK = _run(["docker", "image", "inspect", tag], timeout=30).returncode == 0
+    return tag if _SHARED_BASE_OK else None
+
+
+def _maybe_rebase(dockerfile: Path) -> None:
+    """Point a materialized Dockerfile at the shared base, when there is one."""
+    tag = _shared_base_tag()
+    if tag is None:
+        return
+    text = dockerfile.read_text(encoding="utf-8")
+    # Only ubuntu:22.04 defs — do not silently swap someone else's base out.
+    if not text.startswith("FROM ubuntu:22.04\n"):
+        return
+    dockerfile.write_text(
+        text.replace("FROM ubuntu:22.04\n", f"FROM {tag}\n", 1), encoding="utf-8"
+    )
+
+
 def build_image(
     task_id: str,
     container_def: str,
@@ -49,7 +87,7 @@ def build_image(
     for p in ctx.iterdir():
         if p.is_file():
             p.unlink()
-    materialize_build_context(container_def, ctx)
+    _maybe_rebase(materialize_build_context(container_def, ctx))
     proc = _run(
         ["docker", "build", "--network=host", "-t", tag, str(ctx)],
         timeout=build_timeout,

@@ -3047,6 +3047,24 @@ def run_training(
     save_final_model(args, policy_group, tokenizer, training_step, wandb_url, tc.chat_template_name)
 
 
+def _load_dataset_for_discovery(dataset_name: str, split: str):
+    """Load one mixer entry the way DatasetConfig.__post_init__ loads it.
+
+    LOCAL DEVIATION (harnessx): dataset_transformation.DatasetConfig special-cases
+    local .jsonl/.parquet mixer entries, but this discovery pass handed the path
+    straight to datasets.load_dataset, which only understands hub ids and dataset
+    directories. Any run whose mixer is a local file therefore died here with a
+    misleading "Couldn't find any data file at <...>/train.jsonl" — after the env
+    pools were already up — even though the file exists. Mirroring the existing
+    convention keeps one meaning of "mixer entry" across both call sites.
+    """
+    if os.path.exists(dataset_name) and dataset_name.endswith(".jsonl"):
+        return datasets.load_dataset("json", data_files=dataset_name, split=split)
+    if os.path.exists(dataset_name) and dataset_name.endswith(".parquet"):
+        return datasets.load_dataset("parquet", data_files=dataset_name, split=split)
+    return datasets.load_dataset(dataset_name, split=split)
+
+
 def _discover_tools_from_datasets(dataset_mixer_list: list[str], dataset_mixer_list_splits: list[str]) -> set[str]:
     """Scan datasets for tool names referenced in 'tools' and 'env_config' columns."""
     tool_names: set[str] = set()
@@ -3059,7 +3077,7 @@ def _discover_tools_from_datasets(dataset_mixer_list: list[str], dataset_mixer_l
     for i in range(0, len(dataset_mixer_list), 2):
         dataset_name = dataset_mixer_list[i]
         split = splits[i // 2]
-        ds = datasets.load_dataset(dataset_name, split=split)
+        ds = _load_dataset_for_discovery(dataset_name, split)
         if TOOLS_COLUMN_KEY in ds.column_names:
             for tools in ds[TOOLS_COLUMN_KEY]:
                 if tools:

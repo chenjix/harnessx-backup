@@ -29,6 +29,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -133,14 +134,47 @@ def _add_tar_file(tar: tarfile.TarFile, path: str, content: str, mode: int = 0o7
     tar.addfile(info, io.BytesIO(data))
 
 
-def _row_to_record(row: dict[str, Any]) -> dict[str, Any] | None:
+def task_image(task_id: str, container_def: str, *, mode: str, registry: str) -> str:
+    """The image the RL sandbox must boot for this task.
+
+    ``open_instruct.environments.swerl_vanillux_sandbox`` never runs setup.sh: it
+    boots ``env_config.image`` (or ``task_data/<task>/image.txt``), uploads
+    ``tests/`` at submit time, and nothing else. The task's *environment* — the
+    files and packages its %post creates — therefore has to be baked into the
+    image, which is exactly what the official pipeline does (14601 tmax tasks map
+    to 14490 distinct per-task images in allenai/tmax-15k-open-instruct).
+
+    Handing it the ``From:`` base instead (``ubuntu:22.04``) boots a container
+    with none of the task's state, so every rollout scores 0.
+
+    * ``local``    — the content-hash tag ``recipe/tmax_eval`` builds and the
+                     coevolve prebuild already populates. Right for a single node
+                     where rollouts share the docker daemon.
+    * ``registry`` — ``<registry>:<hash12>``, for a pushed multi-node setup.
+    * ``base``     — the ``From:`` line. Only correct if the task needs no setup.
+    """
+    if mode == "base":
+        image, _ = parse_container_def(container_def)
+        return image
+    digest = hashlib.sha1(container_def.encode()).hexdigest()[:12]
+    if mode == "registry":
+        if not registry:
+            raise SystemExit("ERROR: --image-mode registry requires --image-registry")
+        return f"{registry}:{digest}"
+    safe = task_id.replace("/", "_")
+    return f"tmax-eval:{safe}-{digest}"
+
+
+def _row_to_record(
+    row: dict[str, Any], *, env_name: str, image_mode: str, image_registry: str
+) -> dict[str, Any] | None:
     task_id = str(row.get("task_id") or "")
     description = str(row.get("description") or "")
     test_final = str(row.get("test_final_state") or "")
     container_def = str(row.get("container_def") or "")
     if not task_id or not description or not test_final:
         return None
-    image, _ = parse_container_def(container_def)
+    image = task_image(task_id, container_def, mode=image_mode, registry=image_registry)
     return {
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -148,7 +182,10 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any] | None:
         ],
         "ground_truth": task_id,
         "dataset": "passthrough",
-        "env_config": {"env_name": "swerl_sandbox", "task_id": task_id, "image": image},
+        # env_configs are keyed by env_name (data_loader._merge_env_config), so a
+        # name that does not match --tools silently drops the per-task image and
+        # the env dies with "requires an explicit image per task".
+        "env_config": {"env_name": env_name, "task_id": task_id, "image": image},
         "source": "tmax_taxonomy_rl_train",
         "domain": row.get("domain"),
         # keep raw fields for env jsonl export / debugging
@@ -171,6 +208,9 @@ def select_from_taxonomy(
     prefer_ids: list[str],
     n_tasks: int,
     seed: int,
+    env_name: str,
+    image_mode: str,
+    image_registry: str,
 ) -> list[dict[str, Any]]:
     try:
         import pandas as pd
@@ -212,13 +252,17 @@ def select_from_taxonomy(
 
     rows: list[dict[str, Any]] = []
     for tid in chosen[:n_tasks]:
-        rec = _row_to_record(by_id[tid])
+        rec = _row_to_record(
+            by_id[tid], env_name=env_name, image_mode=image_mode, image_registry=image_registry
+        )
         if rec:
             rows.append(rec)
     return rows
 
 
-def load_from_envs_jsonl(path: Path, exclude: set[str]) -> list[dict[str, Any]]:
+def load_from_envs_jsonl(
+    path: Path, exclude: set[str], *, env_name: str, image_mode: str, image_registry: str
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as fh:
         for line in fh:
@@ -229,7 +273,9 @@ def load_from_envs_jsonl(path: Path, exclude: set[str]) -> list[dict[str, Any]]:
             tid = str(raw.get("task_id") or "")
             if tid in exclude:
                 continue
-            rec = _row_to_record(raw)
+            rec = _row_to_record(
+                raw, env_name=env_name, image_mode=image_mode, image_registry=image_registry
+            )
             if rec:
                 rows.append(rec)
     return rows
@@ -259,14 +305,21 @@ def write_dataset(records: list[dict[str, Any]], out_dir: Path) -> dict[str, Any
             container_def = raw["container_def"]
             _, post_commands = parse_container_def(container_def)
 
+            image = rec["env_config"]["image"]
             task_dir = task_data_dir / task_id
             _write_text(task_dir / "instruction.md", description)
             _write_text(task_dir / "tests" / "test.sh", make_test_sh(test_final), mode=0o755)
+            # image.txt is the env's fallback when env_config carries no image
+            # (swerl_vanillux_sandbox._do_reset reads it before giving up).
+            _write_text(task_dir / "image.txt", image + "\n")
             if post_commands:
+                # Kept for provenance only: the vanillux env does NOT run setup.sh.
+                # Whatever this installs has to already be inside `image`.
                 _write_text(task_dir / "setup.sh", make_setup_sh(post_commands), mode=0o755)
 
             _add_tar_file(tar, f"{task_id}/instruction.md", description, mode=0o644)
             _add_tar_file(tar, f"{task_id}/tests/test.sh", make_test_sh(test_final))
+            _add_tar_file(tar, f"{task_id}/image.txt", image + "\n", mode=0o644)
             if post_commands:
                 _add_tar_file(tar, f"{task_id}/setup.sh", make_setup_sh(post_commands))
 
@@ -274,6 +327,7 @@ def write_dataset(records: list[dict[str, Any]], out_dir: Path) -> dict[str, Any
             env_rows.append(
                 {
                     "task_id": task_id,
+                    "rl_image": image,
                     "domain": raw.get("domain"),
                     "task_complexity": raw.get("task_complexity"),
                     "description": description,
@@ -321,8 +375,27 @@ def write_dataset(records: list[dict[str, Any]], out_dir: Path) -> dict[str, Any
         hf_path = None
         print(f"WARN: could not save hf_dataset ({e}); train.jsonl is enough for open-instruct")
 
+    images = sorted({r["env_config"]["image"] for r in clean_records})
+    missing_images: list[str] = []
+    try:
+        import subprocess
+
+        have = set(
+            subprocess.run(
+                ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+                text=True, capture_output=True, timeout=120,
+            ).stdout.split()
+        )
+        missing_images = [i for i in images if i not in have]
+    except Exception:  # noqa: BLE001 — docker may not be reachable from here
+        missing_images = []
+
     summary = {
         "n_tasks": len(clean_records),
+        "env_name": clean_records[0]["env_config"]["env_name"],
+        "n_images": len(images),
+        "n_images_missing_locally": len(missing_images),
+        "images_missing_locally": missing_images[:20],
         "train_jsonl": str(train_jsonl),
         "envs_jsonl": str(envs_jsonl),
         "hf_dataset": hf_path,
@@ -337,6 +410,15 @@ def write_dataset(records: list[dict[str, Any]], out_dir: Path) -> dict[str, Any
         f"wrote {out_dir}: n_tasks={len(clean_records)} "
         f"train.jsonl + task_data/ domains={dict(tasks_list['by_domain'])}"
     )
+    print(f"  env_name={clean_records[0]['env_config']['env_name']}  images={len(images)}")
+    if missing_images:
+        print(
+            f"  WARNING: {len(missing_images)} of {len(images)} task image(s) are NOT on this "
+            f"node, e.g. {missing_images[:3]}\n"
+            f"           Every rollout on those tasks fails to reset. Build them first:\n"
+            f"           SHARED_BASE=1 ENVS_JSONL={out_dir}/eval_task_set_with_envs.jsonl \\\n"
+            f"             bash scripts/tmax/prebuild_tmax_images.sh"
+        )
     return summary
 
 
@@ -365,6 +447,18 @@ def main() -> None:
         default=None,
         help="Optional explicit envs jsonl (must not be holdout-102).",
     )
+    ap.add_argument(
+        "--env-name",
+        default="swerl_vanillux_sandbox",
+        help="Must match --tools passed to grpo_fast; env_configs are keyed by it.",
+    )
+    ap.add_argument(
+        "--image-mode",
+        choices=("local", "registry", "base"),
+        default="local",
+        help="Where the per-task image lives (default: the local content-hash tag).",
+    )
+    ap.add_argument("--image-registry", default="", help="registry mode: <registry>:<hash12>")
     args = ap.parse_args()
 
     exclude = set(_load_task_ids(args.exclude_tasks))
@@ -379,7 +473,10 @@ def main() -> None:
             )
         if not envs.is_file():
             raise SystemExit(f"ERROR: missing envs jsonl: {envs}")
-        records = load_from_envs_jsonl(envs, exclude)
+        records = load_from_envs_jsonl(
+            envs, exclude, env_name=args.env_name,
+            image_mode=args.image_mode, image_registry=args.image_registry,
+        )
         if args.n_tasks and len(records) > args.n_tasks:
             rng = random.Random(args.seed)
             # keep prefer ids, then fill
@@ -398,6 +495,9 @@ def main() -> None:
             prefer_ids=prefer,
             n_tasks=args.n_tasks,
             seed=args.seed,
+            env_name=args.env_name,
+            image_mode=args.image_mode,
+            image_registry=args.image_registry,
         )
 
     # Safety: no holdout leakage

@@ -22,26 +22,61 @@ ROOT="$(cd "$_HX_SCRIPTS/.." && pwd)"
 cd "$ROOT"
 source "$_HX_SCRIPTS/_common.sh"
 
+# grpo_fast needs ray+deepspeed+openenv+vllm+liger together; only the env built
+# from open-instruct's own uv.lock has all of them (scripts/tmax/setup_rl_env.sh).
+_OI_VENV_PY="$ROOT/tmax/training/open-instruct/.venv/bin/python"
+if [[ -z "${RL_PYTHON:-}" && -x "$_OI_VENV_PY" ]]; then
+  RL_PYTHON="$_OI_VENV_PY"
+fi
 PY="${RL_PYTHON:-${SFT_PYTHON:-${PYTHON_BIN:-$(python_bin)}}}"
-export PYTHON_BIN="$PY" SFT_PYTHON="$PY" RL_PYTHON="$PY"
+export RL_PYTHON="$PY"
+# Leave PYTHON_BIN/SFT_PYTHON alone: the merge step and the dataset builder run
+# fine in the serving venv, and pointing them at the RL env is not required.
+export PYTHON_BIN="${PYTHON_BIN:-$(python_bin)}"
 
 SMOKE_NAME="${SMOKE_NAME:-tmax_rl_smoke}"
+# The smoke deliberately runs the 4B model: it exercises the same code path as 9B
+# (same env, same tool parser, same DPPO loss) with a fraction of the memory and
+# rollout time. The real run sets MODEL_SIZE=9b.
+export MODEL_SIZE="${MODEL_SIZE:-4b}"
 RL_N_TASKS="${RL_N_TASKS:-4}"
-RL_EPISODES="${RL_EPISODES:-8}"
-RL_UNIQUE_PROMPTS="${RL_UNIQUE_PROMPTS:-1}"
+# Shape has to satisfy grpo_fast's rollout-group constraint:
+#   unique_prompts * samples_per_prompt >= num_learners / sequence_parallel_size
+#   unique_prompts >= vllm_num_engines
+# 4 learners + 2 engines + 2x4 = 8 seq/step clears both; RL_EPISODES=32 is then
+# 4 optimizer steps, and save_freq=2 guarantees a checkpoint exists for stage 4.
+RL_EPISODES="${RL_EPISODES:-32}"
+RL_UNIQUE_PROMPTS="${RL_UNIQUE_PROMPTS:-2}"
 RL_SAMPLES_PER_PROMPT="${RL_SAMPLES_PER_PROMPT:-4}"
 RL_MAX_STEPS="${RL_MAX_STEPS:-6}"
 RL_PER_TURN_MAX_TOKENS="${RL_PER_TURN_MAX_TOKENS:-1024}"
 RL_RESPONSE_LENGTH="${RL_RESPONSE_LENGTH:-2048}"
 RL_POOL_SIZE="${RL_POOL_SIZE:-4}"
-RL_GPUS="${RL_GPUS:-${GPU_POOL:-0,1}}"
+# 8x A100-40GB: ZeRO-3 shards params+grads+Adam over the learners, so a 9B needs
+# ~(18+18+72)/N GB per learner — 6 learners lands near 18GB + activations, 2
+# learners does not fit at all. vLLM engines only hold weights + KV, so 2 is
+# plenty for a smoke. Override with RL_N_LEARNERS / RL_N_VLLM.
+RL_GPUS="${RL_GPUS:-${GPU_POOL:-0,1,2,3,4,5,6,7}}"
+# Fewer learners than the 9B run needs: a smaller world_size means a smaller
+# minimum rollout group, so the smoke finishes a step in 8 episodes instead of 12+.
+RL_N_LEARNERS="${RL_N_LEARNERS:-4}"
+RL_N_VLLM="${RL_N_VLLM:-2}"
 RL_ASYNC_STEPS="${RL_ASYNC_STEPS:-1}"
-RL_DEEPSPEED_STAGE="${RL_DEEPSPEED_STAGE:-2}"
+RL_DEEPSPEED_STAGE="${RL_DEEPSPEED_STAGE:-3}"
 # Smoke must not soft-filter away every group (tiny N → frequent zero-std).
 RL_FILTER_ZERO_STD="${RL_FILTER_ZERO_STD:-0}"
-INSTALL_RL_DEPS="${INSTALL_RL_DEPS:-1}"
+# 0 by default now: the uv-managed RL env is complete, and pip-installing into it
+# can pull a torch that disagrees with the locked flash-attn/vllm wheels.
+INSTALL_RL_DEPS="${INSTALL_RL_DEPS:-0}"
 
-ADAPTER_DIR="${ADAPTER_DIR:-$ROOT/outputs/sft/tmax_coev_rep1_i1}"
+# Adapter is OPTIONAL. With no SFT run yet (RL-first debugging), leave it empty
+# and the smoke runs DPPO straight off the base model — the merge stage is the
+# only thing that needs it, and open-instruct wants full weights either way.
+ADAPTER_DIR="${ADAPTER_DIR-$ROOT/outputs/sft/tmax_coev_rep1_i1}"
+if [[ -n "$ADAPTER_DIR" && ! -f "$ADAPTER_DIR/adapter_config.json" ]]; then
+  echo "note: no adapter at $ADAPTER_DIR — running RL from the base model" >&2
+  ADAPTER_DIR=""
+fi
 RL_DATASET_NAME="${RL_DATASET_NAME:-${SMOKE_NAME}_data}"
 RL_OUTPUT_DIR="${RL_OUTPUT_DIR:-$ROOT/outputs/rl/${SMOKE_NAME}}"
 RL_MERGED_DIR="${RL_MERGED_DIR:-$ROOT/outputs/rl/merged/${SMOKE_NAME}_from_sft}"
@@ -55,10 +90,11 @@ die() { echo "ERROR: $*" >&2; exit 2; }
 
 log "plan"
 echo "  python      : $PY"
-echo "  adapter     : $ADAPTER_DIR"
+echo "  adapter     : ${ADAPTER_DIR:-<none, base model>}"
 echo "  merged      : $RL_MERGED_DIR"
 echo "  dataset     : $RL_DATASET_NAME (n=$RL_N_TASKS)"
-echo "  episodes    : $RL_EPISODES  group=${RL_UNIQUE_PROMPTS}x${RL_SAMPLES_PER_PROMPT}"
+echo "  model       : Qwen3.5-${MODEL_SIZE}"
+echo "  episodes    : $RL_EPISODES  group=${RL_UNIQUE_PROMPTS}x${RL_SAMPLES_PER_PROMPT} learners=${RL_N_LEARNERS} engines=${RL_N_VLLM}"
 echo "  gpus        : $RL_GPUS"
 echo "  output      : $RL_OUTPUT_DIR"
 nvidia-smi -L || true
@@ -67,10 +103,11 @@ nvidia-smi -L || true
 log "stage0 preflight"
 command -v docker >/dev/null || die "docker binary missing"
 docker info >/dev/null 2>&1 || die "docker not usable (daemon / permissions)"
-[[ -f "$ADAPTER_DIR/adapter_config.json" ]] || die "SFT adapter missing: $ADAPTER_DIR (need adapter_config.json)"
-ls "$ADAPTER_DIR"/adapter_model.safetensors >/dev/null 2>&1 \
-  || ls "$ADAPTER_DIR"/adapter_model.bin >/dev/null 2>&1 \
-  || die "SFT adapter has no weights under $ADAPTER_DIR"
+if [[ -n "$ADAPTER_DIR" ]]; then
+  ls "$ADAPTER_DIR"/adapter_model.safetensors >/dev/null 2>&1 \
+    || ls "$ADAPTER_DIR"/adapter_model.bin >/dev/null 2>&1 \
+    || die "SFT adapter has no weights under $ADAPTER_DIR"
+fi
 [[ -f "$ROOT/data/external/tmax-taxonomy/data/train-00000-of-00001.parquet" ]] \
   || die "taxonomy parquet missing (see docs/DATA.md)"
 [[ -d "$ROOT/tmax/training/open-instruct/open_instruct" ]] \
@@ -109,7 +146,12 @@ try:
 except Exception as e:
     missing.append(f"openenv.core({e})")
 if missing:
-    raise SystemExit("missing modules: " + ", ".join(missing))
+    raise SystemExit(
+        "missing modules: " + ", ".join(missing)
+        + "\n       Build the RL env from open-instruct's lockfile:\n"
+        + "         bash scripts/tmax/setup_rl_env.sh\n"
+        + "       then re-run with RL_PYTHON=<open-instruct>/.venv/bin/python"
+    )
 print("deps OK")
 PY
 
@@ -141,30 +183,45 @@ assert all(str(t).startswith("task_") for t in s["task_ids"])
 print("dataset OK", s["n_tasks"], "domains", s.get("by_domain"))
 PY
 
-# ── 2) merge SFT → full weights ─────────────────────────────────────────────
-log "stage2 merge SFT LoRA → full weights"
-rm -rf "$RL_MERGED_DIR"
-BASE_MODEL="${BASE_MODEL:-$MODEL}" ADAPTER_DIR="$ADAPTER_DIR" OUTPUT_DIR="$RL_MERGED_DIR" \
-  bash "$ROOT/scripts/tmax/merge_sft_adapter.sh"
-[[ -f "$RL_MERGED_DIR/config.json" ]] || die "merge failed: no config.json in $RL_MERGED_DIR"
-[[ -f "$RL_MERGED_DIR/model.safetensors" || -f "$RL_MERGED_DIR/model.safetensors.index.json" ]] \
-  || die "merge failed: no model weights in $RL_MERGED_DIR"
-echo "merged OK → $RL_MERGED_DIR"
+# ── 1b) per-task images ─────────────────────────────────────────────────────
+# swerl_vanillux_sandbox boots env_config.image and never runs setup.sh, so the
+# task environment has to be inside the image. Same content-hash tags the eval
+# path uses, so anything already built is skipped.
+log "stage1b build per-task sandbox images"
+SHARED_BASE="${SHARED_BASE:-1}" JOBS="${IMAGE_JOBS:-6}" \
+  ENVS_JSONL="$ROOT/recipe/tb2_sft/data/$RL_DATASET_NAME/eval_task_set_with_envs.jsonl" \
+  bash "$ROOT/scripts/tmax/prebuild_tmax_images.sh"
+
+# ── 2) merge SFT → full weights (only when an adapter was given) ────────────
+if [[ -n "$ADAPTER_DIR" ]]; then
+  log "stage2 merge SFT LoRA → full weights"
+  rm -rf "$RL_MERGED_DIR"
+  BASE_MODEL="${BASE_MODEL:-$MODEL}" ADAPTER_DIR="$ADAPTER_DIR" OUTPUT_DIR="$RL_MERGED_DIR" \
+    bash "$ROOT/scripts/tmax/merge_sft_adapter.sh"
+  [[ -f "$RL_MERGED_DIR/config.json" ]] || die "merge failed: no config.json in $RL_MERGED_DIR"
+  [[ -f "$RL_MERGED_DIR/model.safetensors" || -f "$RL_MERGED_DIR/model.safetensors.index.json" ]] \
+    || die "merge failed: no model weights in $RL_MERGED_DIR"
+  echo "merged OK → $RL_MERGED_DIR"
+  SMOKE_INIT_MODEL="$RL_MERGED_DIR"
+else
+  log "stage2 skipped (no adapter) — init from base $MODEL"
+  SMOKE_INIT_MODEL="${BASE_MODEL:-$MODEL}"
+fi
 
 # ── 3) tiny DPPO ────────────────────────────────────────────────────────────
 log "stage3 grpo_fast / DPPO"
 rm -rf "$RL_OUTPUT_DIR"
 export RL_DATASET_NAME
 export RL_OUTPUT_DIR
-export RL_INIT_MODEL="$RL_MERGED_DIR"
+export RL_INIT_MODEL="$SMOKE_INIT_MODEL"
 export ADAPTER_DIR=""   # already merged; do not re-merge
 export RL_N_TASKS RL_EPISODES RL_UNIQUE_PROMPTS RL_SAMPLES_PER_PROMPT
 export RL_MAX_STEPS RL_PER_TURN_MAX_TOKENS RL_RESPONSE_LENGTH RL_POOL_SIZE
-export RL_GPUS RL_ASYNC_STEPS RL_DEEPSPEED_STAGE
+export RL_GPUS RL_ASYNC_STEPS RL_DEEPSPEED_STAGE RL_N_LEARNERS RL_N_VLLM
 export RL_FILTER_ZERO_STD
 export RL_EXP_NAME="${SMOKE_NAME}"
-export RL_SAVE_FREQ="${RL_SAVE_FREQ:-4}"
-export RL_CKPT_FREQ="${RL_CKPT_FREQ:-4}"
+export RL_SAVE_FREQ="${RL_SAVE_FREQ:-2}"
+export RL_CKPT_FREQ="${RL_CKPT_FREQ:-2}"
 export RL_SYSTEM_PROMPT_FILE="${RL_SYSTEM_PROMPT_FILE:-$ROOT/tmax/training/open-instruct/scripts/train/debug/envs/swerl_vanillux_sandbox_system_prompt.txt}"
 
 bash "$ROOT/scripts/tmax/train_rl_grpo.sh"
@@ -190,8 +247,8 @@ if [[ -f "$LOG_ROOT/train_rl_grpo.log" ]]; then
 fi
 
 log "PASSED"
-echo "  adapter (SFT) : $ADAPTER_DIR"
-echo "  merged init   : $RL_MERGED_DIR"
+echo "  adapter (SFT) : ${ADAPTER_DIR:-<none, base model>}"
+echo "  init model    : $SMOKE_INIT_MODEL"
 echo "  dataset       : $ROOT/recipe/tb2_sft/data/$RL_DATASET_NAME"
 echo "  rl ckpt       : $RL_OUTPUT_DIR"
 ls -la "$RL_OUTPUT_DIR" | head -25

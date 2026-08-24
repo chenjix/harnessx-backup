@@ -27,10 +27,17 @@
 #SBATCH --partition=ml.p4d.24xlarge
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:a100:8
-#SBATCH --cpus-per-task=96
-#SBATCH --mem=0
-#SBATCH --time=4-00:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=240G
+# Sized to what the job uses (10 sandbox containers, Ray object store, one CPU-side
+# LoRA merge) rather than the whole node. `--mem=0` and 96 CPUs made the job
+# unschedulable onto any partially-occupied node, which on a saturated partition
+# is the difference between starting today and waiting for a 4-day job to end.
+#SBATCH --time=12:00:00
 #SBATCH --requeue
+# 12h rather than the 4 days a full 3-iteration chain needs: the loop resumes from
+# its .done markers, so two 12h jobs cost the same compute as one 24h job while
+# leaving the partition schedulable for everyone else. Pass --time to override.
 #SBATCH --output=/fsx/home/jixuan.chen/logs/tmax_coevolve_a100_%j.out
 #SBATCH --error=/fsx/home/jixuan.chen/logs/tmax_coevolve_a100_%j.err
 
@@ -143,8 +150,30 @@ echo "  ENABLE_RL          : $ENABLE_RL  (RL train n=$RL_N_TASKS; holdout=eval o
 echo "  SFT seq/bs         : $SFT_MAX_SEQ_LENGTH / $SFT_PER_DEVICE_BS (eff $SFT_EFFECTIVE_BATCH)"
 echo "  vLLM               : max_model_len=$MAX_MODEL_LEN util=$GPU_MEMORY_UTILIZATION"
 
-# Docker is required for Tmax task envs — fail here rather than mid-round.
+# Docker is required for Tmax task envs — fail here rather than mid-round. The
+# space check matters as much as the daemon check: the evolve and holdout stages
+# build a container image per task with no headroom test of their own, and a node
+# whose image store fills up takes slurmd's spool directory with it (that is how
+# ip-10-3-108-10 ended up drained with "SlurmdSpoolDir is full").
 docker info >/dev/null 2>&1 || { echo "ERROR: docker unavailable on $(hostname)" >&2; exit 2; }
+
+# Size the space check to the run rather than to the full 152-task set: a smoke
+# with a 4-task evolve set and a 6-task holdout needs ~10 images, and a fixed
+# 30G floor rejects nodes that have ample room for it (that is how 32654 died on
+# a node with 25G free). ~8G covers the shared python3/pip/pytest base layer;
+# each extra task image adds ~0.12G on top of it.
+export EVOLVE_TASKS_JSON="${EVOLVE_TASKS_JSON:-$REPO/recipe/tb2_evolver/tasks_tmax_evolve50_list.json}"
+export HOLDOUT_TASKS_JSON="${HOLDOUT_TASKS_JSON:-$REPO/recipe/tb2_evolver/tasks_tmax_only200.json}"
+if [[ -z "${MIN_IMAGE_GB:-}" ]]; then
+  _n_img="$("$PYTHON_BIN" "$REPO/scripts/tmax/count_task_images.py" \
+              "$EVOLVE_TASKS_JSON" "$HOLDOUT_TASKS_JSON" 2>/dev/null || echo 152)"
+  [[ "$_n_img" =~ ^[0-9]+$ ]] || _n_img=152
+  MIN_IMAGE_GB=$(( 8 + (_n_img * 12 + 99) / 100 ))
+  (( MIN_IMAGE_GB < 12 )) && MIN_IMAGE_GB=12
+  echo "  image budget       : ${_n_img} task images -> need ${MIN_IMAGE_GB}G"
+fi
+MIN_IMAGE_GB="$MIN_IMAGE_GB" bash "$REPO/scripts/tmax/docker_preflight.sh" \
+  || { echo "ERROR: not enough room in this node's image store for task images" >&2; exit 2; }
 
 # Meta-agent preflight: SigV4 for bedrock/*, gateway key for everything else.
 case "$META_MODEL" in

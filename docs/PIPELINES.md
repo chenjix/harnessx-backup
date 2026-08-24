@@ -41,13 +41,62 @@ Baseline harness: `configs/baseline_harness.yaml`.
 ## Tmax loop
 
 ```bash
-sbatch scripts/slurm/tmax/h200_tmax_coevolve.sbatch
-# with GRPO:
+sbatch scripts/slurm/tmax/h200_tmax_coevolve.sbatch     # 8x H200
+sbatch scripts/slurm/tmax/a100_tmax_coevolve.sbatch     # 8x A100-40GB (p4d)
+# with GRPO (H200 only — 40GB cards cannot hold trainer + vLLM):
 sbatch --export=ALL,ENABLE_RL=1,RL_N_TASKS=100,REPLICATE=2 \
   scripts/slurm/tmax/h200_tmax_coevolve.sbatch
 ```
 
-Stages: evolve(50) → holdout(102) → corpus → SFT → optional GRPO(≤100) →
-holdout ratchet. See `recipe/tb2_sft/RL_AFTER_SFT.md`.
+Stages: rotate evolve set → evolve(50) → holdout(102) harness ratchet → corpus
+→ SFT → optional GRPO(≤100) → holdout(102) model ratchet.
+See `recipe/tb2_sft/RL_AFTER_SFT.md`.
 
 Baseline harness: `configs/baseline_tmax_harness.yaml`.
+
+### Incumbent pair, not just the model
+
+Each iteration starts from the **best model AND best harness** measured so far on
+holdout-102 (`outputs/tmax_coevolve/rep<N>/incumbent.tsv`, with
+`best_model.tsv` / `best_harness.tsv` as the per-artifact history). The harness
+is ratcheted the same way the model is: iteration k's evolved harness is
+measured with the incumbent model (stage B) and only becomes the new incumbent
+if it wins; otherwise it is discarded and the next iteration re-seeds from the
+harness that did win. `HARNESS_RATCHET=0` restores unconditional carry-forward.
+
+### Relaxed ratchet: ties count, crashes do not
+
+`ACCEPT_TIES=1` (default) accepts a candidate that *equals* the incumbent's
+holdout score, provided its own eval run was clean — at most
+`TIE_MAX_SYSTEM_ERRORS` (default 0) tasks with a status in
+`SYSTEM_ERROR_STATUSES` (default `error,agent_error`) and no missing results.
+A flat score produced by a run where containers or endpoints died is not
+evidence of parity, so it is still rejected. `ACCEPT_TIES=0` goes back to
+requiring a strict improvement.
+
+### Rotating evolve set
+
+Instead of re-evolving on the same 50 tasks forever, iteration k retires tasks
+the model has **mastered** — solved in an earlier iteration *and* already
+harvested into an SFT corpus (`selected_tasks` in the corpus summary) — and
+refills to `EVOLVE_SET_SIZE` with a domain-stratified draw from the 2.2k
+taxonomy pool. holdout-102 is excluded at every step.
+
+```text
+recipe/tb2_sft/src/tmax_mastery.py               # which tasks are mastered (+ evidence)
+recipe/tb2_sft/src/build_tmax_evolve_task_set.py # keep + refill -> task_ids.json + envs jsonl
+outputs/tmax_coevolve/rep<N>/mastered_i<k>.json  # cumulative retire list
+outputs/tmax_coevolve/rep<N>/task_sets.tsv       # per-iteration kept/new/retired
+recipe/tb2_sft/data/tmax_coev_rep<N>_i<k>_evolveset/
+```
+
+Knobs: `ROTATE_EVOLVE_TASKS=1`, `ROTATE_FROM_ITER=2`, `EVOLVE_SET_SIZE=50`,
+`MASTERY_MIN_SUCCESSES=1`, `MASTERY_MIN_SUCCESS_RATE=0`,
+`MASTERY_REQUIRE_CORPUS=1`, `ROTATE_SEED=42`, `TAXONOMY_PARQUET=...`.
+Set `ROTATE_EVOLVE_TASKS=0` for the old fixed-50 behaviour.
+
+The set for iteration k is written once and reused on resume — re-sampling would
+evolve on a different 50 tasks than the trajectories already on disk came from.
+Because the SFT corpus is cumulative, `CORPUS_PREFER_CURRENT=1` (default) fills
+the traj budget from this iteration's rollouts first so older high-quality demos
+cannot crowd out the fresh material the rotation exists to collect.

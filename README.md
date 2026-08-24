@@ -34,11 +34,16 @@ cp .env.example .env   # never commit
 bash scripts/doctor.sh
 ```
 
-**Tmax coevolve (8×H200):**
+**Tmax coevolve:**
 
 ```bash
-sbatch scripts/slurm/tmax/h200_tmax_coevolve.sbatch
+sbatch scripts/slurm/tmax/h200_tmax_coevolve.sbatch   # 8x H200
+sbatch scripts/slurm/tmax/a100_tmax_coevolve.sbatch   # 8x A100-40GB (p4d)
 ```
+
+Each iteration resumes from the best (model, harness) pair so far, accepts a tie
+when the eval run was clean, and rotates mastered tasks out of the evolve set —
+see [docs/PIPELINES.md](docs/PIPELINES.md).
 
 **TB2 coevolve:**
 

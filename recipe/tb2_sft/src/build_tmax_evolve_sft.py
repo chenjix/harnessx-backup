@@ -285,7 +285,7 @@ def dedupe_by_task(
     return out
 
 
-def select_trajs(
+def _rank_and_cap(
     rows: list[tuple[F.TrialMeta, list[dict[str, Any]]]],
     *,
     max_trajs: int,
@@ -303,6 +303,38 @@ def select_trajs(
     if need > 0:
         head.extend(rng.sample(tail, min(need, len(tail))))
     return head[:max_trajs]
+
+
+def select_trajs(
+    rows: list[tuple[F.TrialMeta, list[dict[str, Any]]]],
+    *,
+    max_trajs: int,
+    seed: int,
+    prefer_runs: tuple[str, ...] = (),
+) -> list[tuple[F.TrialMeta, list[dict[str, Any]]]]:
+    """Rank and cap at ``max_trajs``, filling ``prefer_runs`` demos first.
+
+    With a rotating evolve set, the corpus for iteration k mixes this
+    iteration's trajectories with every earlier iteration's. Ranking them
+    together lets a cumulative pool of old, high-quality demos fill the
+    ``max_trajs`` budget and squeeze out the successes on this iteration's fresh
+    tasks — exactly the demos the rotation exists to collect. Preferring the
+    current run tag keeps the new material in, and old iterations only fill the
+    remaining slots.
+    """
+    if not prefer_runs:
+        return _rank_and_cap(rows, max_trajs=max_trajs, seed=seed)
+
+    def _is_preferred(meta: F.TrialMeta) -> bool:
+        return any(str(meta.run).startswith(pref) for pref in prefer_runs)
+
+    preferred = [r for r in rows if _is_preferred(r[0])]
+    rest = [r for r in rows if not _is_preferred(r[0])]
+    out = _rank_and_cap(preferred, max_trajs=max_trajs, seed=seed)
+    remaining = max_trajs - len(out)
+    if remaining > 0:
+        out.extend(_rank_and_cap(rest, max_trajs=remaining, seed=seed))
+    return out
 
 
 def build_pairs(
@@ -354,6 +386,14 @@ def main() -> int:
     ap.add_argument("--max-pairs-per-traj", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument(
+        "--prefer-run-tag",
+        action="append",
+        default=[],
+        help="Fill the --max-trajs budget from these run tags first (repeatable). "
+        "Used by the coevolve loop so a cumulative corpus cannot crowd out the "
+        "current iteration's fresh successes.",
+    )
+    ap.add_argument(
         "--exclude-tasks",
         type=Path,
         default=_ROOT / "recipe" / "tb2_evolver" / "tasks_tmax_only200.json",
@@ -387,7 +427,12 @@ def main() -> int:
         exclude_tasks=exclude,
     )
     deduped = dedupe_by_task(raw, per_task=args.per_task)
-    selected = select_trajs(deduped, max_trajs=args.max_trajs, seed=args.seed)
+    selected = select_trajs(
+        deduped,
+        max_trajs=args.max_trajs,
+        seed=args.seed,
+        prefer_runs=tuple(args.prefer_run_tag or []),
+    )
 
     if len(selected) < args.min_trajs:
         print(
@@ -421,6 +466,12 @@ def main() -> int:
         "n_after_per_task_cap": len(deduped),
         "n_selected_trajs": len(selected),
         "per_task": args.per_task,
+        "prefer_run_tags": list(args.prefer_run_tag or []),
+        "n_selected_from_preferred": sum(
+            1
+            for m, _ in selected
+            if any(str(m.run).startswith(p) for p in (args.prefer_run_tag or []))
+        ),
         "n_train_pairs": len(train),
         "n_eval_pairs": len(ev),
         "min_trajs": args.min_trajs,

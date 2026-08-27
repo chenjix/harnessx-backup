@@ -88,6 +88,16 @@ provider_args=()
 r0_dir_args=()
 [[ -n "${R0_DIR:-}" ]] && r0_dir_args+=(--r0-dir "$R0_DIR")
 
+# Free-form pass-through to recipe.tb2_evolver.run, word-split on spaces, e.g.
+#   EVOLVE_EXTRA_ARGS="--fanout 8 --fanout-keep 2 --explore-every 3"
+# Exists so a new run.py flag can be A/B'd from sbatch without editing this
+# script for each one. Not quoted on purpose — the whole point is word splitting.
+extra_args=()
+if [[ -n "${EVOLVE_EXTRA_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  extra_args=(${EVOLVE_EXTRA_ARGS})
+fi
+
 cmd=(
   "$(python_bin)" -m recipe.tb2_evolver.run
   --eval-backend tmax
@@ -109,6 +119,7 @@ cmd=(
   "${resume_args[@]}"
   "${r0_dir_args[@]}"
   "${seed_args[@]}"
+  "${extra_args[@]}"
 )
 
 echo "Evolving harness on Tmax: base=$MODEL meta=$META_MODEL rounds=$NUM_ROUNDS tag=$RUN_TAG"

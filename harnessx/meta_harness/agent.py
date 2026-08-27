@@ -568,6 +568,7 @@ class MetaAgent:
         replay_max_cost_usd: float | None = 0.5,
         replay_timeout_s: float = 300.0,
         replay_mode: str = "synthetic_task",
+        focus_note: str | None = None,
     ) -> Path:
         """Run one meta-agent pass. Returns path to ``output_dir/config.yaml``.
 
@@ -597,6 +598,7 @@ class MetaAgent:
             trajectories_dir=trajectories_dir,
             output_dir=output_dir,
             scratch_dir=scratch_dir,
+            focus_note=focus_note,
         )
 
         # Build the harness for this round.
@@ -745,6 +747,7 @@ class MetaAgent:
         trajectories_dir: Path,
         output_dir: Path,
         scratch_dir: Path,
+        focus_note: str | None = None,
     ) -> tuple[Path, Path | None]:
         """Write TASK.md + (when journal exists) CONTEXT.md. Return both paths."""
         context_path: Path | None = None
@@ -770,6 +773,7 @@ class MetaAgent:
                 trajectories_dir=trajectories_dir,
                 output_dir=output_dir,
                 context_path=context_path,
+                focus_note=focus_note,
             ),
             encoding="utf-8",
         )
@@ -782,6 +786,7 @@ class MetaAgent:
         trajectories_dir: Path,
         output_dir: Path,
         context_path: Path | None = None,
+        focus_note: str | None = None,
     ) -> str:
         memo_line = f"- `memo_path`: `{self.memo_path}`" if self.memo_path is not None else "- `memo_path`: (not set)"
         context_section = ""
@@ -793,8 +798,24 @@ class MetaAgent:
                 "see which levers have been tried and how well their predicted-"
                 "affected tasks actually flipped\n"
             )
+        # A fan-out gives every sibling the same trajectories and the same
+        # journal; without a per-candidate assignment they converge on the
+        # single most obvious lever and the batch collapses to one experiment
+        # sampled N times. The focus note is what makes the siblings diverse.
+        focus_section = ""
+        if focus_note:
+            focus_section = (
+                "## Assigned focus for THIS proposal\n\n"
+                f"{focus_note.strip()}\n\n"
+                "Other proposals in this batch are assigned different focuses. "
+                "Stay on yours: a batch is useful only when its members differ. "
+                "If your focus turns out to be unsupported by the trajectories, "
+                "say so in `candidates.md` and make the smallest defensible edit "
+                "rather than drifting onto another proposal's territory.\n\n"
+            )
         return (
             "# Evolve Brief\n\n"
+            f"{focus_section}"
             f"- `current_config`: `{current_config_path}`\n"
             f"- `trajectories_dir`: `{trajectories_dir}`\n"
             f"- `output_dir`: `{output_dir}`\n"

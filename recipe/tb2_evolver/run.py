@@ -64,6 +64,8 @@ _load_env_file(_PROJECT_ENV)
 from harnessx.core.model_config import ModelConfig
 from harnessx.meta_harness import MetaAgent
 from recipe.tb2_evolver.tb2_trajspec import TB2RoundAdapter, read_per_task_results
+from recipe.tb2_evolver.fanout import propose_and_screen
+from recipe.tb2_evolver.population import Archive
 from recipe.tb2_evolver.tmax_adapter import TmaxRoundAdapter
 
 
@@ -442,6 +444,76 @@ def _collect_eval_records_from_trials(trials: list[Path]) -> list[dict]:
             }
         )
     return records
+
+
+async def _full_eval_survivors(
+    *,
+    survivors: list,
+    archive,
+    adapter,
+    run_root: Path,
+    input_round: int,
+    task_names: list[str],
+):
+    """Full-eval the screened survivors and return the best.
+
+    With a single survivor this is a NO-OP: the loop re-evaluates whatever it
+    promotes at the top of the next round anyway, so measuring here would buy
+    the same number for twice the GPU.
+
+    With k > 1 the evaluations run CONCURRENTLY under distinct job suffixes.
+    The eval runner already oversubscribes, so k candidates over the same task
+    set is normally one wave — k>1 costs roughly k× the GPU but ~1× the
+    wall-clock, which is the whole reason keeping 2 is affordable.
+
+    Every result lands in the archive, losers included: a loser is a scored
+    node a later explore round may legitimately branch from.
+    """
+    if len(survivors) == 1:
+        logger.info("[R%d] single survivor — deferring its eval to the next round", input_round)
+        return survivors[0]
+
+    async def _one(cand):
+        traj = await adapter.resolve_trajectories_for_round(
+            run_root=run_root,
+            input_round=input_round,
+            current_config=Path(cand.config),
+            task_names_override=list(task_names),
+            job_suffix=f"fe-c{cand.idx}",
+        )
+        return cand, read_per_task_results(traj)
+
+    outcomes = await asyncio.gather(
+        *(_one(c) for c in survivors), return_exceptions=True
+    )
+
+    scored: list[tuple[float, object]] = []
+    for item in outcomes:
+        if isinstance(item, BaseException):
+            logger.warning("[R%d] survivor full-eval raised: %s", input_round, item)
+            continue
+        cand, results = item
+        solved = [t for t in task_names if results.get(t)]
+        score = (len(solved) / len(task_names)) if task_names else 0.0
+        if cand.node is not None:
+            archive.record_score(cand.node.id, score, solved)
+        logger.info("[R%d] survivor c%d full-eval %.4f (%d/%d)",
+                    input_round, cand.idx, score, len(solved), len(task_names))
+        scored.append((score, cand))
+
+    if not scored:
+        # Infra ate every eval. Return the screens' top pick rather than
+        # nothing — it still cleared structural + llm + probe.
+        logger.warning("[R%d] all survivor evals failed — falling back to screen order",
+                       input_round)
+        return survivors[0]
+
+    scored.sort(key=lambda t: (-t[0], t[1].idx))
+    best_score, best = scored[0]
+    if best.node is not None:
+        archive.mark(best.node.id, "scored")
+    logger.info("[R%d] fan-out winner: c%d @ %.4f", input_round, best.idx, best_score)
+    return best
 
 
 def _score_and_gate_tb2(
@@ -964,8 +1036,76 @@ async def main() -> None:
         help="Previously-passed tasks to re-verify each adaptive-subset round, to catch "
         "regressions in carried-forward results (default: 2).",
     )
+    # ── fan-out / screening (population evolve) ──────────────────────────
+    # Default --fanout 1 reproduces the legacy (1+1) hill-climb byte-for-byte,
+    # so an unchanged command line behaves exactly as it did before.
+    parser.add_argument(
+        "--fanout",
+        type=int,
+        default=1,
+        help=(
+            "Harness proposals to generate per round. 1 (default) is the legacy "
+            "single-candidate hill-climb. >1 fans out that many meta-agent calls, "
+            "each assigned a different focus, then screens them down to "
+            "--fanout-keep before any full eval."
+        ),
+    )
+    parser.add_argument(
+        "--fanout-keep",
+        type=int,
+        default=2,
+        help="Candidates surviving the screens and reaching full eval (default: 2). "
+        "Survivors are full-evaluated concurrently, so k>1 costs ~1 eval of wall-clock.",
+    )
+    parser.add_argument(
+        "--fanout-concurrent",
+        type=int,
+        default=4,
+        help="Max concurrent meta-agent proposals (default: 4). Each holds a live "
+        "harness with its own sandbox, so this is a local-resource cap.",
+    )
+    parser.add_argument(
+        "--no-screen-llm",
+        action="store_true",
+        default=False,
+        help="Skip the LLM predicted-impact ranking screen.",
+    )
+    parser.add_argument(
+        "--no-screen-probe",
+        action="store_true",
+        default=False,
+        help="Skip the mini-eval probe screen (the only screen that MEASURES "
+        "regressions; skipping it makes selection purely predictive).",
+    )
+    parser.add_argument(
+        "--probe-solved",
+        type=int,
+        default=2,
+        help="Parent-solved tasks in the mini-eval probe set (default: 2).",
+    )
+    parser.add_argument(
+        "--probe-unsolved",
+        type=int,
+        default=1,
+        help="Parent-failed tasks in the mini-eval probe set (default: 1).",
+    )
+    parser.add_argument(
+        "--explore-every",
+        type=int,
+        default=3,
+        help="Every Nth round picks the most NOVEL archived parent instead of the "
+        "best-scoring one (default: 3; 0 disables exploration).",
+    )
     args = parser.parse_args()
 
+    if args.fanout < 1:
+        raise ValueError("--fanout must be >= 1")
+    if args.fanout_keep < 1:
+        raise ValueError("--fanout-keep must be >= 1")
+    if args.fanout_keep > args.fanout:
+        raise ValueError(
+            f"--fanout-keep ({args.fanout_keep}) cannot exceed --fanout ({args.fanout})"
+        )
     if args.resume and not args.run_tag:
         raise ValueError("--resume requires --run-tag so it can locate previous state.")
     if args.adaptive_subset and args.trajectory_mode != "rerun":
@@ -1293,6 +1433,48 @@ async def main() -> None:
     full_task_results: dict[str, bool] = {
         str(k): bool(v) for k, v in (state.get("full_task_results") or {}).items()
     }
+    # ── population archive + screen wiring ───────────────────────────────
+    # The archive lives inside `state`, so it is saved and resumed by the same
+    # _save_state calls the loop already makes.
+    archive = Archive(state, task_universe=task_names or [])
+    fanout_on = int(args.fanout) > 1
+    if fanout_on:
+        logger.info(
+            "Fan-out ON: %d proposals/round → screens → %d full eval; "
+            "explore every %s rounds",
+            args.fanout, args.fanout_keep, args.explore_every or "never",
+        )
+
+    async def _screen_llm(system: str, user: str) -> str:
+        """Single-shot completion for the LLM ranking screen (no tools)."""
+        from harnessx.core.events import Message
+
+        resp = await provider.complete(
+            [Message(role="system", content=system), Message(role="user", content=user)],
+            tools=[],
+        )
+        return resp.content or ""
+
+    def _make_probe_runner(round_no: int):
+        """Bind a probe runner to one round.
+
+        Bound per round rather than closing over the loop variable: a closure
+        over `input_round` would silently probe under the wrong round's job
+        name once the loop advanced, colliding with the real eval's output dir.
+        """
+
+        async def _run_probe(*, config: Path, tasks, label: str) -> dict[str, bool]:
+            traj = await adapter.resolve_trajectories_for_round(
+                run_root=run_root,
+                input_round=round_no,
+                current_config=Path(config),
+                task_names_override=list(tasks),
+                job_suffix=label,
+            )
+            return read_per_task_results(traj)
+
+        return _run_probe
+
     for i in range(args.num_rounds):
         input_round = next_input_round + i
         output_round = input_round + 1
@@ -1399,6 +1581,15 @@ async def main() -> None:
             # includes every repeat, including the one just taken.
             _record_config_score(state, evaluated_config, score)
             state.setdefault("per_round_task_results", {})[str(input_round)] = dict(full_task_results)
+            # Mirror the measurement into the archive so parent selection and
+            # the novelty vectors see it. Repeats append to the same node.
+            _arch_node = archive.node_for_config(str(evaluated_config), round=input_round)
+            if score is not None:
+                archive.record_score(
+                    _arch_node.id,
+                    float(score),
+                    [t for t in task_names if full_task_results.get(t)],
+                )
 
             incumbent_mean = _mean_score_for(state, best_round[1]) if best_round else None
             decision, gate_reason, best_round, reverted_cfg = _score_and_gate_tb2(
@@ -1469,6 +1660,13 @@ async def main() -> None:
                 started_at = time.time()
                 round_evolve_dir = evolve_dir / f"R{output_round}"
                 round_evolve_dir.mkdir(parents=True, exist_ok=True)
+                # Directory the promoted round copies its sidecars from
+                # (system_prompt.txt, processors/, tools/, templates/). Under
+                # fan-out the winner's sidecars live in its own cN/ subdir, NOT
+                # in the round root — promoting from the root would silently
+                # drop a system-prompt or processor edit, which are exactly the
+                # levers the meta-agent uses most.
+                promote_src_dir = round_evolve_dir
                 # TASK.md instructs the agent to read these; until now none of
                 # them were ever written, so it planned each round with no idea
                 # what the previous rounds had scored or changed.
@@ -1479,18 +1677,85 @@ async def main() -> None:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("could not write history context: %s", exc)
-                output_config_path = await meta_agent.evolve(
-                    current_config=evaluated_config,
-                    trajectories_dir=trajectories_dir,
-                    output_dir=round_evolve_dir,
-                )
+                if not fanout_on:
+                    output_config_path = await meta_agent.evolve(
+                        current_config=evaluated_config,
+                        trajectories_dir=trajectories_dir,
+                        output_dir=round_evolve_dir,
+                    )
+                else:
+                    # Branch from the archive's pick, not blindly from the
+                    # config that happens to be in hand. On explore rounds this
+                    # is deliberately NOT the incumbent — that is the point.
+                    parent_node = (
+                        archive.select_parent(
+                            round=input_round, explore_every=int(args.explore_every)
+                        )
+                        or _arch_node
+                    )
+                    parent_cfg = Path(parent_node.config).resolve()
+                    if not parent_cfg.is_file():
+                        logger.warning(
+                            "[R%d] archived parent %s missing on disk (%s) — "
+                            "falling back to the in-hand config",
+                            input_round, parent_node.id, parent_cfg,
+                        )
+                        parent_node, parent_cfg = _arch_node, evaluated_config
+
+                    parent_results = {t: bool(full_task_results.get(t)) for t in task_names}
+                    survivors = await propose_and_screen(
+                        meta_agent=meta_agent,
+                        archive=archive,
+                        parent=parent_node,
+                        parent_config=parent_cfg,
+                        parent_results=parent_results,
+                        trajectories_dir=trajectories_dir,
+                        round_dir=round_evolve_dir,
+                        task_universe=task_names,
+                        llm=None if args.no_screen_llm else _screen_llm,
+                        run_probe=(
+                            None if args.no_screen_probe
+                            else _make_probe_runner(input_round)
+                        ),
+                        n=int(args.fanout),
+                        keep=int(args.fanout_keep),
+                        max_concurrent=int(args.fanout_concurrent),
+                        n_probe_solved=int(args.probe_solved),
+                        n_probe_unsolved=int(args.probe_unsolved),
+                    )
+                    if not survivors:
+                        # Every proposal died. Carry the parent forward rather
+                        # than failing the run: a barren round is a bad round,
+                        # not a broken campaign.
+                        logger.warning(
+                            "[R%d] fan-out produced no survivor — carrying %s forward",
+                            input_round, parent_cfg,
+                        )
+                        output_config_path = _copy_config_as_round(
+                            run_root=run_root,
+                            output_round=output_round,
+                            config=parent_cfg,
+                        )
+                        promote_src_dir = Path(output_config_path).parent
+                    else:
+                        winner = await _full_eval_survivors(
+                            survivors=survivors,
+                            archive=archive,
+                            adapter=adapter,
+                            run_root=run_root,
+                            input_round=input_round,
+                            task_names=task_names,
+                        )
+                        output_config_path = Path(winner.config).resolve()
+                        promote_src_dir = output_config_path.parent
+                        _save_state(state_path, state)
                 elapsed = time.time() - started_at
                 output_config_path = Path(output_config_path).resolve()
 
                 promoted_config = adapter.promote_round_output(
                     run_root=run_root,
                     output_round=output_round,
-                    rx_output_dir=round_evolve_dir,
+                    rx_output_dir=promote_src_dir,
                     output_config=output_config_path,
                 ).resolve()
 

@@ -91,6 +91,7 @@ class TmaxRoundAdapter:
         input_round: int,
         current_config: Path,
         task_names_override: list[str] | None = None,
+        job_suffix: str | None = None,
     ) -> Path:
         if input_round == 0 and self.r0_trajectories is not None:
             logger.info("R0: reusing pre-existing Tmax trajectories → %s", self.r0_trajectories)
@@ -102,7 +103,7 @@ class TmaxRoundAdapter:
 
         cfg = Path(current_config).resolve()
         _seed_system_prompt(cfg, self.seed_system_prompt)
-        job_name = f"{run_root.name}-r{input_round}-traj"
+        job_name = f"{run_root.name}-r{input_round}-{job_suffix or 'traj'}"
         cmd = [
             sys.executable,
             "-m",

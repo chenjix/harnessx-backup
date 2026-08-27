@@ -94,6 +94,44 @@ MIN_IMAGE_GB="$MIN_IMAGE_GB" bash "$REPO/scripts/tmax/docker_preflight.sh" \
 
 mkdir -p /fsx/home/jixuan.chen/logs
 
+# ── image janitor ───────────────────────────────────────────────────────────
+# run_eval builds one image per task and never removes any, so peak disk grows
+# with the task count. On this cluster that is fatal rather than merely wasteful:
+# the effective image store is /var/lib/containerd on a 97G root volume that
+# already sits at ~90% for unrelated reasons, leaving ~10G — about 20 task
+# images at the ~0.5G each these tasks actually cost.
+#
+# Job 33602 died exactly here: it exhausted the volume ~8 minutes in, and the
+# remaining 34 tasks failed with "docker build failed" while reporting as
+# ordinary task results.
+#
+# `docker image prune -a` only removes images no container references, and
+# run_eval removes each task's container when the task ends (unless
+# --keep-container). So a periodic prune reclaims finished tasks' images and
+# cannot touch one that is still in use. This bounds the footprint instead of
+# letting it accumulate.
+IMAGE_JANITOR="${IMAGE_JANITOR:-1}"
+JANITOR_INTERVAL_S="${JANITOR_INTERVAL_S:-120}"
+_janitor_pid=""
+if [[ "$IMAGE_JANITOR" == "1" ]]; then
+  (
+    while true; do
+      sleep "$JANITOR_INTERVAL_S"
+      free_gb="$(df -BG --output=avail /var/lib/containerd 2>/dev/null | tail -1 | tr -dc '0-9')"
+      [[ -z "$free_gb" ]] && continue
+      if (( free_gb < ${JANITOR_FLOOR_GB:-25} )); then
+        echo "[janitor] ${free_gb}G free — pruning unreferenced images/build cache"
+        docker image prune -af >/dev/null 2>&1 || true
+        docker builder prune -af >/dev/null 2>&1 || true
+        echo "[janitor] now $(df -BG --output=avail /var/lib/containerd 2>/dev/null | tail -1 | tr -dc '0-9')G free"
+      fi
+    done
+  ) &
+  _janitor_pid=$!
+  echo "image janitor: on (pid $_janitor_pid, every ${JANITOR_INTERVAL_S}s, floor ${JANITOR_FLOOR_GB:-25}G)"
+  trap '[[ -n "$_janitor_pid" ]] && kill "$_janitor_pid" 2>/dev/null || true' EXIT
+fi
+
 # --resume lets a requeued job skip tasks that already have a result.json.
 bash "$REPO/scripts/with_server_pool.sh" -- \
   "$PYTHON_BIN" -m recipe.tmax_eval.run_eval \

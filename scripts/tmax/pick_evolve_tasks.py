@@ -83,6 +83,54 @@ DEFAULT_HOLDOUT_POOL = ROOT / "recipe" / "tb2_evolver" / "tasks_tmax_only200_ids
 DEFAULT_OUT_DIR = ROOT / "recipe" / "tb2_evolver"
 
 
+def read_elapsed_by_task(results_dir: Path) -> dict[str, float]:
+    """Return ``{task: elapsed_s}`` for tasks that produced a result."""
+    out: dict[str, float] = {}
+    for rp in sorted(results_dir.glob("*.result.json")):
+        try:
+            obj = json.loads(rp.read_text(encoding="utf-8"))
+            out[str(obj.get("task_id") or rp.name[: -len(".result.json")])] = float(
+                obj.get("elapsed_s") or 0.0
+            )
+        except Exception:
+            continue
+    return out
+
+
+def _warn_on_duration_skew(
+    passed: list[str], failed: list[str], elapsed: dict[str, float], factor: float = 2.0
+) -> None:
+    """Flag failures that took far longer than the passes.
+
+    status alone does not catch a degraded environment. In job 33602 the node's
+    disk filled mid-run; the tasks that ran afterwards still completed the agent
+    loop and reported status=ok, but ground for 690-3048s against a full volume
+    and scored 0 — while every genuine pass had finished in 85-428s. Selected as
+    "the capability gap", those would have sent the meta-agent chasing harness
+    fixes for an outage.
+
+    This warns rather than excludes: a task that is genuinely hard can also be
+    slow, and silently dropping the hardest tasks is its own way of faking a
+    clean screen.
+    """
+    p_times = sorted(elapsed.get(t, 0.0) for t in passed if elapsed.get(t))
+    f_times = [(elapsed.get(t, 0.0), t) for t in failed if elapsed.get(t)]
+    if not p_times or not f_times:
+        return
+    p_max = p_times[-1]
+    suspicious = sorted((v, t) for v, t in f_times if v > factor * p_max)
+    if not suspicious:
+        return
+    print(f"\n  WARNING: {len(suspicious)} failing task(s) ran more than {factor:g}x longer than")
+    print(f"  the slowest PASS ({p_max:.0f}s). A failure that takes far longer than any")
+    print("  success is often the environment degrading, not the task being hard —")
+    print("  check the node's disk/memory over the run before trusting these as gap:")
+    for v, t in suspicious[:6]:
+        print(f"    {t}  {v:.0f}s")
+    if len(suspicious) > 6:
+        print(f"    … and {len(suspicious) - 6} more")
+
+
 def _report(results: dict[str, bool]) -> tuple[list[str], list[str]]:
     passed = sorted(t for t, ok in results.items() if ok)
     failed = sorted(t for t, ok in results.items() if not ok)
@@ -118,6 +166,10 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--tag", default="ab", help="filename tag (default: ab)")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--slow-factor", type=float, default=2.0,
+                    help="flag a failing task when it ran more than this multiple of the "
+                         "slowest PASS (default: 2.0). A hint, not a verdict — it catches "
+                         "the worst environmental casualties, not all of them.")
     ap.add_argument("--error-statuses", default="error,agent_error,timeout",
                     help="result statuses treated as infra failures and excluded from "
                          "BOTH pools (default: error,agent_error,timeout)")
@@ -162,6 +214,9 @@ def main() -> int:
                   f"re-screening\n  after fixing the cause rather than selecting from what is left.")
 
     passed, failed = _report(results)
+    _warn_on_duration_skew(
+        passed, failed, read_elapsed_by_task(args.results_dir), factor=args.slow_factor
+    )
     if args.report_only:
         print("\n  failing tasks:")
         for t in failed:

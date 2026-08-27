@@ -62,16 +62,32 @@ echo "  job     : $JOB_NAME  (-> .benchmarks/tmax/$JOB_NAME)"
 echo "  conc    : $TMAX_CONCURRENT"
 
 docker info >/dev/null 2>&1 || { echo "ERROR: docker unavailable on $(hostname)" >&2; exit 2; }
-# Size the check to THIS run's task count rather than a flat number: the repo's
-# formula is ~8G for the shared python3/pip/pytest base layer plus ~0.12G per
-# task image. A flat 20G rejects nodes that have ample room for a 50-task screen.
+# SHARED_BASE=1 is REQUIRED here, not an optimisation. The ~0.12G-per-image
+# figure the budget below uses is the marginal cost of a task image ON TOP of a
+# shared python3/pip/pytest base layer. With SHARED_BASE=0 each image carries
+# its own full toolchain (cargo, python3-dev, ...) and 50 of them need ~40G+,
+# not 14G. Job 33602 ran with the formula but without the sharing it assumes,
+# and filled a 97G root volume to 0 bytes — every remaining task then failed in
+# ~0.5s with "docker build failed", which read_per_task_results reports as an
+# ordinary task failure.
+export SHARED_BASE="${SHARED_BASE:-1}"
+if [[ "$SHARED_BASE" == "1" ]]; then
+  export TMAX_SHARED_BASE_TAG="${TMAX_SHARED_BASE_TAG:-hx-tmax-base:1}"
+fi
+
+# Size the check to THIS run's task count. The per-image term only holds with
+# SHARED_BASE=1; without it, budget ~0.8G per image instead.
 if [[ -z "${MIN_IMAGE_GB:-}" ]]; then
   _n_img="$("$PYTHON_BIN" "$REPO/scripts/tmax/count_task_images.py" \
               "$TASKS_JSON" 2>/dev/null || echo 50)"
   [[ "$_n_img" =~ ^[0-9]+$ ]] || _n_img=50
-  MIN_IMAGE_GB=$(( 8 + (_n_img * 12 + 99) / 100 ))
+  if [[ "$SHARED_BASE" == "1" ]]; then
+    MIN_IMAGE_GB=$(( 8 + (_n_img * 12 + 99) / 100 ))
+  else
+    MIN_IMAGE_GB=$(( 8 + (_n_img * 80 + 99) / 100 ))
+  fi
   (( MIN_IMAGE_GB < 12 )) && MIN_IMAGE_GB=12
-  echo "  image budget: ${_n_img} task images -> need ${MIN_IMAGE_GB}G"
+  echo "  image budget: ${_n_img} task images, SHARED_BASE=$SHARED_BASE -> need ${MIN_IMAGE_GB}G"
 fi
 MIN_IMAGE_GB="$MIN_IMAGE_GB" bash "$REPO/scripts/tmax/docker_preflight.sh" \
   || { echo "ERROR: not enough image-store room" >&2; exit 2; }

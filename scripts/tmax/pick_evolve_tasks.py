@@ -43,6 +43,42 @@ sys.path.insert(0, str(ROOT))
 
 from recipe.tb2_evolver.tb2_trajspec import read_per_task_results  # noqa: E402
 
+
+def read_status_by_task(results_dir: Path) -> dict[str, str]:
+    """Return ``{task: status}`` from the per-task result sidecars.
+
+    read_per_task_results only looks at the verifier reward, so a task whose
+    container failed to BUILD comes back as reward=0 -> False, byte-identical to
+    a task the model genuinely could not solve. Selecting those as "the
+    capability gap" would hand the meta-agent tasks that cannot run at all and
+    ask it to evolve a harness fix for them.
+
+    Job 33602 is the concrete case: a full root volume made 28 of 50 tasks fail
+    with "docker build failed" in ~0.5s each, and nothing downstream could tell
+    them apart from real failures.
+    """
+    out: dict[str, str] = {}
+    for rp in sorted(results_dir.glob("*.result.json")):
+        try:
+            obj = json.loads(rp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        task = str(obj.get("task_id") or obj.get("task_name") or rp.name[: -len(".result.json")])
+        out[task] = str(obj.get("status") or "unknown")
+    # The in-dir result.json carries status too, and is the authority when both
+    # exist — the sidecar can be written before the trial finishes.
+    for td in sorted(p for p in results_dir.iterdir() if p.is_dir()):
+        rp = td / "result.json"
+        if not rp.is_file():
+            continue
+        try:
+            obj = json.loads(rp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        task = str(obj.get("task_name") or obj.get("task_id") or td.name)
+        out[task] = str(obj.get("status") or out.get(task, "unknown"))
+    return out
+
 DEFAULT_HOLDOUT_POOL = ROOT / "recipe" / "tb2_evolver" / "tasks_tmax_only200_ids.json"
 DEFAULT_OUT_DIR = ROOT / "recipe" / "tb2_evolver"
 
@@ -82,6 +118,9 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--tag", default="ab", help="filename tag (default: ab)")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--error-statuses", default="error,agent_error,timeout",
+                    help="result statuses treated as infra failures and excluded from "
+                         "BOTH pools (default: error,agent_error,timeout)")
     ap.add_argument("--make-r0-dir", type=Path, default=None,
                     help="also write a trajectory dir holding ONLY the evolve-set "
                          "tasks, for --r0-dir. Both A/B arms can then share one R0 "
@@ -98,6 +137,30 @@ def main() -> int:
         return 2
 
     print(f"=== difficulty screen: {args.results_dir}")
+
+    # Drop infra failures before anything reads the pass/fail split. An errored
+    # task is not evidence about the model either way, so it belongs in neither
+    # pool — not the gap, and not the regression detectors.
+    status = read_status_by_task(args.results_dir)
+    errored = sorted(t for t in results if status.get(t) in args.error_statuses.split(","))
+    if errored:
+        print(f"  EXCLUDED : {len(errored)} task(s) with infra errors "
+              f"({args.error_statuses}) — not model failures, so not usable as a gap")
+        for t in errored[:6]:
+            print(f"    {t}")
+        if len(errored) > 6:
+            print(f"    … and {len(errored) - 6} more")
+        results = {t: v for t, v in results.items() if t not in set(errored)}
+        if not results:
+            print("\nERROR: every screened task errored out. Fix the infrastructure "
+                  "and re-screen; there is no difficulty signal here.", file=sys.stderr)
+            return 3
+        frac = len(errored) / (len(errored) + len(results))
+        if frac > 0.2:
+            print(f"\n  WARNING: {frac:.0%} of screened tasks errored. That is high enough "
+                  f"that\n  the surviving sample may not represent the pool — consider "
+                  f"re-screening\n  after fixing the cause rather than selecting from what is left.")
+
     passed, failed = _report(results)
     if args.report_only:
         print("\n  failing tasks:")

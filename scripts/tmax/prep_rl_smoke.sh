@@ -26,6 +26,15 @@ RL_N_TASKS="${RL_N_TASKS:-8}"
 RL_UNIQUE_PROMPTS="${RL_UNIQUE_PROMPTS:-2}"
 RL_ASYNC_STEPS="${RL_ASYNC_STEPS:-1}"
 RL_SEED="${RL_SEED:-42}"
+# Which tasks the builder draws from. Overridable because the right answer
+# depends on what the run is for: a TRAINING run wants coverage, while a run
+# validating that RL produces a gradient at all wants tasks the model sometimes
+# solves — GRPO's advantage is reward minus the group mean, so a task that is
+# never solved and one that is always solved contribute equally nothing.
+# tasks_rl_known_solvable.json holds the tasks Qwen3.5-9B was measured solving
+# under the eval harness in screening job 33602.
+RL_EXCLUDE_TASKS="${RL_EXCLUDE_TASKS:-$ROOT/recipe/tb2_evolver/tasks_tmax_only200.json}"
+RL_PREFER_TASKS="${RL_PREFER_TASKS:-$ROOT/recipe/tb2_evolver/tasks_tmax_evolve50_list.json}"
 DATA_DIR="$ROOT/recipe/tb2_sft/data/$RL_DATASET_NAME"
 PY="${PYTHON_BIN:-${VLLM_VENV:-$HOME/.venv}/bin/python}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
@@ -45,8 +54,8 @@ else
   PYTHONPATH="$ROOT:$ROOT/recipe/tb2_sft/src" "$PY" -m recipe.tb2_sft.src.build_tmax_rl_dataset \
     --from-taxonomy --taxonomy-parquet "$TAXONOMY_PARQUET" \
     --n-tasks "$RL_N_TASKS" --seed "$RL_SEED" --name "$RL_DATASET_NAME" \
-    --exclude-tasks "$ROOT/recipe/tb2_evolver/tasks_tmax_only200.json" \
-    --prefer-tasks "$ROOT/recipe/tb2_evolver/tasks_tmax_evolve50_list.json"
+    --exclude-tasks "$RL_EXCLUDE_TASKS" \
+    --prefer-tasks "$RL_PREFER_TASKS"
 fi
 
 echo

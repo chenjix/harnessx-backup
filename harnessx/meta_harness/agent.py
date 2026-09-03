@@ -569,6 +569,8 @@ class MetaAgent:
         replay_timeout_s: float = 300.0,
         replay_mode: str = "synthetic_task",
         focus_note: str | None = None,
+        stack_edits: bool = False,
+        pivot_brief: str | None = None,
     ) -> Path:
         """Run one meta-agent pass. Returns path to ``output_dir/config.yaml``.
 
@@ -599,6 +601,8 @@ class MetaAgent:
             output_dir=output_dir,
             scratch_dir=scratch_dir,
             focus_note=focus_note,
+            stack_edits=stack_edits,
+            pivot_brief=pivot_brief,
         )
 
         # Build the harness for this round.
@@ -748,6 +752,8 @@ class MetaAgent:
         output_dir: Path,
         scratch_dir: Path,
         focus_note: str | None = None,
+        stack_edits: bool = False,
+        pivot_brief: str | None = None,
     ) -> tuple[Path, Path | None]:
         """Write TASK.md + (when journal exists) CONTEXT.md. Return both paths."""
         context_path: Path | None = None
@@ -774,6 +780,8 @@ class MetaAgent:
                 output_dir=output_dir,
                 context_path=context_path,
                 focus_note=focus_note,
+                stack_edits=stack_edits,
+                pivot_brief=pivot_brief,
             ),
             encoding="utf-8",
         )
@@ -787,6 +795,8 @@ class MetaAgent:
         output_dir: Path,
         context_path: Path | None = None,
         focus_note: str | None = None,
+        stack_edits: bool = False,
+        pivot_brief: str | None = None,
     ) -> str:
         memo_line = f"- `memo_path`: `{self.memo_path}`" if self.memo_path is not None else "- `memo_path`: (not set)"
         context_section = ""
@@ -804,18 +814,70 @@ class MetaAgent:
         # sampled N times. The focus note is what makes the siblings diverse.
         focus_section = ""
         if focus_note:
-            focus_section = (
-                "## Assigned focus for THIS proposal\n\n"
-                f"{focus_note.strip()}\n\n"
-                "Other proposals in this batch are assigned different focuses. "
-                "Stay on yours: a batch is useful only when its members differ. "
-                "If your focus turns out to be unsupported by the trajectories, "
-                "say so in `candidates.md` and make the smallest defensible edit "
-                "rather than drifting onto another proposal's territory.\n\n"
+            if stack_edits:
+                focus_section = (
+                    "## Assigned focus for THIS proposal\n\n"
+                    f"{focus_note.strip()}\n\n"
+                    "Other proposals in this batch are assigned different focuses. "
+                    "Stay on this failure cluster so the batch explores distinct "
+                    "territory. Within the focus you MAY stack multiple complementary "
+                    "edits (processor + prompt + tool, etc.) into this one candidate — "
+                    "a candidate is allowed to contain several additive mechanisms, "
+                    "not just a single-line change.\n\n"
+                )
+            else:
+                focus_section = (
+                    "## Assigned focus for THIS proposal\n\n"
+                    f"{focus_note.strip()}\n\n"
+                    "Other proposals in this batch are assigned different focuses. "
+                    "Stay on yours: a batch is useful only when its members differ. "
+                    "If your focus turns out to be unsupported by the trajectories, "
+                    "say so in `candidates.md` and make the smallest defensible edit "
+                    "rather than drifting onto another proposal's territory.\n\n"
+                )
+        pivot_section = ""
+        if pivot_brief and str(pivot_brief).strip():
+            pivot_section = (
+                "## Pivot harnesses (read these BEFORE proposing)\n\n"
+                "Several harnesses are live at similar scores with different "
+                "per-task coverage. Treat each as a branch point: read THAT "
+                "harness's `config` and `trajectories_dir`, note which tasks "
+                "only that lineage uniquely solves, then propose. A synthesis "
+                "that keeps complementary unique solves is better than copying "
+                "one parent wholesale. Ties are allowed to stand — do not "
+                "discard a lineage just because its pass rate matches another.\n\n"
+                f"{str(pivot_brief).strip()}\n\n"
+            )
+        if stack_edits:
+            pareto_section = (
+                "## Global optimization constraint (net-gain)\n\n"
+                "Prefer candidates whose expected NET effect is positive. Newly "
+                "solving a failed cluster may be worth a small regression on an "
+                "already-passing task if the mechanism is localized. State "
+                "`expected_global_gain` and `regression_risk` honestly; do not refuse "
+                "a stacked fix solely because `regression_risk` is non-empty.\n\n"
+                "For each shipped candidate, explicitly state:\n"
+                "- `expected_global_gain`: which failing cluster(s) and why this can generalize\n"
+                "- `regression_risk`: what could break outside `predicted_affected`\n"
+                "- `cost_shift`: expected token/cost movement if the change lands\n\n"
+            )
+        else:
+            pareto_section = (
+                "## Global optimization constraint (Pareto-style)\n\n"
+                "Do not optimize a narrow local win at the expense of global "
+                "benchmark health. Prefer candidates that improve failing clusters "
+                "while protecting already-passing clusters.\n\n"
+                "For each shipped candidate, explicitly state:\n"
+                "- `expected_global_gain`: which failing cluster(s) and why this can generalize\n"
+                "- `regression_risk`: what could break outside `predicted_affected`\n"
+                "- `cost_shift`: expected token/cost movement if the change lands\n\n"
+                "A local improvement with likely net global degradation is not "
+                "acceptable unless you provide unusually strong evidence and a clear rollback trigger.\n\n"
             )
         return (
             "# Evolve Brief\n\n"
             f"{focus_section}"
+            f"{pivot_section}"
             f"- `current_config`: `{current_config_path}`\n"
             f"- `trajectories_dir`: `{trajectories_dir}`\n"
             f"- `output_dir`: `{output_dir}`\n"
@@ -842,16 +904,7 @@ class MetaAgent:
             "(OK/BLOCKED/TIMEOUT) from this environment\n"
             "- `task_catalog.md` — all task questions being evaluated "
             "(read this to understand WHAT the agent needs to solve)\n\n"
-            "## Global optimization constraint (Pareto-style)\n\n"
-            "Do not optimize a narrow local win at the expense of global "
-            "benchmark health. Prefer candidates that improve failing clusters "
-            "while protecting already-passing clusters.\n\n"
-            "For each shipped candidate, explicitly state:\n"
-            "- `expected_global_gain`: which failing cluster(s) and why this can generalize\n"
-            "- `regression_risk`: what could break outside `predicted_affected`\n"
-            "- `cost_shift`: expected token/cost movement if the change lands\n\n"
-            "A local improvement with likely net global degradation is not "
-            "acceptable unless you provide unusually strong evidence and a clear rollback trigger.\n\n"
+            f"{pareto_section}"
             "## Self-validation before `end_turn`\n\n"
             "No retry loop. If you end your turn with a broken artifact the\n"
             "round fails. `Read validate` for the CLI commands — at minimum\n"

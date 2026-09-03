@@ -9,6 +9,7 @@ from recipe.tb2_evolver.population import Archive, Node, cosine_distance, knn_no
 from recipe.tb2_evolver.screen import (
     Candidate,
     changeset_signature,
+    focus_tasks_from_notes,
     screen_llm_review,
     screen_mini_eval,
     screen_structural,
@@ -132,6 +133,26 @@ def test_select_parent_explores_on_every_third_round():
 
 def test_select_parent_returns_none_on_empty_archive():
     assert _archive().select_parent(round=1) is None
+
+
+def test_select_parents_keeps_exact_ties():
+    a = _archive()
+    x = a.add(parent_id=None, config="a.yaml", round=0)
+    y = a.add(parent_id=None, config="b.yaml", round=0)
+    a.record_score(x.id, 0.6, ["t1", "t2"])
+    a.record_score(y.id, 0.6, ["t1", "t3"])
+    ids = {n.id for n in a.select_parents(round=1, explore_every=3)}
+    assert ids >= {x.id, y.id}
+
+
+def test_select_parents_keeps_unique_gain_below_incumbent():
+    a = _archive()
+    inc = a.add(parent_id=None, config="inc.yaml", round=0)
+    a.record_score(inc.id, 0.6, ["t1", "t2"])
+    low = a.add(parent_id=None, config="uniq.yaml", round=1)
+    a.record_score(low.id, 0.4, ["t1", "t4"])
+    ids = {n.id for n in a.select_parents(round=2, explore_every=0)}
+    assert inc.id in ids and low.id in ids
 
 
 def test_node_for_config_reuses_existing_node():
@@ -275,6 +296,35 @@ def test_probe_set_nonempty_when_parent_solved_nothing():
     parent = {t: False for t in TASKS}
     probes = select_probe_tasks(parent_results=parent, task_universe=TASKS, n_solved=2, n_unsolved=1)
     assert probes and all(p in TASKS for p in probes)
+
+
+def test_probe_set_includes_assigned_focus_not_lex_first_unsolved():
+    parent = {"t1": True, "t2": True, "t3": False, "t4": False}
+    probes = select_probe_tasks(
+        parent_results=parent, task_universe=TASKS,
+        n_solved=2, n_unsolved=1, focus_tasks=["t4"],
+    )
+    assert "t4" in probes
+
+
+def test_stable_canary_prefers_widely_solved_not_lex_first():
+    parent = {"t1": True, "t2": True, "t3": True, "t4": False}
+    archive = [["t3"], ["t3", "t2"], ["t3"]]
+    probes = select_probe_tasks(
+        parent_results=parent, task_universe=TASKS,
+        n_solved=1, n_unsolved=0, canary_mode="stable", archive_solved=archive,
+    )
+    assert probes == ["t3"]
+
+
+def test_focus_tasks_from_notes_extracts_named_failures():
+    notes = [
+        "**Task `task_000028_abc` fails.** Read it.",
+        "**Tasks `task_000010_aaa` and `task_000015_bbb` both fail.**",
+    ]
+    assert focus_tasks_from_notes(notes) == [
+        "task_000028_abc", "task_000010_aaa", "task_000015_bbb",
+    ]
 
 
 # ─── screen 3: mini eval ───────────────────────────────────────────────────

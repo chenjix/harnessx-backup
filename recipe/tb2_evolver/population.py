@@ -68,6 +68,9 @@ class Node:
     screen: dict = field(default_factory=dict)
     """Per-screen verdicts kept for post-hoc attribution (which screen killed
     what, and was it right)."""
+    trajectories: str | None = None
+    """Last trajectories dir that produced ``solved`` — used when a later
+    round treats this node as a pivot the meta-agent should re-read."""
 
     @property
     def mean_score(self) -> float | None:
@@ -84,6 +87,7 @@ class Node:
             "solved": list(self.solved),
             "signature": self.signature,
             "screen": dict(self.screen),
+            "trajectories": self.trajectories,
         }
 
     @classmethod
@@ -98,6 +102,7 @@ class Node:
             solved=list(d.get("solved") or []),
             signature=d.get("signature"),
             screen=dict(d.get("screen") or {}),
+            trajectories=d.get("trajectories"),
         )
 
 
@@ -220,7 +225,14 @@ class Archive:
                 return node
         return self.add(parent_id=None, config=config, round=round, status="pending")
 
-    def record_score(self, node_id: str, score: float, solved: Sequence[str]) -> None:
+    def record_score(
+        self,
+        node_id: str,
+        score: float,
+        solved: Sequence[str],
+        *,
+        trajectories: str | None = None,
+    ) -> None:
         """Append a measurement. Repeats accumulate rather than overwrite, so
         `mean_score` is an unbiased bar instead of a max over noisy draws."""
         d = self._raw.get(node_id)
@@ -229,6 +241,8 @@ class Archive:
             return
         d.setdefault("scores", []).append(float(score))
         d["solved"] = list(solved)
+        if trajectories:
+            d["trajectories"] = str(trajectories)
         if d.get("status") in (None, "pending"):
             d["status"] = "scored"
 
@@ -300,6 +314,65 @@ class Archive:
             round, pick.id, pn, pick.mean_score or 0.0,
         )
         return pick
+
+    def select_parents(
+        self,
+        *,
+        round: int,
+        explore_every: int = 3,
+        tie_eps: float = 0.0,
+        max_parents: int = 4,
+    ) -> list[Node]:
+        """All live branch points for the next fan-out.
+
+        ``select_parent`` still returns one node (exploit / explore). This
+        returns that primary PLUS every scored node tied with the incumbent
+        and any latest-round node that uniquely solves a task the incumbent
+        does not — so a +4/−4 shuffle and a complementary 26/50 both stay
+        in the meta-agent's brief rather than collapsing to one lineage.
+        """
+        primary = self.select_parent(round=round, explore_every=explore_every)
+        scored = self.scored()
+        if not scored:
+            return []
+
+        best_mean = max((n.mean_score or 0.0) for n in scored)
+        ties = [
+            n for n in scored
+            if (n.mean_score or 0.0) >= best_mean - max(0.0, float(tie_eps))
+        ]
+        ties.sort(key=lambda n: (-(n.mean_score or 0.0), n.id))
+
+        extra: list[Node] = []
+        inc = self.incumbent()
+        if inc is not None:
+            inc_set = set(inc.solved)
+            latest = max(n.round for n in scored)
+            for n in scored:
+                if n.round != latest:
+                    continue
+                if set(n.solved) - inc_set:
+                    extra.append(n)
+            extra.sort(key=lambda n: (-len(set(n.solved) - inc_set), n.id))
+
+        out: list[Node] = []
+        seen: set[str] = set()
+        for n in ([primary] if primary is not None else []) + ties + extra:
+            if n is None or n.id in seen:
+                continue
+            seen.add(n.id)
+            out.append(n)
+            if len(out) >= max(1, int(max_parents)):
+                break
+        logger.info(
+            "[archive] R%d pivots: %s",
+            round,
+            ", ".join(
+                f"{n.id}(mean={n.mean_score:.3f} unique={len(set(n.solved) - set(inc.solved)) if inc else 0})"
+                for n in out
+            ) or "none",
+        )
+        return out
 
     def incumbent(self) -> Node | None:
         """Highest MEAN scorer — the config a regression reverts to."""

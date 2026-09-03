@@ -29,6 +29,7 @@ try:
 except Exception:
     pass
 # isort: on
+import copyreg
 import dataclasses
 import functools
 import importlib
@@ -45,6 +46,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from collections import defaultdict
 from collections.abc import Iterable
 from concurrent import futures
@@ -188,6 +190,36 @@ def max_num_processes() -> int:
 def repeat_each(seq, k):
     """Repeat each element in a sequence k times."""
     return [item for item in seq for _ in range(k)]
+
+
+def _reduce_torch_config_module(config_module):
+    return (importlib.import_module, (config_module.__name__,))
+
+
+def register_torch_config_module_reducers() -> int:
+    """Teach pickle how to handle torch's ``ConfigModuleInstance`` singletons.
+
+    ``torch.utils._config_module.install_config_module`` replaces modules such as
+    ``torch._dynamo.config`` with an instance of a class generated per module, and
+    those instances refuse to pickle. Ray serializes actor classes with cloudpickle,
+    which walks into them (e.g. through ``torch.compile``-wrapped helpers) and dies
+    with ``TypeError: cannot pickle 'ConfigModuleInstance' object``. Reducing them to
+    an ``importlib.import_module`` call makes the worker resolve its own live config
+    module instead. Call this after torch is fully imported; ``copyreg`` dispatch is
+    keyed on exact types, so modules imported later need another call.
+
+    Returns the number of types registered by this call.
+    """
+    registered = 0
+    for module in list(sys.modules.values()):
+        if not isinstance(module, types.ModuleType):
+            continue
+        module_type = type(module)
+        if module_type.__name__ != "ConfigModuleInstance" or module_type in copyreg.dispatch_table:
+            continue
+        copyreg.pickle(module_type, _reduce_torch_config_module)
+        registered += 1
+    return registered
 
 
 def ray_get_with_progress(
@@ -985,10 +1017,59 @@ def is_beaker_job() -> bool:
     return "BEAKER_JOB_ID" in os.environ
 
 
+_QWEN35_FAMILY_MARKERS = ("qwen3.5", "qwen3.6", "qwen3_5", "qwen3_6")
+
+
+def _is_local_model_ref(repo_id: str) -> bool:
+    """True if *repo_id* is a filesystem path rather than a HuggingFace hub id."""
+    if not repo_id:
+        return False
+    expanded = os.path.expanduser(repo_id)
+    if os.path.exists(expanded):
+        return True
+    # Absolute / explicit relative / home paths are never valid hub ids.
+    # huggingface_hub.validate_repo_id rejects them with HFValidationError
+    # ("Repo id must be in the form 'repo_name' or 'namespace/repo_name'").
+    return os.path.isabs(expanded) or repo_id.startswith((".", "~", "/"))
+
+
+def is_qwen35_family(model_name_or_path: str) -> bool:
+    """Detect Qwen3.5/3.6 from a hub id *or* a local merge directory.
+
+    Coevolve writes merged SFT weights to paths like
+    ``outputs/rl/merged/tmax_coev_rep13_i1``, which do not contain ``qwen3.5``.
+    Path-substring checks therefore miss them; read ``config.json`` instead.
+    """
+    if not model_name_or_path:
+        return False
+    lowered = model_name_or_path.lower()
+    if any(marker in lowered for marker in _QWEN35_FAMILY_MARKERS):
+        return True
+    cfg_path = os.path.join(os.path.expanduser(model_name_or_path), "config.json")
+    if not os.path.isfile(cfg_path):
+        return False
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    blob = " ".join(
+        [
+            str(cfg.get("model_type") or ""),
+            " ".join(str(a) for a in (cfg.get("architectures") or [])),
+            str((cfg.get("text_config") or {}).get("model_type") or ""),
+        ]
+    ).lower()
+    return any(marker in blob for marker in _QWEN35_FAMILY_MARKERS)
+
+
 def ensure_hf_repo_cached(repo_id: str, revision: str | None = None) -> None:
     """Download a HF repo if not a local path, then verify it is available locally or in cache."""
-    if os.path.exists(repo_id):
+    expanded = os.path.expanduser(repo_id)
+    if os.path.exists(expanded):
         return
+    if _is_local_model_ref(repo_id):
+        raise FileNotFoundError(f"Local model path does not exist: {expanded}")
     huggingface_hub.snapshot_download(repo_id, revision=revision)
     result = huggingface_hub.try_to_load_from_cache(repo_id, "config.json", revision=revision)
     if not isinstance(result, str):

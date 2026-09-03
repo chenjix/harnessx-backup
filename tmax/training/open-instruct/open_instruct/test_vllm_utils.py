@@ -255,5 +255,72 @@ class TestModelDimsFromVllmConfig(unittest.TestCase):
         self.assertEqual(vllm_dims, expected_dims)
 
 
+class TestPatchMambaEnumForMsgspec(unittest.TestCase):
+    def test_mamba_enum_is_msgspec_safe_after_patch(self):
+        """vLLM 0.24 CUSTOM=None made msgspec refuse EngineCoreOutputs."""
+        import msgspec
+        from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+        vllm_utils._patch_mixed_attention_backend_enums_for_msgspec()
+        custom = getattr(MambaAttentionBackendEnum, "CUSTOM", None)
+        if custom is None:
+            self.skipTest("this vLLM has no MambaAttentionBackendEnum.CUSTOM")
+        self.assertIsNotNone(custom.value)
+        self.assertTrue(all(isinstance(m.value, str) for m in MambaAttentionBackendEnum))
+        self.assertEqual(vllm_utils._patch_mixed_attention_backend_enums_for_msgspec(), [])
+
+        class _Wrap(msgspec.Struct):
+            mamba_type: MambaAttentionBackendEnum
+
+        converted = msgspec.convert(
+            {"mamba_type": MambaAttentionBackendEnum.GDN_ATTN.value},
+            _Wrap,
+        )
+        self.assertEqual(converted.mamba_type, MambaAttentionBackendEnum.GDN_ATTN)
+
+
+class _Rpc:
+    def __init__(self, name: str, calls: list):
+        self.name = name
+        self.calls = calls
+
+    def remote(self, *args, **kwargs):
+        self.calls.append((self.name, args, kwargs))
+        return f"{self.name}-ref"
+
+
+class _FakeEngine:
+    def __init__(self):
+        self.calls: list = []
+        self.start_weight_update = _Rpc("start_weight_update", self.calls)
+        self.finish_weight_update = _Rpc("finish_weight_update", self.calls)
+        self.update_weights = _Rpc("update_weights", self.calls)
+
+
+class TestVllmWeightUpdateSession(unittest.TestCase):
+    def test_start_then_finish_on_rank0(self):
+        engine = _FakeEngine()
+        with mock.patch.object(vllm_utils.ray, "get", side_effect=lambda refs: refs):
+            with vllm_utils._VllmWeightUpdateSession([engine], is_rank_0=True):
+                self.assertEqual([c[0] for c in engine.calls], ["start_weight_update"])
+        self.assertEqual([c[0] for c in engine.calls], ["start_weight_update", "finish_weight_update"])
+        self.assertEqual(engine.calls[0][1], (True,))
+
+    def test_non_rank0_is_noop(self):
+        engine = _FakeEngine()
+        with mock.patch.object(vllm_utils.ray, "get", side_effect=lambda refs: refs):
+            with vllm_utils._VllmWeightUpdateSession([engine], is_rank_0=False):
+                pass
+        self.assertEqual(engine.calls, [])
+
+    def test_finish_still_runs_after_inner_error(self):
+        engine = _FakeEngine()
+        with mock.patch.object(vllm_utils.ray, "get", side_effect=lambda refs: refs):
+            with self.assertRaises(RuntimeError):
+                with vllm_utils._VllmWeightUpdateSession([engine], is_rank_0=True):
+                    raise RuntimeError("send failed")
+        self.assertEqual([c[0] for c in engine.calls], ["start_weight_update", "finish_weight_update"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -74,7 +74,7 @@ import torch.utils
 import torch.utils.data
 import wandb
 from datasets import Dataset
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi
 from peft import PeftModel, get_peft_model_state_dict
 from ray.util import queue as ray_queue
 from ray.util.placement_group import PlacementGroup, placement_group
@@ -183,8 +183,12 @@ EXCLUDED_ENV_VARS = {"CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"}
 
 def _build_vlm_name_mapper(model_name: str):
     """Sometimes we have different weight names btw vLLM and HF, so we build
-    a mapping. E.g., Qwen3.5/3.6 have 'language_model.' prefixed in vLLM but not HF."""
-    if any(qwen_version in model_name.lower() for qwen_version in ("qwen3.5", "qwen3.6")):
+    a mapping. E.g., Qwen3.5/3.6 have 'language_model.' prefixed in vLLM but not HF.
+
+    Detection must not rely on the path containing ``qwen3.5``: coevolve merged
+    checkpoints live at ``outputs/rl/merged/tmax_coev_rep*_i*``.
+    """
+    if utils.is_qwen35_family(model_name):
         return lambda name: f"language_model.{name}"
     return None
 
@@ -3215,12 +3219,15 @@ def main(
     # Pre-download model on rank 0 to avoid HF cache race conditions
     # when multiple ranks try to download concurrently on shared filesystem.
     # Barrier file goes next to the HF cache so all nodes can see it.
+    # Local checkpoints (coevolve merged SFT) must skip snapshot_download —
+    # huggingface_hub rejects absolute paths as invalid repo ids.
     rank = int(os.environ.get("RANK", "0"))
     hf_cache = os.environ.get("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub"))
+    os.makedirs(hf_cache, exist_ok=True)
     barrier_file = os.path.join(hf_cache, f".model_download_done_{os.environ.get('BEAKER_JOB_ID', 'local')}")
     if rank == 0:
         logger.info(f"Pre-downloading model {model_config.model_name_or_path}...")
-        snapshot_download(model_config.model_name_or_path, revision=model_config.model_revision)
+        utils.ensure_hf_repo_cached(model_config.model_name_or_path, revision=model_config.model_revision)
         open(barrier_file, "w").close()
         logger.info("Model pre-download complete.")
     else:
@@ -3242,6 +3249,11 @@ def main(
     beaker_config, wandb_url = setup_experiment_tracking(args, tc, model_config, streaming_config, vllm_config)
 
     # We have to initialize ray earlier for constructing Tools (they are implemented as ray actors).
+    # Torch ConfigModuleInstance objects (torch._dynamo.config etc.) are not pickleable;
+    # Ray cloudpickle walks into them through compile-wrapped helpers unless we register reducers.
+    n_reducers = utils.register_torch_config_module_reducers()
+    if n_reducers:
+        logger.info(f"Registered pickle reducers for {n_reducers} torch ConfigModuleInstance type(s)")
     ray.init(
         runtime_env={
             "excludes": [".git/"],

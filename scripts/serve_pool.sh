@@ -53,6 +53,8 @@ for i in "${!GPUS[@]}"; do
   fi
 
   echo "[serve_pool] launching GPU=$gpu PORT=$port model=$MODEL${LORA_PATH:+ (+lora $LORA_NAME)}"
+  vllm_extra=()
+  [[ -n "${VLLM_MAX_NUM_SEQS:-}" ]] && vllm_extra+=(--max-num-seqs "$VLLM_MAX_NUM_SEQS")
   (
     export CUDA_VISIBLE_DEVICES="$gpu"
     export SAGEMAKER_MODEL_PATH="${SAGEMAKER_MODEL_PATH:-/tmp/${USER:-user}_sm_model_empty}"
@@ -68,7 +70,8 @@ for i in "${!GPUS[@]}"; do
       --dtype auto \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_xml \
-      --trust-remote-code
+      --trust-remote-code \
+      "${vllm_extra[@]}"
   ) >"$log" 2>&1 &
   PIDS+=("$!")
 done

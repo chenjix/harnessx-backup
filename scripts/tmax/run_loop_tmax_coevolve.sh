@@ -11,25 +11,30 @@
 #   A  harness evolve on that set (EVOLVE_ROUNDS, default 5)
 #        model_best + harness_best → harness_k (+ success trajs)
 #   B  holdout-102 with model_best + harness_k → HARNESS ratchet:
-#        better, or tied on a clean run  → harness_best := harness_k
+#        better or tied (ACCEPT_TIES=1)  → harness_best := harness_k
 #        worse                           → keep harness_best, drop harness_k
-#   C  filter high-quality unique success trajs → SFT corpus_k
-#        (this iteration's trajs fill the traj budget before older ones)
+#   B2 SFT-gen rollout (~100 unique non-holdout tasks, PER_TASK=1):
+#        reuse this iter's evolve-set evals under H*; top up with new taxonomy
+#        tasks. Skip if (H*, M) is unchanged from the last SFT-gen. If B
+#        rejected harness_k, roll under the incumbent H, not the rejected YAML.
+#   C  filter success trajs from the holdout-eval harness only → SFT corpus_k
+#        (inject that harness's system prompt; prefer compact traces;
+#         older-iteration trajs capped at CORPUS_MAX_PREV_FRAC)
 #   D  quick LoRA SFT continuing from model_best → model_k
+#        skipped when ENABLE_SFT=0 (harness-evolve + RL only)
 #   D2 optional online RL (DPPO/GRPO-fast) on ≤RL_N_TASKS taxonomy tasks
 #        → model_k_rl. NEVER trains on holdout-102 (eval-only, matches Tmax).
+#        ENABLE_SFT=0 inits RL from base / incumbent full ckpt, not an SFT LoRA.
 #   E  holdout-102 with model_k(+rl) + harness_best → MODEL ratchet:
-#        better, or tied on a clean run  → model_best := model_k
+#        better or tied (ACCEPT_TIES=1)  → model_best := model_k
 #        worse                           → reject, run EXTRA_EVOLVE_ROUNDS more,
 #                                          rebuild corpus, re-SFT / re-eval
 #                                          (up to MAX_SFT_RETRIES), then move on
 #
 # Ratchet, relaxed (ACCEPT_TIES=1, default): a candidate that *ties* the
-# incumbent is accepted as long as its own holdout job was clean — no more than
-# TIE_MAX_SYSTEM_ERRORS tasks whose status is in SYSTEM_ERROR_STATUSES, and no
-# missing results. A flat score produced by a run where containers or endpoints
-# died is not evidence of parity, so it is still rejected. Set ACCEPT_TIES=0 to
-# go back to requiring a strict improvement.
+# incumbent is accepted. Pass count already treats error statuses as fails, so
+# a second sys_err gate on ties double-counts the same tasks and blocks
+# legitimate parity. Set ACCEPT_TIES=0 to require a strict improvement.
 #
 # Usage:
 #   REPLICATE=1 CLEAN_STALE=1 bash scripts/tmax/run_loop_tmax_coevolve.sh
@@ -42,19 +47,32 @@
 #   EVOLVE_ROUNDS=5
 #   EXTRA_EVOLVE_ROUNDS=2   # appended when SFT does not improve holdout
 #   MAX_SFT_RETRIES=2
-#   MIN_TRAJS=20 MAX_TRAJS=100
-#   ACCEPT_TIES=1           # accept a tie when the candidate's eval is clean
-#   TIE_MAX_SYSTEM_ERRORS=0 # how many error/agent_error tasks a tie tolerates
-#   SYSTEM_ERROR_STATUSES=error,agent_error
+#   MIN_TRAJS=20 MAX_TRAJS=100 PER_TASK=1
+#   SFT_GEN_ROLLOUT=1 SFT_GEN_TASKS=100 SFT_GEN_CONCURRENT=8
+#   CORPUS_EVAL_HARNESS=1    # inject holdout-eval system prompt; with
+#   CORPUS_WINNER_ONLY=1     #   winner-only, drop losing fe-c* traj dirs
+#   CORPUS_MAX_PREV_FRAC=0.4 # cap older-iteration trajs at 40% of selected
+#   MAX_PAIRS_PER_TRAJ=32
+#   ACCEPT_TIES=1           # accept holdout ties (pass count is the only bar)
 #   MODEL_RATCHET_TOL=0     # legacy: >0 accepts ties without the clean-run check
 #   HARNESS_RATCHET=1       # ratchet the harness on holdout too (not just carry)
 #   INIT_LORA_PATH=...      # optional warm start (e.g. SFT-500 adapter)
 #   SEED_HARNESS=...        # optional; default baseline_tmax_harness.yaml
 #   HOLDOUT_TASKS_JSON=.../tasks_tmax_only200.json
 #   EVOLVE_TASKS_JSON=.../tasks_tmax_evolve50_list.json   # iteration-1 set
-#   ENABLE_RL=0|1           # after SFT, run official-style DPPO (train≠holdout)
+#   ENABLE_SFT=0|1          # 0 = skip B2/C/D; evolve then RL from base/incumbent
+#   ENABLE_RL=0|1           # after SFT (or instead of SFT), run DPPO (train≠holdout)
 #   RL_EPISODES=512         # keep small inside the coevolve loop
 #   RL_N_TASKS=100          # taxonomy sample size for RL (excludes holdout-102)
+#   EVOLVE_EXTRA_ARGS=...   # passed through to recipe.tb2_evolver.run
+#        empty (default) = --fanout 1, the old (1+1) hill-climb
+#        "--fanout 8 --fanout-keep 2 --fanout-concurrent 4 --explore-every 3"
+#        = screened population: 8 proposals, cheap screens, 2 full evals
+#        "--fanout 5 --fanout-mode tournament --fanout-eval-concurrent 5"
+#        = 2-round tournament: 5 distinct harnesses, no probe, all full-eval'd
+#          in parallel; SFT keeps only the holdout-eval (winner) harness's trajs
+#        Dedicated H200 launcher: scripts/slurm/tmax/h200_tmax_coevolve_fanout.sbatch
+#        Tournament: scripts/slurm/tmax/h200_tmax_coevolve_tournament.sbatch
 #
 # Evolve-set rotation:
 #   ROTATE_EVOLVE_TASKS=1   # 0 restores the fixed-50 behaviour
@@ -89,9 +107,15 @@ EXTRA_EVOLVE_ROUNDS="${EXTRA_EVOLVE_ROUNDS:-2}"
 MAX_SFT_RETRIES="${MAX_SFT_RETRIES:-2}"
 MIN_TRAJS="${MIN_TRAJS:-20}"
 MAX_TRAJS="${MAX_TRAJS:-100}"
-PER_TASK="${PER_TASK:-3}"
+PER_TASK="${PER_TASK:-1}"
 MODEL_RATCHET_TOL="${MODEL_RATCHET_TOL:-0}"
 SFT_EPOCHS="${SFT_EPOCHS:-2}"
+# Extra single-harness rollouts for the SFT harvest plane (not the evolve-50
+# set). Reuses this iteration's evolve evals, then tops up to SFT_GEN_TASKS
+# unique non-holdout tasks. Skipped when (eval_harness, model) is unchanged.
+SFT_GEN_ROLLOUT="${SFT_GEN_ROLLOUT:-1}"
+SFT_GEN_TASKS="${SFT_GEN_TASKS:-100}"
+SFT_GEN_CONCURRENT="${SFT_GEN_CONCURRENT:-8}"
 # When building corpus for iter k, also include trajs from iters 1..k-1 so the
 # SFT pool can grow toward 50–100 even though each evolve set has only 50 tasks.
 CUMULATIVE_CORPUS="${CUMULATIVE_CORPUS:-1}"
@@ -99,6 +123,13 @@ CUMULATIVE_CORPUS="${CUMULATIVE_CORPUS:-1}"
 # iteration's trajectories into the traj budget first so the fresh material the
 # rotation exists to collect cannot be crowded out by high-quality old demos.
 CORPUS_PREFER_CURRENT="${CORPUS_PREFER_CURRENT:-1}"
+# Align SFT with holdout eval: same harness YAML + its system prompt. Losing
+# tournament candidates (fe-c*) are dropped. Older iters cannot exceed this
+# fraction of the selected set.
+CORPUS_EVAL_HARNESS="${CORPUS_EVAL_HARNESS:-1}"
+CORPUS_WINNER_ONLY="${CORPUS_WINNER_ONLY:-1}"
+CORPUS_MAX_PREV_FRAC="${CORPUS_MAX_PREV_FRAC:-0.4}"
+MAX_PAIRS_PER_TRAJ="${MAX_PAIRS_PER_TRAJ:-32}"
 
 # ── ratchet ─────────────────────────────────────────────────────────────────
 ACCEPT_TIES="${ACCEPT_TIES:-1}"
@@ -122,13 +153,30 @@ MASTERY_MIN_SUCCESS_RATE="${MASTERY_MIN_SUCCESS_RATE:-0}"
 MASTERY_REQUIRE_CORPUS="${MASTERY_REQUIRE_CORPUS:-1}"
 TAXONOMY_PARQUET="${TAXONOMY_PARQUET:-$ROOT/data/external/tmax-taxonomy/data/train-00000-of-00001.parquet}"
 POOL_ENVS_JSONL="${POOL_ENVS_JSONL:-}"
+# Optional extra denylist (JSON array or {task_ids:[...]}) that rotation must
+# never draw. The alt50 chain uses this to keep prior-experiment evolve ids out
+# of later iterations as well as iter 1.
+EVOLVE_EXTRA_EXCLUDE="${EVOLVE_EXTRA_EXCLUDE:-}"
 
-# Online RL after SFT (official open-instruct grpo_fast / DPPO). Default off —
+# Online RL (official open-instruct grpo_fast / DPPO). Default off —
 # needs docker + open-instruct deps; train split is taxonomy (≤RL_N_TASKS),
-# never the 102 holdout.
+# never the 102 holdout. ENABLE_SFT=0 skips B2/C/D and inits RL from the
+# base model or the last accepted full checkpoint (no LoRA SFT).
+ENABLE_SFT="${ENABLE_SFT:-1}"
 ENABLE_RL="${ENABLE_RL:-0}"
+if [[ "$ENABLE_SFT" != "1" ]]; then
+  if [[ "$ENABLE_RL" != "1" ]]; then
+    echo "ERROR: ENABLE_SFT=0 requires ENABLE_RL=1 (otherwise the model never updates)" >&2
+    exit 2
+  fi
+  SFT_GEN_ROLLOUT=0
+  MASTERY_REQUIRE_CORPUS=0
+fi
 RL_EPISODES="${RL_EPISODES:-512}"
 RL_N_TASKS="${RL_N_TASKS:-100}"
+# Screened-population evolve. Empty = fanout 1 (legacy). evolve_tmax.sh word-splits
+# this into recipe.tb2_evolver.run flags.
+EVOLVE_EXTRA_ARGS="${EVOLVE_EXTRA_ARGS:-}"
 
 export GPU_POOL="${GPU_POOL:-0,1,2,3,4,5,6,7}"
 export MODEL_SIZE="${MODEL_SIZE:-9b}"
@@ -144,7 +192,7 @@ export HOLDOUT_ENVS_JSONL="${HOLDOUT_ENVS_JSONL:-$ROOT/recipe/tb2_sft/data/qwen3
 export TMAX_MAX_STEPS="${TMAX_MAX_STEPS:-80}"
 export TMAX_MAX_TOKENS="${TMAX_MAX_TOKENS:-4096}"
 export TMAX_CONCURRENT="${TMAX_CONCURRENT:-8}"
-export HOLDOUT_CONCURRENT="${HOLDOUT_CONCURRENT:-2}"
+export HOLDOUT_CONCURRENT="${HOLDOUT_CONCURRENT:-8}"
 export TB2_TEMPERATURE="${TB2_TEMPERATURE:-0}"
 export REGRESSION_TOLERANCE="${REGRESSION_TOLERANCE:-0.04}"
 export EVOLVE_NOOP_ON_META_FAIL="${EVOLVE_NOOP_ON_META_FAIL:-1}"
@@ -244,20 +292,53 @@ fi
 [[ -f "$BASELINE_HARNESS" ]] || { echo "ERROR: missing $BASELINE_HARNESS" >&2; exit 2; }
 [[ -x "$PY" ]] || { echo "ERROR: bad PYTHON_BIN=$PY" >&2; exit 2; }
 
+log "plan: N_ITERS=$N_ITERS EVOLVE_ROUNDS=$EVOLVE_ROUNDS ENABLE_SFT=$ENABLE_SFT ENABLE_RL=$ENABLE_RL"
+log "  EVOLVE_EXTRA_ARGS=${EVOLVE_EXTRA_ARGS:-<none: --fanout 1 legacy hill-climb>}"
+
 mark() { touch "$STATE/.done-$1"; }
 done_p() { [[ -f "$STATE/.done-$1" ]]; }
 
+# grpo_fast writes <output_dir>/<exp>__<seed>__<ts>/config.json, not
+# <output_dir>/config.json. Looking only at the root is why ENABLE_RL=1 would
+# train successfully and then evaluate the SFT adapter under a fake "_rl" label.
+resolve_rl_ckpt() {
+  local root="$1" p cfg
+  [[ -d "$root" ]] || return 1
+  if [[ -f "$root/config.json" ]]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if [[ -f "$root/checkpoint.path" ]]; then
+    p="$(cat "$root/checkpoint.path")"
+    if [[ -n "$p" && -f "$p/config.json" ]]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  fi
+  cfg="$(find "$root" -maxdepth 2 -name config.json -not -path '*_checkpoints/*' 2>/dev/null | head -1)"
+  [[ -n "$cfg" ]] || return 1
+  printf '%s\n' "$(dirname "$cfg")"
+}
+
 time_stage() {
   local it="$1" st="$2"; shift 2
-  local t0 t1
+  local t0 t1 rc
   CURRENT_STAGE="iter${it}/${st}"
   printf 'RUNNING\nstage: %s\nsince: %s\npid: %s\n' \
     "$CURRENT_STAGE" "$(date '+%F %T')" "$$" >"$STATUS_FILE"
   t0=$(date +%s)
+  # Capture the inner status: callers that use `time_stage ... || rc=$?`
+  # disable `set -e` for this function, so a failed "$@" would otherwise
+  # fall through to `log` and return 0 — which is how iter1 RL exited 1
+  # and the loop still scored SFT.
+  set +e
   "$@"
+  rc=$?
+  set -e
   t1=$(date +%s)
   printf '%s\t%s\t%s\t%s\n' "$it" "$st" "$((t1-t0))" "$(date -d "@$t0" '+%F %T' 2>/dev/null || date -r "$t0" '+%F %T')" >>"$TIMINGS"
   log "stage '$st' (iter $it) took $(( (t1-t0)/60 )) min"
+  return "$rc"
 }
 
 resolve_evolved() {
@@ -343,20 +424,13 @@ PY
 # 0 = accept, 1 = reject. Sets RATCHET_REASON.
 ratchet_accept() {
   local after="$1" before="$2" job="$3" what="$4"
-  local errs n_bad
   if (( after > before )); then
     RATCHET_REASON="improved ${before} → ${after}"
     return 0
   fi
   if (( after == before )) && [[ "$ACCEPT_TIES" == "1" ]]; then
-    errs="$(eval_system_errors "$job")"
-    n_bad="$(awk '{print $1}' <<<"$errs")"
-    if (( n_bad <= TIE_MAX_SYSTEM_ERRORS )); then
-      RATCHET_REASON="tied at ${after} on a clean run (system_errors=${n_bad} <= ${TIE_MAX_SYSTEM_ERRORS})"
-      return 0
-    fi
-    RATCHET_REASON="tied at ${after} but ${n_bad} system error(s) > ${TIE_MAX_SYSTEM_ERRORS} — not evidence of parity"
-    return 1
+    RATCHET_REASON="tied at ${after}"
+    return 0
   fi
   if (( MODEL_RATCHET_TOL > 0 )) && (( after >= before )); then
     RATCHET_REASON="tied at ${after}, accepted by legacy MODEL_RATCHET_TOL=${MODEL_RATCHET_TOL}"
@@ -403,6 +477,126 @@ run_holdout_eval() {  # run_holdout_eval <job> <harness_cfg> <adapter_or_model_o
   mark "$job"
 }
 
+run_sftgen_eval() {  # run_sftgen_eval <job> <harness_cfg> <adapter> <tasks_json> <envs_jsonl>
+  local job="$1" cfg="$2" ad="${3:-}" tasks="$4" envs="$5"
+  local sib="${cfg%/*}/system_prompt.txt"
+  if done_p "$job"; then log "skip sftgen $job (already done)"; return 0; fi
+  (
+    export JOB_NAME="$job"
+    export RUN_TAG="$job"
+    export TASKS_JSON="$tasks"
+    export ENVS_JSONL="$envs"
+    export HARNESS_CONFIG="$cfg"
+    export TMAX_CONCURRENT="$SFT_GEN_CONCURRENT"
+    export RESUME="${RESUME_SFTGEN:-1}"
+    if [[ -f "$sib" ]]; then
+      export TMAX_SYSTEM_PROMPT_FILE="$sib"
+    else
+      unset TMAX_SYSTEM_PROMPT_FILE || true
+    fi
+    if [[ -n "$ad" && -f "$ad/adapter_config.json" ]]; then
+      export EVAL_SFT=1 LORA_PATH="$ad" LORA_NAME="$LORA_SERVE_NAME"
+      unset MODEL_OVERRIDE || true
+    elif [[ -n "$ad" && -f "$ad/config.json" ]]; then
+      export EVAL_SFT=0 MODEL_OVERRIDE="$ad"
+      unset LORA_PATH LORA_NAME || true
+    else
+      export EVAL_SFT=0
+      unset LORA_PATH LORA_NAME MODEL_OVERRIDE || true
+    fi
+    bash "$ROOT/scripts/evaluate_tmax.sh"
+  )
+  mark "$job"
+}
+
+sftgen_pair_file() { printf '%s/sftgen_pair.tsv\n' "$STATE"; }
+
+sftgen_pair_key() {
+  printf '%s\t%s\n' "${harness_used}" "${prev_adapter:-BASE}"
+}
+
+run_sftgen_rollout() {  # run_sftgen_rollout <iter> <attempt>
+  local k="$1" attempt="$2"
+  local tag="${BASE}-i${k}"
+  local marker="sftgen-i${k}-a${attempt}"
+  if [[ "$SFT_GEN_ROLLOUT" != "1" ]]; then
+    log "  SFT_GEN_ROLLOUT=0 — skipping extra SFT-gen rollout"
+    return 0
+  fi
+  if done_p "$marker"; then
+    log "skip $marker (already done)"
+    return 0
+  fi
+  local key last
+  key="$(sftgen_pair_key)"
+  last="$(cat "$(sftgen_pair_file)" 2>/dev/null || true)"
+  if [[ -n "$last" && "$last" == "$key" ]]; then
+    log "  SFT-gen skip: (H*, M) unchanged since last extra rollout"
+    printf '%s\n' "$key" >"$(sftgen_pair_file)"
+    mark "$marker"
+    return 0
+  fi
+
+  local plan="$STATE/sftgen_plan_i${k}_a${attempt}.json"
+  PYTHONPATH="$ROOT:$ROOT/recipe/tb2_sft/src" \
+    "$PY" -m recipe.tb2_sft.src.plan_tmax_sftgen \
+      --bench-root "$ROOT/.benchmarks/tmax" \
+      --run-tag "$tag" \
+      --target-size "$SFT_GEN_TASKS" \
+      --evolve-tasks "$EVOLVE_TASKS_JSON" \
+      --out "$plan"
+  local n_reuse n_new
+  n_reuse="$("$PY" -c "import json;print(json.load(open('$plan'))['n_reuse'])")"
+  n_new="$("$PY" -c "import json;print(json.load(open('$plan'))['n_new'])")"
+  log "  SFT-gen plan: reuse ${n_reuse} evolve-set task(s), fill ${n_new} new (target ${SFT_GEN_TASKS})"
+
+  if (( n_new < 1 )); then
+    log "  SFT-gen: evolve set already covers ${SFT_GEN_TASKS} unique tasks — no fill rollout"
+    printf '%s\n' "$key" >"$(sftgen_pair_file)"
+    mark "$marker"
+    return 0
+  fi
+
+  local out_dir="$ROOT/recipe/tb2_sft/data/${BASE//-/_}_i${k}_sftgen"
+  local b_args=(--out-dir "$out_dir"
+                --size "$n_new"
+                --min-size 1
+                --avoid-tasks "$EVOLVE_TASKS_JSON"
+                --exclude-tasks "$HOLDOUT_TASKS_JSON"
+                --taxonomy-parquet "$TAXONOMY_PARQUET"
+                --seed "$(( ROTATE_SEED + 1000 * k + attempt ))")
+  if [[ -n "$EVOLVE_EXTRA_EXCLUDE" ]]; then
+    [[ -f "$EVOLVE_EXTRA_EXCLUDE" ]] || {
+      echo "ERROR: EVOLVE_EXTRA_EXCLUDE is set but missing: $EVOLVE_EXTRA_EXCLUDE" >&2
+      exit 2
+    }
+    b_args+=(--exclude-tasks "$EVOLVE_EXTRA_EXCLUDE")
+  fi
+  local ea
+  while IFS= read -r ea; do
+    [[ -n "$ea" ]] && b_args+=("$ea")
+  done < <(pool_envs_args)
+  PYTHONPATH="$ROOT:$ROOT/recipe/tb2_sft/src" \
+    "$PY" -m recipe.tb2_sft.src.build_tmax_evolve_task_set "${b_args[@]}"
+
+  local job="${tag}-sftgen-r0-traj"
+  # JOB_NAME must match `{tag}-sftgen-r*-traj` so corpus --run-tag ${tag}-sftgen finds it.
+  # If an earlier attempt already rolled this dir under a *different* (H*, M)
+  # (EVAL_HARNESS_AFTER_EXTRA=1), drop the done marker and do not resume —
+  # those result files were produced with the old harness.
+  if done_p "$job"; then
+    log "  SFT-gen $job exists from a previous pair — re-rolling under current H*"
+    rm -f "$STATE/.done-$job"
+    RESUME_SFTGEN=0 run_sftgen_eval "$job" "$harness_used" "$prev_adapter" \
+      "$out_dir/task_ids.json" "$out_dir/eval_task_set_with_envs.jsonl"
+  else
+    run_sftgen_eval "$job" "$harness_used" "$prev_adapter" \
+      "$out_dir/task_ids.json" "$out_dir/eval_task_set_with_envs.jsonl"
+  fi
+  printf '%s\n' "$key" >"$(sftgen_pair_file)"
+  mark "$marker"
+}
+
 run_evolve() {  # run_evolve <run_tag> <num_rounds> <seed_harness> <adapter_or_model_or_empty> <resume 0|1>
   local tag="$1" rounds="$2" seed="$3" ad="${4:-}" resume="${5:-0}"
   (
@@ -417,6 +611,8 @@ run_evolve() {  # run_evolve <run_tag> <num_rounds> <seed_harness> <adapter_or_m
     export GPU_POOL
     export MODEL_SIZE
     export META_MODEL="${META_MODEL:-bedrock/us.anthropic.claude-opus-4-8}"
+    export EVOLVE_EXTRA_ARGS
+    echo "  evolve extra: ${EVOLVE_EXTRA_ARGS:-<none: --fanout 1>}"
     if [[ -n "$ad" && -f "$ad/adapter_config.json" ]]; then
       export LORA_PATH="$ad" LORA_NAME="$LORA_SERVE_NAME"
       unset MODEL_OVERRIDE || true
@@ -435,6 +631,8 @@ build_corpus() {  # build_corpus <dataset_name> <run_tag...>
   local tags=("$@")
   local args=(--name "$name" --min-trajs "$MIN_TRAJS" --max-trajs "$MAX_TRAJS"
               --per-task "$PER_TASK"
+              --max-pairs-per-traj "$MAX_PAIRS_PER_TRAJ"
+              --max-prev-frac "$CORPUS_MAX_PREV_FRAC"
               --exclude-tasks "$HOLDOUT_TASKS_JSON")
   local t
   for t in "${tags[@]}"; do
@@ -443,6 +641,13 @@ build_corpus() {  # build_corpus <dataset_name> <run_tag...>
   # tags[0] is always this iteration's tag (see caller).
   if [[ "$CORPUS_PREFER_CURRENT" == "1" && ${#tags[@]} -gt 1 ]]; then
     args+=(--prefer-run-tag "${tags[0]}")
+  fi
+  # harness_used is the incumbent after stage B (and any extra-evolve ratchet).
+  if [[ "$CORPUS_EVAL_HARNESS" == "1" && -n "${harness_used:-}" ]]; then
+    args+=(--eval-harness "$harness_used")
+    if [[ "$CORPUS_WINNER_ONLY" == "1" ]]; then
+      args+=(--winner-only)
+    fi
   fi
   PYTHONPATH="$ROOT:$ROOT/recipe/tb2_sft/src" \
     "$PY" -m recipe.tb2_sft.src.build_tmax_evolve_sft "${args[@]}"
@@ -518,6 +723,13 @@ rotate_task_set() {  # rotate_task_set <iter>
                 --exclude-tasks "$HOLDOUT_TASKS_JSON"
                 --taxonomy-parquet "$TAXONOMY_PARQUET"
                 --seed "$ROTATE_SEED")
+  if [[ -n "$EVOLVE_EXTRA_EXCLUDE" ]]; then
+    [[ -f "$EVOLVE_EXTRA_EXCLUDE" ]] || {
+      echo "ERROR: EVOLVE_EXTRA_EXCLUDE is set but missing: $EVOLVE_EXTRA_EXCLUDE" >&2
+      exit 2
+    }
+    b_args+=(--exclude-tasks "$EVOLVE_EXTRA_EXCLUDE")
+  fi
   local ea
   while IFS= read -r ea; do
     [[ -n "$ea" ]] && b_args+=("$ea")
@@ -557,6 +769,13 @@ if [[ "$ROTATE_EVOLVE_TASKS" == "1" ]] && (( ROTATE_FROM_ITER <= N_ITERS )); the
             --exclude-tasks "$HOLDOUT_TASKS_JSON"
             --avoid-tasks "$EVOLVE_TASKS_JSON"
             --taxonomy-parquet "$TAXONOMY_PARQUET" --seed "$ROTATE_SEED")
+  if [[ -n "${EVOLVE_EXTRA_EXCLUDE:-}" ]]; then
+    [[ -f "$EVOLVE_EXTRA_EXCLUDE" ]] || {
+      echo "ERROR: EVOLVE_EXTRA_EXCLUDE is set but missing: $EVOLVE_EXTRA_EXCLUDE" >&2
+      exit 2
+    }
+    chk_args+=(--exclude-tasks "$EVOLVE_EXTRA_EXCLUDE")
+  fi
   while IFS= read -r ea; do
     [[ -n "$ea" ]] && chk_args+=("$ea")
   done < <(pool_envs_args)
@@ -648,7 +867,11 @@ fi
 
 for (( k=START_ITER; k<=N_ITERS; k++ )); do
   TAG="${BASE}-i${k}"
-  ADAPTER_OUT="$ROOT/outputs/sft/${BASE//-/_}_i${k}"
+  if [[ "$ENABLE_SFT" == "1" ]]; then
+    ADAPTER_OUT="$ROOT/outputs/sft/${BASE//-/_}_i${k}"
+  else
+    ADAPTER_OUT="$ROOT/outputs/rl/${BASE//-/_}_i${k}"
+  fi
   CORPUS="${BASE//-/_}_i${k}"
 
   if [[ -n "$prev_adapter" && "$prev_adapter" != "BASE" ]]; then
@@ -748,90 +971,149 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
       ADAPTER_ATTEMPT="$ADAPTER_OUT"
     fi
 
-    if ! done_p "corpus-i${k}-a${attempt}"; then
-      # Collect tags for this corpus build. tags[0] must be this iteration's.
-      corpus_tags=("$TAG")
-      if [[ "$CUMULATIVE_CORPUS" == "1" ]]; then
-        for (( pk=1; pk<k; pk++ )); do
-          corpus_tags+=("${BASE}-i${pk}")
-        done
+    if [[ "$ENABLE_SFT" == "1" ]]; then
+      if ! done_p "corpus-i${k}-a${attempt}"; then
+        # B2. extra SFT-gen rollouts under the eval harness, then harvest.
+        time_stage "$k" "B2_sftgen_a${attempt}" run_sftgen_rollout "$k" "$attempt"
+        # Collect tags for this corpus build. tags[0] must be this iteration's
+        # evolve tag so --prefer-run-tag covers both `{TAG}-r*-traj` and
+        # `{TAG}-sftgen-r0-traj` (startswith).
+        corpus_tags=("$TAG")
+        if [[ -d "$ROOT/.benchmarks/tmax/${TAG}-sftgen-r0-traj" ]]; then
+          corpus_tags+=("${TAG}-sftgen")
+        fi
+        if [[ "$CUMULATIVE_CORPUS" == "1" ]]; then
+          for (( pk=1; pk<k; pk++ )); do
+            corpus_tags+=("${BASE}-i${pk}")
+            if [[ -d "$ROOT/.benchmarks/tmax/${BASE}-i${pk}-sftgen-r0-traj" ]]; then
+              corpus_tags+=("${BASE}-i${pk}-sftgen")
+            fi
+          done
+        fi
+        time_stage "$k" "C_corpus_a${attempt}" \
+          build_corpus "$CORPUS_ATTEMPT" "${corpus_tags[@]}"
+        mark "corpus-i${k}-a${attempt}"
       fi
-      time_stage "$k" "C_corpus_a${attempt}" \
-        build_corpus "$CORPUS_ATTEMPT" "${corpus_tags[@]}"
-      mark "corpus-i${k}-a${attempt}"
-    fi
 
-    n_sel="$("$PY" -c "import json;print(json.load(open('$ROOT/recipe/tb2_sft/data/$CORPUS_ATTEMPT/summary.json'))['n_selected_trajs'])" 2>/dev/null || echo 0)"
-    log "  corpus $CORPUS_ATTEMPT selected_trajs=$n_sel"
-    if (( n_sel < 1 )); then
-      log "  ERROR: empty corpus — cannot SFT"
-      break
-    fi
-
-    if ! done_p "sft-i${k}-a${attempt}"; then
-      # prev_adapter may be a LoRA dir (SFT) or a full HF ckpt (post-RL).
-      sft_env=(
-        SFT_DATASET_NAME="$CORPUS_ATTEMPT"
-        SFT_OUTPUT_DIR="$ADAPTER_ATTEMPT"
-        SFT_EPOCHS="$SFT_EPOCHS"
-        SFT_GPUS="$GPU_POOL"
-      )
-      if [[ -n "$prev_adapter" && -f "$prev_adapter/adapter_config.json" ]]; then
-        sft_env+=(INIT_ADAPTER="$prev_adapter")
-      elif [[ -n "$prev_adapter" && -f "$prev_adapter/config.json" ]]; then
-        # Continue SFT LoRA on top of the RL-merged full weights.
-        sft_env+=(MODEL_OVERRIDE="$prev_adapter")
+      n_sel="$("$PY" -c "import json;print(json.load(open('$ROOT/recipe/tb2_sft/data/$CORPUS_ATTEMPT/summary.json'))['n_selected_trajs'])" 2>/dev/null || echo 0)"
+      log "  corpus $CORPUS_ATTEMPT selected_trajs=$n_sel"
+      if (( n_sel < 1 )); then
+        log "  ERROR: empty corpus — cannot SFT"
+        break
       fi
-      time_stage "$k" "D_sft_a${attempt}" env "${sft_env[@]}" \
-        bash "$ROOT/scripts/train_sft.sh"
-      mark "sft-i${k}-a${attempt}"
+
+      if ! done_p "sft-i${k}-a${attempt}"; then
+        # prev_adapter may be a LoRA dir (SFT) or a full HF ckpt (post-RL).
+        sft_env=(
+          SFT_DATASET_NAME="$CORPUS_ATTEMPT"
+          SFT_OUTPUT_DIR="$ADAPTER_ATTEMPT"
+          SFT_EPOCHS="$SFT_EPOCHS"
+          SFT_GPUS="$GPU_POOL"
+        )
+        if [[ -n "$prev_adapter" && -f "$prev_adapter/adapter_config.json" ]]; then
+          sft_env+=(INIT_ADAPTER="$prev_adapter")
+        elif [[ -n "$prev_adapter" && -f "$prev_adapter/config.json" ]]; then
+          # Continue SFT LoRA on top of the RL-merged full weights.
+          sft_env+=(MODEL_OVERRIDE="$prev_adapter")
+        fi
+        time_stage "$k" "D_sft_a${attempt}" env "${sft_env[@]}" \
+          bash "$ROOT/scripts/train_sft.sh"
+        mark "sft-i${k}-a${attempt}"
+      fi
+      [[ -d "$ADAPTER_ATTEMPT" ]] || { echo "ERROR: no adapter at $ADAPTER_ATTEMPT" >&2; exit 2; }
+      EVAL_MODEL="$ADAPTER_ATTEMPT"
+    else
+      EVAL_MODEL="${prev_adapter:-}"
+      log "  ENABLE_SFT=0 — skip B2/C/D; RL inits from ${EVAL_MODEL:-<base $MODEL_SIZE>}"
     fi
-    [[ -d "$ADAPTER_ATTEMPT" ]] || { echo "ERROR: no adapter at $ADAPTER_ATTEMPT" >&2; exit 2; }
 
     # Optional online RL (DPPO) on up to RL_N_TASKS taxonomy tasks — never holdout-102.
-    EVAL_MODEL="$ADAPTER_ATTEMPT"
     RL_LABEL=""
     if [[ "$ENABLE_RL" == "1" ]]; then
       RL_NAME="${CORPUS_ATTEMPT}_rl"
       RL_OUT="$ROOT/outputs/rl/${BASE//-/_}_i${k}_a${attempt}"
+      rl_rc=0
       if ! done_p "rl-i${k}-a${attempt}"; then
-        time_stage "$k" "D2_rl_a${attempt}" env \
-          RL_DATASET_NAME="$RL_NAME" \
-          RL_N_TASKS="$RL_N_TASKS" \
-          HOLDOUT_TASKS_JSON="$HOLDOUT_TASKS_JSON" \
-          PREFER_TASKS_JSON="$EVOLVE_TASKS_JSON" \
-          ADAPTER_DIR="$ADAPTER_ATTEMPT" \
-          RL_OUTPUT_DIR="$RL_OUT" \
-          RL_EPISODES="$RL_EPISODES" \
-          RL_GPUS="$GPU_POOL" \
-          RL_EXP_NAME="${BASE}-i${k}-a${attempt}" \
-          bash "$ROOT/scripts/train_rl_grpo.sh"
-        mark "rl-i${k}-a${attempt}"
+        existing_rl="$(resolve_rl_ckpt "$RL_OUT" || true)"
+        if [[ -n "$existing_rl" ]]; then
+          # Trainer can return 1 during interpreter teardown after a successful
+          # save. Without this skip, resume would re-run hours of RL.
+          log "  RL checkpoint already at $existing_rl — skipping train"
+        else
+          # Inner-loop RL is hours, not the 90-min smoke cap. Inherit sbatch
+          # overrides (learners / response length / python) from the environment.
+          # Capture a non-zero trainer status instead of aborting here: a
+          # teardown-1 after a saved ckpt is still usable. A crash with no ckpt
+          # still fails the job below so we never silently score SFT as RL.
+          rl_rc=0
+          rl_env=(
+            RL_DATASET_NAME="$RL_NAME"
+            RL_N_TASKS="$RL_N_TASKS"
+            HOLDOUT_TASKS_JSON="$HOLDOUT_TASKS_JSON"
+            PREFER_TASKS_JSON="$EVOLVE_TASKS_JSON"
+            RL_OUTPUT_DIR="$RL_OUT"
+            RL_EPISODES="$RL_EPISODES"
+            RL_GPUS="$GPU_POOL"
+            RL_EXP_NAME="${BASE}-i${k}-a${attempt}"
+            RL_WALL_TIMEOUT="${RL_WALL_TIMEOUT:-0}"
+          )
+          if [[ "$ENABLE_SFT" == "1" ]]; then
+            rl_env+=(ADAPTER_DIR="$ADAPTER_ATTEMPT")
+          elif [[ -n "$prev_adapter" && -f "$prev_adapter/adapter_config.json" ]]; then
+            rl_env+=(ADAPTER_DIR="$prev_adapter")
+          elif [[ -n "$prev_adapter" && -f "$prev_adapter/config.json" ]]; then
+            rl_env+=(RL_INIT_MODEL="$prev_adapter")
+          fi
+          time_stage "$k" "D2_rl_a${attempt}" env "${rl_env[@]}" \
+            bash "$ROOT/scripts/train_rl_grpo.sh" || rl_rc=$?
+          if (( rl_rc != 0 )); then
+            log "  RL trainer exited $rl_rc — inspecting $RL_OUT for a usable checkpoint"
+          fi
+        fi
       fi
       # Check for the CHECKPOINT, not the directory: train_rl_grpo.sh mkdir -p's
       # RL_OUT before training, so `-d` is true even when grpo_fast crashed. And
       # run_holdout_eval falls back to the BASE model when it finds no
       # config.json — which would be recorded under a "..._rl" label. A silently
       # mislabelled score is worse than a loud skip.
-      if [[ -f "$RL_OUT/config.json" ]]; then
-        EVAL_MODEL="$RL_OUT"
-        log "  RL ckpt ready → holdout will use $RL_OUT (train n<=$RL_N_TASKS, holdout excluded)"
+      rl_ckpt=""
+      rl_ckpt="$(resolve_rl_ckpt "$RL_OUT" || true)"
+      if [[ -n "$rl_ckpt" ]]; then
+        mark "rl-i${k}-a${attempt}"
+        EVAL_MODEL="$rl_ckpt"
+        log "  RL ckpt ready → holdout will use $rl_ckpt (train n<=$RL_N_TASKS, holdout excluded)"
         RL_LABEL="_rl"
       else
-        log "  WARNING: ENABLE_RL=1 but no final checkpoint at $RL_OUT/config.json"
-        log "           (step dirs: $(ls -d "$RL_OUT"/step_* 2>/dev/null | tr '\n' ' ' || true))"
-        log "           → evaluating the SFT adapter instead, labelled without _rl"
+        log "  WARNING: ENABLE_RL=1 but no final checkpoint under $RL_OUT"
+        log "           (step dirs: $(ls -d "$RL_OUT"/{step_*,*_checkpoints/step_*} 2>/dev/null | tr '\n' ' ' || true))"
+        if (( rl_rc != 0 )); then
+          echo "ERROR: RL failed (exit ${rl_rc}) with no checkpoint; not scoring SFT as _rl" >&2
+          (exit "$rl_rc")
+        fi
+        if [[ "$ENABLE_SFT" != "1" ]]; then
+          echo "ERROR: ENABLE_SFT=0 and RL produced no checkpoint; nothing to evaluate" >&2
+          exit 2
+        fi
+        log "           → evaluating the SFT adapter instead, labelled without _rl; RL will retry on resume"
         RL_LABEL=""
       fi
     fi
 
-    job_e="${TAG}-E-sft-a${attempt}"
-    time_stage "$k" "E_holdout_sft_a${attempt}" \
+    if [[ "$ENABLE_SFT" == "1" ]]; then
+      job_e="${TAG}-E-sft-a${attempt}"
+      stage_e="E_holdout_sft_a${attempt}"
+      model_label="sft_i${k}_a${attempt}${RL_LABEL}"
+    else
+      job_e="${TAG}-E-rl-a${attempt}"
+      stage_e="E_holdout_rl_a${attempt}"
+      model_label="rl_i${k}_a${attempt}"
+    fi
+    time_stage "$k" "$stage_e" \
       run_holdout_eval "$job_e" "$harness_used" "$EVAL_MODEL"
-    record_score "$k" "E_holdout_sft_a${attempt}" "sft_i${k}_a${attempt}${RL_LABEL}" "harness_used_i${k}" "$job_e"
+    record_score "$k" "$stage_e" "$model_label" "harness_used_i${k}" "$job_e"
     AFTER_SCORE="$(score_holdout "$job_e" | awk '{print $1}')"
 
-    log "  holdout before(SFT)=${BEFORE_SCORE} after=${AFTER_SCORE} (accept_ties=${ACCEPT_TIES}, tol=${MODEL_RATCHET_TOL})"
+    log "  holdout before=${BEFORE_SCORE} after=${AFTER_SCORE} (accept_ties=${ACCEPT_TIES}, tol=${MODEL_RATCHET_TOL} sft=${ENABLE_SFT})"
 
     if ratchet_accept "$AFTER_SCORE" "$BEFORE_SCORE" "$job_e" "model"; then
       log "  model ACCEPTED: $RATCHET_REASON — adopting $EVAL_MODEL"

@@ -56,13 +56,43 @@ if [[ -z "$store" ]]; then
 fi
 echo "image store in use: $store (${store_gb}G free, need >= ${MIN_IMAGE_GB}G)"
 
+# Builder cache + leftover images from previous jobs on this node live on the
+# same small root volume as containerd. 2895/2898 died here: 11G and 19G free
+# vs a 20G floor that assumed none of the 152 tmax-eval images existed.
+if (( store_gb < MIN_IMAGE_GB )); then
+  echo "short ${store_gb}G < ${MIN_IMAGE_GB}G — pruning build cache / dangling images on $store"
+  docker builder prune -af || true
+  docker buildx prune -af >/dev/null 2>&1 || true
+  docker image prune -f || true
+  docker container prune -f >/dev/null 2>&1 || true
+  store_gb="$(avail_gb "$store")"; store_gb="${store_gb:-0}"
+  echo "after cache prune: ${store_gb}G free on $store (need >= ${MIN_IMAGE_GB}G)"
+fi
+
+# Still short: drop unused images that are NOT this job's tmax-eval cache.
+# Exclusive H200 nodes keep other users' images after they finish; those are
+# safe to remove here (no running containers of ours yet). Keep ubuntu so a
+# later SHARED_BASE rebuild does not re-pull.
+if (( store_gb < MIN_IMAGE_GB )); then
+  echo "still short — removing unused non-tmax images"
+  while IFS= read -r img; do
+    [[ -n "$img" && "$img" != "<none>:<none>" ]] || continue
+    case "$img" in
+      tmax-eval:*|hx-tmax-base:*|ubuntu:*) continue ;;
+    esac
+    docker rmi "$img" >/dev/null 2>&1 || true
+  done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+  store_gb="$(avail_gb "$store")"; store_gb="${store_gb:-0}"
+  echo "after foreign-image prune: ${store_gb}G free on $store (need >= ${MIN_IMAGE_GB}G)"
+fi
+
 space_hint() {
   if (( MIN_IMAGE_GB < 40 )); then
     cat >&2 <<HINT
 
-Need >= ${MIN_IMAGE_GB}G. With SHARED_BASE=1 the 152 task images share one
-python3/pip/pytest layer, so they cost ~15G instead of ~60G — that is the sizing
-this threshold assumes.
+Need >= ${MIN_IMAGE_GB}G free for images this node does not already have
+(plus a few G of rotation headroom). The check is no longer "20G empty for
+all 152 images" — that killed jobs whose cache was already on disk.
 HINT
   else
     cat >&2 <<HINT

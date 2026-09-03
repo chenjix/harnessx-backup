@@ -252,6 +252,28 @@ def main() -> None:
         remove_columns=dataset["eval"].column_names,
         desc="to_conversational(eval)",
     )
+
+    def _has_user_query(example: dict[str, Any]) -> bool:
+        # Qwen3.5 chat_template raises TemplateError: "No user query found in messages"
+        # on system+assistant-only slices (TB2 multi-turn splits that start after the
+        # original user turn). Drop them rather than killing the whole torchrun job.
+        msgs = list(example.get("prompt") or []) + list(example.get("completion") or [])
+        return any(isinstance(m, dict) and m.get("role") == "user" for m in msgs)
+
+    n_train_raw, n_eval_raw = len(train_ds), len(eval_ds)
+    train_ds = train_ds.filter(_has_user_query, desc="keep_user_query(train)")
+    eval_ds = eval_ds.filter(_has_user_query, desc="keep_user_query(eval)")
+    print(
+        f"[sft] dropped examples with no user turn: "
+        f"train {n_train_raw}->{len(train_ds)} eval {n_eval_raw}->{len(eval_ds)}",
+        flush=True,
+    )
+    if len(train_ds) == 0:
+        raise SystemExit("ERROR: no train examples contain a user turn; cannot SFT")
+    if len(eval_ds) == 0:
+        eval_ds = train_ds.select(range(min(2, len(train_ds))))
+        print("[sft] eval empty after filter; reusing a train slice", flush=True)
+
     sample = train_ds[0]
     print(
         f"[sft] conversational sample: prompt_turns={len(sample['prompt'])} "

@@ -158,6 +158,38 @@ if ds != {"passthrough"}:
 else:
     print("  ok   dataset == passthrough (matches official)")
 
+marker = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+missing_submit = []
+for r in rows:
+    user = ""
+    for m in r.get("messages") or []:
+        if isinstance(m, dict) and m.get("role") == "user":
+            user = str(m.get("content") or "")
+            break
+    if marker not in user or not user.startswith("Please solve this task:"):
+        missing_submit.append(r.get("ground_truth"))
+if missing_submit:
+    fail.append(
+        f"{len(missing_submit)} row(s) missing vanillux instance template "
+        f"(Please solve this task: + {marker}) in the user message, e.g. "
+        f"{missing_submit[:3]}. Rebuild with build_tmax_rl_dataset.py "
+        f"(prompt_schema=vanillux_instance_v1)."
+    )
+else:
+    print(f"  ok   user messages embed {marker} (vanillux instance template)")
+
+summary_path = d / "summary.json"
+schema = ""
+if summary_path.is_file():
+    schema = str((json.loads(summary_path.read_text()) or {}).get("prompt_schema") or "")
+if schema != "vanillux_instance_v1":
+    fail.append(
+        f"prompt_schema={schema!r}, expected vanillux_instance_v1 — "
+        "stale mixer; train_rl_grpo.sh should rebuild"
+    )
+else:
+    print("  ok   prompt_schema == vanillux_instance_v1")
+
 imgs = {r["env_config"].get("image") for r in rows}
 if None in imgs or "" in imgs:
     fail.append("some rows have no env_config.image")

@@ -950,3 +950,41 @@ class TestCleanLastNCheckpoints(unittest.TestCase):
     def test_remove_all(self):
         utils.clean_last_n_checkpoints(self.tmp_dir, keep_last_n_checkpoints=0)
         self.assertEqual(self._checkpoint_dirs(), [])
+
+
+class TestEnsureHfRepoCached(unittest.TestCase):
+    def test_existing_local_dir_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            utils.ensure_hf_repo_cached(tmp)
+
+    def test_absolute_missing_path_is_file_not_found_not_hub_error(self):
+        missing = os.path.join(tempfile.gettempdir(), "no-such-hf-ckpt-dir")
+        with self.assertRaises(FileNotFoundError):
+            utils.ensure_hf_repo_cached(missing)
+
+
+class TestIsQwen35Family(unittest.TestCase):
+    def test_hub_id_substring(self):
+        self.assertTrue(utils.is_qwen35_family("Qwen/Qwen3.5-9B"))
+        self.assertTrue(utils.is_qwen35_family("hamishivi/Qwen3.5-9B"))
+        self.assertFalse(utils.is_qwen35_family("Qwen/Qwen3-8B"))
+
+    def test_local_merge_dir_without_qwen_in_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "config.json"), "w") as f:
+                json.dump(
+                    {
+                        "architectures": ["Qwen3_5ForConditionalGeneration"],
+                        "model_type": "qwen3_5",
+                        "text_config": {"model_type": "qwen3_5_text"},
+                    },
+                    f,
+                )
+            self.assertTrue(utils.is_qwen35_family(tmp))
+
+    def test_unrelated_local_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "config.json"), "w") as f:
+                json.dump({"architectures": ["LlamaForCausalLM"], "model_type": "llama"}, f)
+            self.assertFalse(utils.is_qwen35_family(tmp))
+            self.assertFalse(utils.is_qwen35_family(os.path.join(tmp, "missing")))

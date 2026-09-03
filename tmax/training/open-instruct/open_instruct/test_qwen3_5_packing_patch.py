@@ -62,5 +62,18 @@ class TestQwen35PackingPatch(unittest.TestCase):
         register.assert_not_called()
 
 
+class TestDecoderLayerKind(unittest.TestCase):
+    def test_prefers_block_type(self):
+        layer = type("L", (), {"block_type": "linear_attention", "layer_type": "full_attention"})()
+        self.assertEqual(qwen3_5_packing_patch._decoder_layer_kind(layer), "linear_attention")
+
+    def test_falls_back_to_layer_type(self):
+        layer = type("L", (), {"layer_type": "full_attention"})()
+        self.assertEqual(qwen3_5_packing_patch._decoder_layer_kind(layer), "full_attention")
+
+    def test_installed_decoder_already_forwards_kwargs(self):
+        self.assertTrue(qwen3_5_packing_patch._decoder_layer_already_forwards_kwargs())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -339,6 +340,13 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.jobs_dir / args.job_name
     out_dir.mkdir(parents=True, exist_ok=True)
     args.work_root.mkdir(parents=True, exist_ok=True)
+    # Sidecar so SFT winner-only filtering can fingerprint this dir without
+    # parsing evolve state. Same files tmax_adapter writes after a round eval.
+    if harness_config is not None:
+        shutil.copy2(harness_config, out_dir / "harness_config.yaml")
+        src_prompt = harness_config.parent / "system_prompt.txt"
+        if src_prompt.is_file():
+            shutil.copy2(src_prompt, out_dir / "system_prompt.txt")
 
     # Claim queue with round-robin endpoints.
     lock = threading.Lock()
@@ -411,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         "pass_rate": (passed / total) if total else 0.0,
         "tasks_json": str(args.tasks_json),
         "envs_jsonl": str(args.envs_jsonl),
+        "harness_config": str(harness_config) if harness_config is not None else None,
+        "system_prompt_chars": len(system_prompt or ""),
         "by_domain": {},
         "results": [
             {

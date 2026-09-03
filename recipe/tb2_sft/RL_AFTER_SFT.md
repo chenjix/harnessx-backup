@@ -15,6 +15,26 @@ dataset and a single node instead of Beaker + 8 nodes.
 `build_tmax_rl_dataset.py` refuses the holdout envs jsonl and hard-fails on any
 holdout id in the selected set.
 
+`RL_EVOLVE_REPLICATE=22` ranks the RL pool from tournament-evolve outcomes:
+drop unanimous 0/1 and mastered, keep split tasks first. Conversations are
+**not** replayed (no logprobs / wrong protocol). Launcher:
+`scripts/slurm/tmax/h200_rl_from_evolve.sbatch`.
+
+Mixer `prompt_schema=vanillux_instance_v1`: each user message is the official
+vanillux instance template (`Please solve this task:` + instruction +
+`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`). `grpo_fast` discards the env
+reset observation and `--system_prompt_override_file` replaces the system turn,
+so the user message is the only place the policy is told how to submit. Stale
+jsonl without this schema is rebuilt automatically.
+
+Tmax eval images put files in `/home/user`. The vanillux sandbox now starts the
+persistent bash cwd there when that directory exists (previously `/workspace` →
+`/app`, so the first `ls` saw an empty tree).
+
+vLLM 0.24 requires `start_weight_update` → `update_weights` →
+`finish_weight_update`. Job 3259 skipped `start`, hung 2h on NCCL, and was
+`MONITOR: idle cancel`'d. `broadcast_weights_to_vllm` now opens that session.
+
 ## The four things that made this not run
 
 1. **`--truncate_importance_sampling_ratio_cap`** — the flag is

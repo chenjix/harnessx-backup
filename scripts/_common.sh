@@ -46,13 +46,14 @@ MODEL_SIZE="${MODEL_SIZE:-4b}"
 # Optional full-checkpoint override (e.g. post-RL merged weights). Prefer this
 # over the stock HF id when set; LoRA still layers on via LORA_PATH separately.
 case "$MODEL_SIZE" in
+  2b) MODEL="${MODEL_OVERRIDE:-${MODEL_2B:-Qwen/Qwen3.5-2B}}" ;;
   4b) MODEL="${MODEL_OVERRIDE:-${MODEL_4B:-Qwen/Qwen3.5-4B}}" ;;
   9b) MODEL="${MODEL_OVERRIDE:-${MODEL_9B:-Qwen/Qwen3.5-9B}}" ;;
   # Qwen3.6-27B: same qwen3_5 architecture family as the 3.5 models (hybrid
   # linear/full attention, mrope, vision+video preprocessors), so the
   # qwen3_xml tool parser and the base+LoRA serving rule both still apply.
   27b) MODEL="${MODEL_OVERRIDE:-${MODEL_27B:-Qwen/Qwen3.6-27B}}" ;;
-  *) echo "ERROR: MODEL_SIZE must be 4b, 9b or 27b (got $MODEL_SIZE)" >&2; exit 2 ;;
+  *) echo "ERROR: MODEL_SIZE must be 2b, 4b, 9b or 27b (got $MODEL_SIZE)" >&2; exit 2 ;;
 esac
 # Naming prefix for run tags / dataset dirs / adapter dirs. The 4B and 9B
 # models are Qwen3.5; 27B is Qwen3.6. Hardcoding "qwen35" everywhere would

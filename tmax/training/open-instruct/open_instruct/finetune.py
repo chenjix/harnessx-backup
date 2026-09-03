@@ -38,7 +38,7 @@ from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.accelerator import GradientAccumulationPlugin
 from accelerate.logging import get_logger
 from accelerate.utils import DeepSpeedSequenceParallelConfig, InitProcessGroupKwargs, ParallelismConfig, set_seed
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi
 from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 from rich.pretty import pprint
 from torch.utils.data import DataLoader
@@ -548,10 +548,11 @@ def main(args: FlatArguments, tc: TokenizerConfig):
 
     # Pre-download model files on main process to avoid race conditions
     # when multiple ranks on a shared filesystem all try to access the
-    # HF hub cache concurrently.
+    # HF hub cache concurrently. Skip (via ensure_hf_repo_cached) when the
+    # ref is already a local directory — e.g. MODEL_OVERRIDE of a post-RL ckpt.
     model_path = args.config_name or args.model_name_or_path
     if model_path and accelerator.is_main_process:
-        snapshot_download(model_path, revision=args.model_revision)
+        utils.ensure_hf_repo_cached(model_path, revision=args.model_revision)
     accelerator.wait_for_everyone()
 
     # Load pretrained model and tokenizer

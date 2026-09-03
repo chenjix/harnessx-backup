@@ -104,6 +104,12 @@ class TmaxRoundAdapter:
         cfg = Path(current_config).resolve()
         _seed_system_prompt(cfg, self.seed_system_prompt)
         job_name = f"{run_root.name}-r{input_round}-{job_suffix or 'traj'}"
+        # Isolate docker build contexts per eval job. Tournament full-eval
+        # launches several run_eval processes at once; sharing
+        # `.tmax_eval_work/build/<task_id>` races two writers on the same
+        # Dockerfile. Images themselves are tagged by content hash and still
+        # cache across jobs.
+        work_root = (self.repo_root / ".tmax_eval_work" / job_name).resolve()
         cmd = [
             sys.executable,
             "-m",
@@ -116,6 +122,8 @@ class TmaxRoundAdapter:
             job_name,
             "--jobs-dir",
             str(self.jobs_dir),
+            "--work-root",
+            str(work_root),
             "--harness-config",
             str(cfg),
             "--concurrent",
@@ -147,6 +155,13 @@ class TmaxRoundAdapter:
         run_dir = (self.jobs_dir / job_name).resolve()
         if not run_dir.is_dir():
             raise FileNotFoundError(f"Expected Tmax traj dir missing: {run_dir}")
+        # Sidecar so SFT corpus construction can keep only the holdout-eval
+        # harness's rollouts without re-parsing evolve state.
+        dest_cfg = run_dir / "harness_config.yaml"
+        shutil.copy2(cfg, dest_cfg)
+        src_prompt = cfg.parent / "system_prompt.txt"
+        if src_prompt.is_file():
+            shutil.copy2(src_prompt, run_dir / "system_prompt.txt")
         return run_dir
 
     def promote_round_output(

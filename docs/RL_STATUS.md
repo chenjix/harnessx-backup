@@ -10,8 +10,11 @@ The RL module **runs end to end**. Every stage has been executed and observed on
 intermediate and final checkpoints, clean trainer exit. The reward path was
 verified separately to return 1 for a correct solution.
 
-What has **not** been achieved is a non-zero reward *during training*. That is a
-policy-capability matter, not a pipeline defect — see "The remaining gap".
+**2026-09-02:** all-zero rewards during training were also a pipeline defect.
+Mixer user messages were raw taxonomy text; `--system_prompt_override_file`
+stripped the only submit hint; env reset's vanillux instance template was
+discarded. The policy was never told to `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+Fixed as `prompt_schema=vanillux_instance_v1`. See "Fixes 2026-09-02".
 
 ## The green run
 
@@ -106,3 +109,45 @@ Defects introduced while fixing the above (all resolved):
 20. Minimising the sbatch dropped `RL_UNIQUE_PROMPTS` / `RL_ASYNC_STEPS`, breaking the dataset-size constraint
 18. The post-run checkpoint check looked at the wrong directory level
 19. `set -e` inside the EXIT trap replaced a successful run's exit status with 1
+
+## Fixes 2026-09-02 (prove non-zero reward)
+
+These are the defects that kept `non_submitting_completion_fraction=1.00`
+even after the trainer itself ran cleanly:
+
+1. **User message had no vanillux instance template.** Official
+   `allenai/tmax-15k-open-instruct` rows are
+   `Please solve this task:` + instruction + workflow +
+   `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`. Ours wrote the raw taxonomy
+   `description`. `pool.acquire_reset` discards the env's `render_instance()`
+   observation, and `--system_prompt_override_file` replaces the dataset
+   system turn (the only remaining submit hint). The policy never saw how to
+   submit. `build_tmax_rl_dataset.py` now wraps with the yaml instance
+   template and stamps `prompt_schema=vanillux_instance_v1`.
+   `train_rl_grpo.sh` rebuilds any mixer missing that schema.
+2. **Sandbox cwd was `/workspace` → `/app`.** Tmax eval images bake files
+   into `/home/user`. `_prepare_vanillux_runtime` now prefers `/home/user`
+   when that directory exists.
+3. **Stale jsonl reuse.** `train_rl_grpo.sh` skipped rebuild whenever
+   `train.jsonl` existed, so a prompt-schema fix would never land.
+   Schema mismatch (or `RL_REBUILD_DATASET=1`) forces a rebuild.
+4. **Prove run:** `scripts/slurm/tmax/h200_rl_prove.sbatch` keeps the
+   4×8 / 512-episode shape, sets `RL_FILTER_ZERO_STD=0` so all-zero groups
+   still produce optimizer steps, inits from the merged SFT VLM shell, and
+   skips harnessx after-eval so the train log is the deliverable.
+
+## Job 3259 idle-cancel (2026-09-02)
+
+`MONITOR: idle cancel` was not a false kill. The trainer reached vLLM init
+at 08:36, then died on the first weight sync:
+
+```
+RuntimeError: start_weight_update must be called before update_weights
+RuntimeError: Weight sync timed out after 7200.0s - vLLM engines may be stuck
+```
+
+vLLM 0.24 made `start_weight_update` → `update_weights` → `finish_weight_update`
+mandatory. Ours issued `update_weights` alone; the engine aborted; the trainer
+kept the NCCL send open for 2h with GPUs idle. The cluster monitor cancelled
+the job at 12:00. Fixed in `vllm_utils.py` (`_VllmWeightUpdateSession` plus a
+fail-fast check so a rejected `update_weights` cannot hang the NCCL send).

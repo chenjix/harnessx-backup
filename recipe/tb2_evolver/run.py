@@ -39,6 +39,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _PROJECT_ROOT not in sys.path:
@@ -65,6 +66,8 @@ from harnessx.core.model_config import ModelConfig
 from harnessx.meta_harness import MetaAgent
 from recipe.tb2_evolver.tb2_trajspec import TB2RoundAdapter, read_per_task_results
 from recipe.tb2_evolver.fanout import propose_and_screen
+from recipe.tb2_evolver.fanout_tournament import propose_tournament
+from recipe.tb2_evolver.fanout_v2 import format_pivot_brief, propose_and_screen_v2
 from recipe.tb2_evolver.population import Archive
 from recipe.tb2_evolver.tmax_adapter import TmaxRoundAdapter
 
@@ -446,6 +449,24 @@ def _collect_eval_records_from_trials(trials: list[Path]) -> list[dict]:
     return records
 
 
+def _nodes_to_pivot_dicts(nodes, task_universe: list[str], incumbent) -> list[dict]:
+    inc_solved = set(incumbent.solved or []) if incumbent is not None else set()
+    out: list[dict] = []
+    for n in nodes:
+        solved = list(n.solved or [])
+        sset = set(solved)
+        out.append({
+            "id": n.id,
+            "config": n.config,
+            "trajectories": n.trajectories,
+            "score": n.mean_score,
+            "parent_results": {t: t in sset for t in task_universe},
+            "unique_solves": sorted(sset - inc_solved)[:12],
+            "unique_losses": sorted(inc_solved - sset)[:12],
+        })
+    return out
+
+
 async def _full_eval_survivors(
     *,
     survivors: list,
@@ -454,66 +475,102 @@ async def _full_eval_survivors(
     run_root: Path,
     input_round: int,
     task_names: list[str],
+    parent_solved: list[str] | None = None,
+    tie_eps: float = 0.0,
+    force_eval: bool = False,
+    eval_concurrent: int = 0,
+    job_suffix_traj: bool = False,
 ):
-    """Full-eval the screened survivors and return the best.
+    """Full-eval the screened survivors and return (primary, kept_pivots).
 
     With a single survivor this is a NO-OP: the loop re-evaluates whatever it
     promotes at the top of the next round anyway, so measuring here would buy
-    the same number for twice the GPU.
+    the same number for twice the GPU. Tournament mode sets ``force_eval`` so
+    every candidate (even a lone survivor) is measured here — those trajectories
+    are the SFT harvest.
 
     With k > 1 the evaluations run CONCURRENTLY under distinct job suffixes.
-    The eval runner already oversubscribes, so k candidates over the same task
-    set is normally one wave — k>1 costs roughly k× the GPU but ~1× the
-    wall-clock, which is the whole reason keeping 2 is affordable.
-
-    Every result lands in the archive, losers included: a loser is a scored
-    node a later explore round may legitimately branch from.
+    Ties and unique-gain children are all kept as pivots even when they do not
+    beat the primary on raw pass rate.
     """
-    if len(survivors) == 1:
+    if len(survivors) == 1 and not force_eval:
         logger.info("[R%d] single survivor — deferring its eval to the next round", input_round)
-        return survivors[0]
+        return survivors[0], list(survivors)
+
+    sem = asyncio.Semaphore(max(1, int(eval_concurrent))) if eval_concurrent else None
 
     async def _one(cand):
-        traj = await adapter.resolve_trajectories_for_round(
-            run_root=run_root,
-            input_round=input_round,
-            current_config=Path(cand.config),
-            task_names_override=list(task_names),
-            job_suffix=f"fe-c{cand.idx}",
-        )
-        return cand, read_per_task_results(traj)
+        suffix = f"fe-c{cand.idx}-traj" if job_suffix_traj else f"fe-c{cand.idx}"
+
+        async def _run():
+            traj = await adapter.resolve_trajectories_for_round(
+                run_root=run_root,
+                input_round=input_round,
+                current_config=Path(cand.config),
+                task_names_override=list(task_names),
+                job_suffix=suffix,
+            )
+            return cand, read_per_task_results(traj), traj
+
+        if sem is None:
+            return await _run()
+        async with sem:
+            return await _run()
 
     outcomes = await asyncio.gather(
         *(_one(c) for c in survivors), return_exceptions=True
     )
 
+    parent_set = set(parent_solved or [])
     scored: list[tuple[float, object]] = []
     for item in outcomes:
         if isinstance(item, BaseException):
             logger.warning("[R%d] survivor full-eval raised: %s", input_round, item)
             continue
-        cand, results = item
+        cand, results, traj = item
         solved = [t for t in task_names if results.get(t)]
         score = (len(solved) / len(task_names)) if task_names else 0.0
+        cand.full_solved = solved
+        cand.full_score = score
+        cand.trajectories_dir = Path(traj)
         if cand.node is not None:
-            archive.record_score(cand.node.id, score, solved)
-        logger.info("[R%d] survivor c%d full-eval %.4f (%d/%d)",
-                    input_round, cand.idx, score, len(solved), len(task_names))
+            archive.record_score(cand.node.id, score, solved, trajectories=str(traj))
+        logger.info(
+            "[R%d] survivor c%d full-eval %.4f (%d/%d) unique=+%d",
+            input_round, cand.idx, score, len(solved), len(task_names),
+            len(set(solved) - parent_set),
+        )
         scored.append((score, cand))
 
     if not scored:
-        # Infra ate every eval. Return the screens' top pick rather than
-        # nothing — it still cleared structural + llm + probe.
         logger.warning("[R%d] all survivor evals failed — falling back to screen order",
                        input_round)
-        return survivors[0]
+        return survivors[0], list(survivors)
 
-    scored.sort(key=lambda t: (-t[0], t[1].idx))
-    best_score, best = scored[0]
-    if best.node is not None:
-        archive.mark(best.node.id, "scored")
-    logger.info("[R%d] fan-out winner: c%d @ %.4f", input_round, best.idx, best_score)
-    return best
+    def _unique(cand) -> int:
+        return len(set(getattr(cand, "full_solved", None) or []) - parent_set)
+
+    scored.sort(key=lambda t: (-t[0], -_unique(t[1]), t[1].idx))
+    best_score, primary = scored[0]
+    kept = []
+    seen = set()
+    for score, cand in scored:
+        unique = set(getattr(cand, "full_solved", None) or []) - parent_set
+        tied = score >= best_score - max(0.0, float(tie_eps))
+        if tied or unique:
+            if cand.idx not in seen:
+                kept.append(cand)
+                seen.add(cand.idx)
+    if primary not in kept:
+        kept.insert(0, primary)
+    if primary.node is not None:
+        archive.mark(primary.node.id, "scored")
+    logger.info(
+        "[R%d] fan-out primary: c%d @ %.4f; pivots=%s",
+        input_round, primary.idx, best_score,
+        ", ".join(f"c{c.idx}" for c in kept),
+    )
+    return primary, kept
 
 
 def _score_and_gate_tb2(
@@ -524,6 +581,7 @@ def _score_and_gate_tb2(
     best: tuple[float, object, int] | None,
     tolerance: float,
     incumbent_mean: float | None = None,
+    unique_gained: Sequence[str] | None = None,
 ) -> tuple[str, str, tuple | None, object | None]:
     """Gate an *evaluated* TB2 config against the historical best pass rate.
 
@@ -556,12 +614,22 @@ def _score_and_gate_tb2(
     if round_score >= bar - tolerance:
         # Promote on the same basis: a candidate becomes the incumbent only when
         # it beats the incumbent's mean, so one lucky draw cannot seize the crown
-        # and lock out everything that follows.
+        # and lock out everything that follows. A TIE is still taken: the config
+        # stays in the lineage (not reverted) even if it does not replace best_so_far.
         new_best = (round_score, round_config, round_idx) if round_score > bar else best
         return (
             "accept",
             f"score {round_score:.4f} >= incumbent({basis}) {bar:.4f} - tol {tolerance:.4f}",
             new_best,
+            None,
+        )
+    gained = [t for t in (unique_gained or []) if t]
+    if gained:
+        return (
+            "accept",
+            f"score {round_score:.4f} < incumbent({basis}) {bar:.4f} - tol {tolerance:.4f} "
+            f"but unique solves {','.join(gained[:4])} — keep as pivot, incumbent unchanged",
+            best,
             None,
         )
     return (
@@ -599,6 +667,25 @@ def _score_and_gate_tb2(
 # ---------------------------------------------------------------------------
 
 _FILE_URI_RE = re.compile(r"file://(/[^\s'\"]+?\.(?:py|j2|jinja|jinja2|txt|md))")
+
+
+def _copy_sibling_system_prompt(src_config: Path, dest_dir: Path) -> str | None:
+    """Copy ``system_prompt.txt`` sitting next to *src_config* into *dest_dir*.
+
+    The Tmax eval prompt builder reads the sibling of the *active* YAML, not a
+    ``file://`` URI inside it. Copying only the YAML (or only ``file://``
+    processor assets) therefore reseeds the next iteration with the stock
+    5-line prompt even when the previous round's winner edited the prompt.
+    Returns the destination path when a sibling was copied, else None.
+    """
+    src = Path(src_config).expanduser().resolve().parent / "system_prompt.txt"
+    if not src.is_file():
+        return None
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "system_prompt.txt"
+    shutil.copy2(src, dest)
+    return str(dest)
 
 
 def _materialize_config_bundle(src_config: Path, dest_config: Path, assets_dir: Path) -> list[str]:
@@ -643,6 +730,8 @@ def _materialize_config_bundle(src_config: Path, dest_config: Path, assets_dir: 
 
     dest_config.parent.mkdir(parents=True, exist_ok=True)
     dest_config.write_text(_FILE_URI_RE.sub(_sub, text), encoding="utf-8")
+    if _copy_sibling_system_prompt(src_config, dest_config.parent):
+        copied.append("system_prompt.txt")
     return copied
 
 
@@ -807,9 +896,11 @@ def _copy_config_as_round(*, run_root: Path, output_round: int, config: Path) ->
     round_dir.mkdir(parents=True, exist_ok=True)
     promoted = round_dir / "config.yaml"
     shutil.copy2(config, promoted)
+    _copy_sibling_system_prompt(config, round_dir)
     evolve_dir = round_dir / "evolve"
     evolve_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(config, evolve_dir / "config.yaml")
+    _copy_sibling_system_prompt(config, evolve_dir)
     return promoted.resolve()
 
 
@@ -1087,7 +1178,8 @@ async def main() -> None:
         "--probe-unsolved",
         type=int,
         default=1,
-        help="Parent-failed tasks in the mini-eval probe set (default: 1).",
+        help="Parent-failed tasks in the mini-eval probe set, in addition to each "
+        "candidate's assigned focus tasks (default: 1).",
     )
     parser.add_argument(
         "--explore-every",
@@ -1096,10 +1188,55 @@ async def main() -> None:
         help="Every Nth round picks the most NOVEL archived parent instead of the "
         "best-scoring one (default: 3; 0 disables exploration).",
     )
+    parser.add_argument(
+        "--parent-tie-eps",
+        type=float,
+        default=0.0,
+        help="Treat scored archive nodes within this pass-rate of the best mean "
+        "as simultaneous fan-out parents (default: 0 = exact ties only).",
+    )
+    parser.add_argument(
+        "--fanout-mode",
+        choices=["v1", "v2", "tournament"],
+        default="v1",
+        help=(
+            "Fan-out screening version. v1 (default) is fail-fast: LLM cuts the "
+            "batch, then mini-eval hard-drops candidates that break more than one "
+            "parent-solved probe task. v2 screens structurally, probes every remaining "
+            "valid harness, ranks on net gain (new solves can outweigh regressions), "
+            "and MERGE complementary candidates into one extra harness (complementary "
+            "changesets are enough; the union does not have to beat either parent). "
+            "Tied and unique-gain harnesses stay as simultaneous parents. "
+            "tournament: propose N distinct harnesses, drop only system errors / "
+            "no-ops / dupes, full-eval all of them in parallel, keep the highest "
+            "pass-rate as the next parent. No probe, no LLM rank. "
+            "Only applies when --fanout > 1."
+        ),
+    )
+    parser.add_argument(
+        "--fanout-eval-concurrent",
+        type=int,
+        default=0,
+        help=(
+            "Max concurrent full-evals of fan-out survivors (default: 0 = all "
+            "at once). Tournament typically sets this to --fanout so the N "
+            "harnesses share one 50-task wave."
+        ),
+    )
+    parser.add_argument(
+        "--no-fanout-merge",
+        action="store_true",
+        default=False,
+        help="v2 only: skip synthesizing a merged harness from complementary candidates.",
+    )
     args = parser.parse_args()
 
     if args.fanout < 1:
         raise ValueError("--fanout must be >= 1")
+    if args.fanout_mode == "tournament":
+        # Eval every valid proposal; --fanout-keep is ignored.
+        args.fanout_keep = int(args.fanout)
+        args.skip_final_score = True
     if args.fanout_keep < 1:
         raise ValueError("--fanout-keep must be >= 1")
     if args.fanout_keep > args.fanout:
@@ -1438,11 +1575,24 @@ async def main() -> None:
     # _save_state calls the loop already makes.
     archive = Archive(state, task_universe=task_names or [])
     fanout_on = int(args.fanout) > 1
-    if fanout_on:
+    tournament = args.fanout_mode == "tournament"
+    if fanout_on and tournament:
         logger.info(
-            "Fan-out ON: %d proposals/round → screens → %d full eval; "
+            "Fan-out ON (tournament): %d proposals/round, drop only system "
+            "errors / no-ops / dupes, then parallel full eval of every survivor "
+            "(eval-concurrent=%s)",
+            args.fanout,
+            args.fanout_eval_concurrent or "all",
+        )
+    elif fanout_on:
+        logger.info(
+            "Fan-out ON (%s): %d proposals/round → screens → %d full eval%s; "
             "explore every %s rounds",
-            args.fanout, args.fanout_keep, args.explore_every or "never",
+            args.fanout_mode,
+            args.fanout,
+            args.fanout_keep,
+            "" if args.fanout_mode != "v2" or args.no_fanout_merge else " (+ complementary merge)",
+            args.explore_every or "never",
         )
 
     async def _screen_llm(system: str, user: str) -> str:
@@ -1515,12 +1665,29 @@ async def main() -> None:
                     len(task_names),
                 )
 
-            trajectories_dir = await adapter.resolve_trajectories_for_round(
-                run_root=run_root,
-                input_round=input_round,
-                current_config=evaluated_config,
-                task_names_override=round_task_override,
-            )
+            cache = state.get("tournament_eval_cache") or {}
+            cached_cfg = Path(cache["config"]).resolve() if cache.get("config") else None
+            cached_traj = Path(cache["trajectories"]) if cache.get("trajectories") else None
+            if (
+                tournament
+                and cached_cfg is not None
+                and cached_cfg == evaluated_config
+                and cached_traj is not None
+                and cached_traj.is_dir()
+            ):
+                trajectories_dir = cached_traj
+                logger.info(
+                    "[R%d] tournament: reusing generation-winner eval %s",
+                    input_round,
+                    trajectories_dir,
+                )
+            else:
+                trajectories_dir = await adapter.resolve_trajectories_for_round(
+                    run_root=run_root,
+                    input_round=input_round,
+                    current_config=evaluated_config,
+                    task_names_override=round_task_override,
+                )
             if not trajectories_dir.is_dir():
                 raise FileNotFoundError(f"resolve_trajectories_for_round returned non-directory: {trajectories_dir}")
 
@@ -1589,8 +1756,16 @@ async def main() -> None:
                     _arch_node.id,
                     float(score),
                     [t for t in task_names if full_task_results.get(t)],
+                    trajectories=str(trajectories_dir),
                 )
 
+            unique_gained: list[str] = []
+            inc_node = archive.incumbent()
+            if inc_node is not None and Path(inc_node.config).resolve() != Path(evaluated_config).resolve():
+                unique_gained = sorted(
+                    t for t in task_names
+                    if full_task_results.get(t) and t not in set(inc_node.solved or [])
+                )
             incumbent_mean = _mean_score_for(state, best_round[1]) if best_round else None
             decision, gate_reason, best_round, reverted_cfg = _score_and_gate_tb2(
                 round_idx=input_round,
@@ -1599,7 +1774,18 @@ async def main() -> None:
                 best=best_round,
                 tolerance=args.regression_tolerance,
                 incumbent_mean=incumbent_mean,
+                unique_gained=unique_gained,
             )
+
+            if tournament and reverted_cfg is not None:
+                logger.info(
+                    "[R%d] tournament: ignoring revert (%s) — next parent is "
+                    "this generation's highest scorer, not the incumbent",
+                    input_round,
+                    gate_reason,
+                )
+                reverted_cfg = None
+                decision = "accept"
 
             # Close the loop: the config scored here is the one the meta-agent
             # produced in journal round `input_round`. Without this write-back the
@@ -1635,6 +1821,8 @@ async def main() -> None:
             promoted_config: Path
             changed: bool
             elapsed: float
+            tournament_eval = None
+            this_round_tournament = None
 
             if reverted_cfg is not None:
                 logger.warning(
@@ -1684,15 +1872,21 @@ async def main() -> None:
                         output_dir=round_evolve_dir,
                     )
                 else:
-                    # Branch from the archive's pick, not blindly from the
-                    # config that happens to be in hand. On explore rounds this
-                    # is deliberately NOT the incumbent — that is the point.
-                    parent_node = (
-                        archive.select_parent(
-                            round=input_round, explore_every=int(args.explore_every)
+                    # Branch from the archive's picks. Tied / unique-gain
+                    # lineages stay as simultaneous pivots so the meta-agent
+                    # can read each of their trajectories, not just the incumbent.
+                    if tournament:
+                        parent_nodes = [_arch_node]
+                    else:
+                        parent_nodes = (
+                            archive.select_parents(
+                                round=input_round,
+                                explore_every=int(args.explore_every),
+                                tie_eps=float(getattr(args, "parent_tie_eps", 0.0)),
+                            )
+                            or [_arch_node]
                         )
-                        or _arch_node
-                    )
+                    parent_node = parent_nodes[0]
                     parent_cfg = Path(parent_node.config).resolve()
                     if not parent_cfg.is_file():
                         logger.warning(
@@ -1701,9 +1895,32 @@ async def main() -> None:
                             input_round, parent_node.id, parent_cfg,
                         )
                         parent_node, parent_cfg = _arch_node, evaluated_config
+                        parent_nodes = [parent_node]
 
                     parent_results = {t: bool(full_task_results.get(t)) for t in task_names}
-                    survivors = await propose_and_screen(
+                    if parent_node.solved:
+                        parent_results = {
+                            t: t in set(parent_node.solved) for t in task_names
+                        }
+                    pivot_dicts = _nodes_to_pivot_dicts(
+                        parent_nodes, task_names, archive.incumbent()
+                    )
+                    try:
+                        scratch = round_evolve_dir / "_meta_scratch"
+                        scratch.mkdir(parents=True, exist_ok=True)
+                        (scratch / "PIVOTS.md").write_text(
+                            format_pivot_brief(pivot_dicts) or "(single parent)\n",
+                            encoding="utf-8",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("could not write PIVOTS.md: %s", exc)
+                    if tournament:
+                        propose = propose_tournament
+                    elif args.fanout_mode == "v2":
+                        propose = propose_and_screen_v2
+                    else:
+                        propose = propose_and_screen
+                    propose_kw = dict(
                         meta_agent=meta_agent,
                         archive=archive,
                         parent=parent_node,
@@ -1723,6 +1940,10 @@ async def main() -> None:
                         n_probe_solved=int(args.probe_solved),
                         n_probe_unsolved=int(args.probe_unsolved),
                     )
+                    if args.fanout_mode == "v2":
+                        propose_kw["merge"] = not args.no_fanout_merge
+                        propose_kw["pivots"] = pivot_dicts
+                    survivors = await propose(**propose_kw)
                     if not survivors:
                         # Every proposal died. Carry the parent forward rather
                         # than failing the run: a barren round is a bad round,
@@ -1738,16 +1959,48 @@ async def main() -> None:
                         )
                         promote_src_dir = Path(output_config_path).parent
                     else:
-                        winner = await _full_eval_survivors(
+                        winner, kept_pivots = await _full_eval_survivors(
                             survivors=survivors,
                             archive=archive,
                             adapter=adapter,
                             run_root=run_root,
                             input_round=input_round,
                             task_names=task_names,
+                            parent_solved=list(parent_node.solved or []),
+                            tie_eps=float(getattr(args, "parent_tie_eps", 0.0)),
+                            force_eval=tournament,
+                            eval_concurrent=int(getattr(args, "fanout_eval_concurrent", 0) or 0),
+                            job_suffix_traj=tournament,
                         )
+                        tournament_eval = winner
                         output_config_path = Path(winner.config).resolve()
                         promote_src_dir = output_config_path.parent
+                        if tournament:
+                            this_round_tournament = [
+                                {
+                                    "idx": c.idx,
+                                    "score": c.full_score,
+                                    "config": str(c.config),
+                                    "trajectories": (
+                                        str(c.trajectories_dir)
+                                        if c.trajectories_dir
+                                        else None
+                                    ),
+                                }
+                                for c in survivors
+                                if c.full_score is not None
+                            ]
+                            state["tournament_last_round"] = this_round_tournament
+                        state["pivots"] = _nodes_to_pivot_dicts(
+                            [
+                                archive.get(c.node.id)
+                                for c in kept_pivots
+                                if getattr(c, "node", None) is not None
+                                and archive.get(c.node.id) is not None
+                            ],
+                            task_names,
+                            archive.incumbent(),
+                        )
                         _save_state(state_path, state)
                 elapsed = time.time() - started_at
                 output_config_path = Path(output_config_path).resolve()
@@ -1761,6 +2014,27 @@ async def main() -> None:
 
                 changed = evaluated_config.read_bytes() != output_config_path.read_bytes()
                 current_config = promoted_config
+
+                if tournament and tournament_eval is not None:
+                    traj = getattr(tournament_eval, "trajectories_dir", None)
+                    if traj is not None:
+                        state["tournament_eval_cache"] = {
+                            "config": str(promoted_config),
+                            "trajectories": str(traj),
+                            "score": tournament_eval.full_score,
+                            "idx": tournament_eval.idx,
+                        }
+                    wscore = getattr(tournament_eval, "full_score", None)
+                    if wscore is not None and (
+                        best_round is None or float(wscore) > best_round[0]
+                    ):
+                        best_round = (float(wscore), promoted_config, output_round)
+                        logger.info(
+                            "[R%d] tournament best_so_far ← c%d @ %.4f",
+                            output_round,
+                            tournament_eval.idx,
+                            wscore,
+                        )
 
             rr = {
                 "input_round": input_round,
@@ -1777,6 +2051,8 @@ async def main() -> None:
                 "gate_decision": decision,
                 "gate_reason": gate_reason,
             }
+            if this_round_tournament:
+                rr["tournament_last_round"] = this_round_tournament
             bsf = _best_to_state_dict(best_round)
             if bsf is not None:
                 rr["best_so_far"] = bsf
@@ -1970,17 +2246,18 @@ async def main() -> None:
         "  verify:   "
         f"TB2_HARNESS_CONFIG={last_promoted} "
         "bash benchmarks/terminal_bench_2/scripts/eval_opensandbox.sh "
-        "--job-name <verify-job> -n 2 "
-        f"--tasks <tasks.json>"
+        "--job-name VERIFY_JOB -n 2 --tasks TASKS.json"
     )
     print("=" * 72 + "\n")
 
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
+    # asyncio.run() owns loop shutdown. The previous new_event_loop() +
+    # shutdown_asyncgens/close sequence raced httpx aclose against a closed
+    # loop ("Event loop is closed") and could non-zero-exit after a successful
+    # evolve — which, under pipefail in evolve_tmax.sh, aborted the coevolve
+    # loop (job 2824, iter2/A_evolve).
     try:
-        loop.run_until_complete(main())
-    finally:
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.run_until_complete(loop.shutdown_default_executor())
-        loop.close()
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None

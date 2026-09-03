@@ -57,10 +57,20 @@ def _patched_gated_delta_net_init(self, *args, **kwargs):
     _register_zero3_external_conv1d_parameter(self)
 
 
+def _decoder_layer_kind(layer) -> str | None:
+    """transformers 5.4 used ``layer_type``; 5.14+ renamed it to ``block_type``."""
+    kind = getattr(layer, "block_type", None)
+    if kind is None:
+        kind = getattr(layer, "layer_type", None)
+    return kind
+
+
 def _patched_gated_delta_net_forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
     """GatedDeltaNet forward with seq_idx and cu_seqlens support for packing."""
     seq_idx = kwargs.get("seq_idx")
     cu_seqlens = kwargs.get("cu_seqlens")
+    if cu_seqlens is None:
+        cu_seqlens = kwargs.get("cu_seq_lens_q")
     hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
 
     batch_size, seq_len, _ = hidden_states.shape
@@ -183,11 +193,12 @@ def _patched_decoder_layer_forward(
     residual = hidden_states
     hidden_states = self.input_layernorm(hidden_states)
 
-    if self.layer_type == "linear_attention":
+    kind = _decoder_layer_kind(self)
+    if kind == "linear_attention":
         hidden_states = self.linear_attn(
             hidden_states=hidden_states, cache_params=past_key_values, attention_mask=attention_mask, **kwargs
         )
-    elif self.layer_type == "full_attention":
+    elif kind == "full_attention":
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -211,11 +222,31 @@ def _set_class_attr(cls, name, value):
     setattr(cls, name, value)
 
 
+def _decoder_layer_already_forwards_kwargs() -> bool:
+    """transformers>=5.14 DecoderLayer already uses block_type and **kwargs.
+
+    Replacing that forward with the 5.4 ``self.layer_type`` version crashes
+    ZeRO dummy_optimizer_step: AttributeError on Qwen3_5DecoderLayer.layer_type.
+    """
+    import inspect
+
+    try:
+        src = inspect.getsource(modeling_qwen3_5.Qwen3_5DecoderLayer.forward)
+    except (OSError, TypeError):
+        return False
+    return "self.block_type" in src and "**kwargs" in src
+
+
 def patch_qwen3_5_packing():
     """Apply the packing fix to Qwen3.5 GatedDeltaNet and DecoderLayer."""
     _set_class_attr(modeling_qwen3_5.Qwen3_5GatedDeltaNet, "__init__", _patched_gated_delta_net_init)
     _set_class_attr(modeling_qwen3_5.Qwen3_5GatedDeltaNet, "forward", _patched_gated_delta_net_forward)
-    _set_class_attr(modeling_qwen3_5.Qwen3_5DecoderLayer, "forward", _patched_decoder_layer_forward)
+    if _decoder_layer_already_forwards_kwargs():
+        logger.info(
+            "Qwen3.5 DecoderLayer already uses block_type and forwards **kwargs; skipping decoder forward patch"
+        )
+    else:
+        _set_class_attr(modeling_qwen3_5.Qwen3_5DecoderLayer, "forward", _patched_decoder_layer_forward)
     logger.info("Applied Qwen3.5 packing patch for GatedDeltaNet seq_idx/cu_seqlens support")
 
 

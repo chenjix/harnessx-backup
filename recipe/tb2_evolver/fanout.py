@@ -22,12 +22,20 @@ Round shape::
                                  │
                                  ▼
                           k survivors → full eval
+
+v2 (holistic ranking + complementary merge, stacked proposals) lives in
+``fanout_v2.propose_and_screen_v2`` and is selected with ``--fanout-mode v2``.
+Tournament (no screens, full-eval every valid proposal) lives in
+``fanout_tournament.propose_tournament`` and is selected with
+``--fanout-mode tournament``.
+This module is the v1 path and stays the default.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -45,7 +53,7 @@ from .screen import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["build_focus_notes", "fan_out", "propose_and_screen"]
+__all__ = ["ProposalSpec", "build_focus_notes", "fan_out", "propose_and_screen"]
 
 
 # ─── focus assignment ──────────────────────────────────────────────────────
@@ -152,6 +160,19 @@ def build_focus_notes(
 # ─── fan-out ───────────────────────────────────────────────────────────────
 
 
+@dataclass
+class ProposalSpec:
+    """One meta-agent call: which parent to edit, which trajectories to read."""
+
+    idx: int
+    focus: str
+    parent_config: Path
+    trajectories_dir: Path
+    synthesize: bool = False
+    parent_results: dict[str, bool] | None = None
+    parent_node_id: str | None = None
+
+
 async def fan_out(
     *,
     meta_agent,
@@ -161,6 +182,9 @@ async def fan_out(
     n: int,
     focus_notes: Sequence[str],
     max_concurrent: int = 4,
+    stack_edits: bool = False,
+    specs: Sequence[ProposalSpec] | None = None,
+    pivot_brief: str | None = None,
 ) -> list[Candidate]:
     """Run ``n`` evolve() calls concurrently, one per focus note.
 
@@ -173,26 +197,53 @@ async def fan_out(
     A proposal that raises is dropped and logged, never fatal — losing 1 of N
     is a smaller loss than losing the round.
     """
+    if specs is None:
+        specs = [
+            ProposalSpec(
+                idx=i,
+                focus=focus_notes[i] if i < len(focus_notes) else "",
+                parent_config=Path(parent_config),
+                trajectories_dir=Path(trajectories_dir),
+            )
+            for i in range(n)
+        ]
     sem = asyncio.Semaphore(max(1, max_concurrent))
 
-    async def _one(idx: int, focus: str) -> Candidate | None:
-        out_dir = (round_dir / f"c{idx}").resolve()
+    async def _one(spec: ProposalSpec) -> Candidate | None:
+        out_dir = (round_dir / f"c{spec.idx}").resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
+        focus = spec.focus
+        if spec.synthesize:
+            focus = (
+                focus
+                + "\n\nThis proposal is the SYNTHESIS slot: read every pivot "
+                "harness and its trajectories before editing. Combine complementary "
+                "mechanisms; do not copy a single parent wholesale."
+            )
         async with sem:
             try:
                 cfg = await meta_agent.evolve(
-                    current_config=parent_config,
-                    trajectories_dir=trajectories_dir,
+                    current_config=spec.parent_config,
+                    trajectories_dir=spec.trajectories_dir,
                     output_dir=out_dir,
                     focus_note=focus,
+                    stack_edits=stack_edits,
+                    pivot_brief=pivot_brief,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[fanout] proposal %d failed: %s", idx, exc)
+                logger.warning("[fanout] proposal %d failed: %s", spec.idx, exc)
                 return None
-        return Candidate(idx=idx, config=Path(cfg).resolve())
+        cand = Candidate(idx=spec.idx, config=Path(cfg).resolve())
+        cand.parent_config = Path(spec.parent_config).resolve()
+        cand.trajectories_dir = Path(spec.trajectories_dir).resolve()
+        cand.parent_results = dict(spec.parent_results or {})
+        cand.synthesize = bool(spec.synthesize)
+        cand.source_parent_id = spec.parent_node_id
+        cand.focus_tasks = []
+        return cand
 
     results = await asyncio.gather(
-        *(_one(i, focus_notes[i]) for i in range(n)), return_exceptions=False
+        *(_one(s) for s in specs), return_exceptions=False
     )
     cands = [c for c in results if c is not None]
     logger.info("[fanout] %d/%d proposals produced a config", len(cands), n)
@@ -218,13 +269,18 @@ def _attach_changesets(candidates: Sequence[Candidate], parent_config: Path) -> 
         ) from exc
 
     for c in candidates:
+        src = Path(c.parent_config).resolve() if c.parent_config else parent_config
+        try:
+            before = HarnessConfig.from_yaml_file(src)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[fanout] cand#%d parent unreadable (%s): %s", c.idx, src, exc)
+            c.drop("structural", f"parent config unreadable: {exc}")
+            continue
         try:
             after = HarnessConfig.from_yaml_file(c.config)
             c.changeset = compute_changeset(before, after)
             c.signature = changeset_signature(c.changeset)
         except Exception as exc:  # noqa: BLE001
-            # An unreadable candidate cannot be screened OR evaluated. Drop it
-            # here rather than letting it fail later inside a real eval.
             logger.warning("[fanout] cand#%d changeset failed: %s", c.idx, exc)
             c.drop("structural", f"config unreadable: {exc}")
 

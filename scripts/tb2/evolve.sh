@@ -7,12 +7,29 @@ while [[ ! -f "$_HX_SCRIPTS/_common.sh" && "$_HX_SCRIPTS" != "/" ]]; do
 done
 source "$_HX_SCRIPTS/_common.sh"
 
-export OPENAI_API_BASE="${OPENAI_API_BASE:-${GATEWAY_URL:-https://gateway.salesforceresearch.ai}/openai/process/v1}"
-export OPENAI_API_KEY="${OPENAI_API_KEY:-${SFG_API_KEY:-}}"
-require_var OPENAI_API_KEY
-
 export META_MODEL="${META_MODEL:-openai/gpt-5.5}"
-export PROVIDER_ID="${PROVIDER_ID:-openai}"
+
+# Credentials follow the meta-model's provider. Demanding an OpenAI key
+# unconditionally rejected Bedrock meta-agents, which authenticate through AWS
+# and never read that variable -- and it did so only once the evolve stage was
+# reached, discarding the eval that preceded it. Mirrors scripts/tmax/evolve_tmax.sh.
+case "$META_MODEL" in
+  bedrock/*)
+    export AWS_REGION_NAME="${AWS_REGION_NAME:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}}"
+    unset PROVIDER_ID || true
+    echo "Meta-agent: $META_MODEL via AWS Bedrock (region=$AWS_REGION_NAME)"
+    ;;
+  anthropic/*)
+    require_var ANTHROPIC_API_KEY
+    export PROVIDER_ID="${PROVIDER_ID:-anthropic}"
+    ;;
+  *)
+    export OPENAI_API_BASE="${OPENAI_API_BASE:-${GATEWAY_URL:-https://gateway.salesforceresearch.ai}/openai/process/v1}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-${SFG_API_KEY:-}}"
+    require_var OPENAI_API_KEY
+    export PROVIDER_ID="${PROVIDER_ID:-openai}"
+    ;;
+esac
 export TB2_TASK_TIMEOUT="${TB2_TASK_TIMEOUT:-900}"
 export EVOLVE_COST_CAP_USD="${EVOLVE_COST_CAP_USD:-none}"
 export EVOLVE_MAX_STEPS="${EVOLVE_MAX_STEPS:-200}"
@@ -115,18 +132,33 @@ fi
 # replicas (recipe/tb2_evolver/scripts/sharded_tb2_eval.py) instead of running
 # against a single server. --tb2-eval-concurrent becomes the concurrency
 # *per replica*, not the round total, when GPU_POOL is set.
+#
+# Bedrock unsets PROVIDER_ID on purpose (SigV4, no gateway header). Passing
+# --provider-id "$PROVIDER_ID" under `set -u` is what killed tb21-coev 2170
+# after the 89-task scan had already finished. Match evolve_tmax.sh: omit it.
+provider_args=()
+[[ -n "${PROVIDER_ID:-}" ]] && provider_args+=(--provider-id "$PROVIDER_ID")
+
+noop_args=()
+if [[ "${EVOLVE_NOOP_ON_META_FAIL:-1}" == "1" ]]; then
+  noop_args+=(--noop-on-meta-fail)
+else
+  noop_args+=(--no-noop-on-meta-fail)
+fi
+
 cmd=(
   "$(python_bin)" -m recipe.tb2_evolver.run
   --tasks "$TASKS_JSON"
   --run-tag "$RUN_TAG"
   --num-rounds "$NUM_ROUNDS"
   --model "$META_MODEL"
-  --provider-id "$PROVIDER_ID"
+  "${provider_args[@]}"
   --trajectory-mode rerun
   --tb2-eval-script "$ROOT/benchmarks/terminal_bench_2/scripts/eval_local_docker.sh"
   --tb2-eval-concurrent "$CONCURRENT"
   --tb2-max-steps "${TB2_MAX_STEPS:-120}"
   --regression-tolerance "${REGRESSION_TOLERANCE:-0.0667}"
+  "${noop_args[@]}"
   "${evidence_args[@]}"
   "${resume_args[@]}"
   "${adaptive_args[@]}"

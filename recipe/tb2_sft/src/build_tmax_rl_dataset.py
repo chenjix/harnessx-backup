@@ -44,13 +44,85 @@ _DEFAULT_TAXONOMY = _ROOT / "data/external/tmax-taxonomy/data/train-00000-of-000
 _DEFAULT_HOLDOUT = _ROOT / "recipe/tb2_evolver/tasks_tmax_only200.json"
 _DEFAULT_EVOLVE = _ROOT / "recipe/tb2_evolver/tasks_tmax_evolve50_list.json"
 _HOLDOUT_ENVS = _ROOT / "recipe/tb2_sft/data/qwen35_9b_tmax_only200/eval_task_set_with_envs.jsonl"
-
-SYSTEM_PROMPT = (
-    "You are a helpful coding assistant. You have access to a bash terminal. "
-    "Use it to explore the codebase, understand the problem, implement a solution, "
-    "and verify it works. When you are confident your solution is correct, submit "
-    "by running: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+_VANILLUX_YAML = (
+    _ROOT / "tmax/training/open-instruct/open_instruct/environments/vanillux_prompts.yaml"
 )
+
+# Must match official allenai/tmax-15k-open-instruct user messages: the vanillux
+# instance template (workflow + COMPLETE_TASK submit). grpo_fast discards the
+# env reset observation, and --system_prompt_override_file replaces the system
+# turn, so submit instructions have to live in the user message or the policy
+# never issues the marker and every reward is 0.
+PROMPT_SCHEMA = "vanillux_instance_v1"
+SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+# Fallback if vanillux_prompts.yaml is missing. The live system turn is still
+# overridden by swerl_vanillux_sandbox_system_prompt.txt at train time.
+SYSTEM_PROMPT = (
+    "You are a helpful assistant that can interact with a computer.\n\n"
+    "Your response must include a THOUGHT section before your action where you\n"
+    "explain your reasoning. After the THOUGHT, you must call the `bash` tool\n"
+    "with EXACTLY ONE bash command (multiple commands chained with `&&` or `||`\n"
+    "count as a single action).\n\n"
+    "Failure to follow these rules — calling no tool, calling a tool other than\n"
+    "`bash`, or omitting the THOUGHT — will cause your response to be rejected."
+)
+
+_INSTANCE_TEMPLATE_FALLBACK = f"""Please solve this task:
+
+{{{{task}}}}
+
+You can execute bash commands and edit files (with `sed`, `cat > file << 'EOF'`,
+etc.) to implement the necessary changes.
+
+## Recommended Workflow
+
+6. Submit your changes and finish your work by issuing the following command:
+   `echo {SUBMIT_MARKER}`
+   Do not combine it with any other command. After this command, you cannot
+   continue working on this task.
+"""
+
+_TEMPLATES: tuple[str, str] | None = None
+
+
+def vanillux_templates() -> tuple[str, str]:
+    """Return (system_template, instance_template) from the env yaml."""
+    global _TEMPLATES
+    if _TEMPLATES is not None:
+        return _TEMPLATES
+    system, instance = SYSTEM_PROMPT, _INSTANCE_TEMPLATE_FALLBACK
+    if _VANILLUX_YAML.is_file():
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(_VANILLUX_YAML.read_text(encoding="utf-8")) or {}
+            system = str(data.get("system_template") or system).strip()
+            instance = str(data.get("instance_template") or instance)
+        except Exception:  # noqa: BLE001 — builder must still run without PyYAML
+            pass
+    _TEMPLATES = (system, instance)
+    return _TEMPLATES
+
+
+def wrap_user_message(description: str, instance_template: str | None = None) -> str:
+    """Embed the taxonomy instruction in the official vanillux user prompt.
+
+    Official mixer rows look like::
+
+        Please solve this task:\\n\\n<instruction>\\n\\nYou can execute bash...
+        echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+    Reset() also renders this template, but pool.acquire_reset discards that
+    observation, so the dataset user turn is the only copy the policy sees.
+    """
+    desc = (description or "").strip()
+    if not desc:
+        return desc
+    if SUBMIT_MARKER in desc and desc.startswith("Please solve this task:"):
+        return description
+    tmpl = instance_template if instance_template is not None else vanillux_templates()[1]
+    return tmpl.replace("{{task}}", desc)
 
 
 def _load_task_ids(path: Path | None) -> list[str]:
@@ -175,10 +247,11 @@ def _row_to_record(
     if not task_id or not description or not test_final:
         return None
     image = task_image(task_id, container_def, mode=image_mode, registry=image_registry)
+    system, instance = vanillux_templates()
     return {
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": description},
+            {"role": "system", "content": system},
+            {"role": "user", "content": wrap_user_message(description, instance)},
         ],
         "ground_truth": task_id,
         "dataset": "passthrough",
@@ -284,6 +357,21 @@ def load_from_envs_jsonl(
 def write_dataset(records: list[dict[str, Any]], out_dir: Path) -> dict[str, Any]:
     if not records:
         raise SystemExit("ERROR: no RL tasks to write")
+    missing_submit = [
+        rec.get("ground_truth")
+        for rec in records
+        if SUBMIT_MARKER
+        not in next(
+            (m.get("content") or "" for m in rec.get("messages") or [] if m.get("role") == "user"),
+            "",
+        )
+    ]
+    if missing_submit:
+        raise SystemExit(
+            f"ERROR: {len(missing_submit)} RL row(s) missing {SUBMIT_MARKER} in the "
+            f"user message, e.g. {missing_submit[:3]}. wrap_user_message must embed "
+            "the vanillux instance template."
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     task_data_dir = out_dir / "task_data"
@@ -392,6 +480,7 @@ def write_dataset(records: list[dict[str, Any]], out_dir: Path) -> dict[str, Any
 
     summary = {
         "n_tasks": len(clean_records),
+        "prompt_schema": PROMPT_SCHEMA,
         "env_name": clean_records[0]["env_config"]["env_name"],
         "n_images": len(images),
         "n_images_missing_locally": len(missing_images),
@@ -427,6 +516,12 @@ def main() -> None:
     ap.add_argument("--name", required=True)
     ap.add_argument("--out-root", type=Path, default=_ROOT / "recipe/tb2_sft/data")
     ap.add_argument("--exclude-tasks", type=Path, default=_DEFAULT_HOLDOUT)
+    ap.add_argument(
+        "--exclude-extra",
+        type=Path,
+        default=None,
+        help="Additional task ids to drop (unanimous/mastered from evolve select).",
+    )
     ap.add_argument("--n-tasks", type=int, default=100, help="Target RL train size (default 100)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument(
@@ -462,6 +557,7 @@ def main() -> None:
     args = ap.parse_args()
 
     exclude = set(_load_task_ids(args.exclude_tasks))
+    exclude |= set(_load_task_ids(args.exclude_extra))
     prefer = _load_task_ids(args.prefer_tasks)
 
     if args.envs_jsonl is not None:

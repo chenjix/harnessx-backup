@@ -133,6 +133,14 @@ class TestSWERLVanilluxSandbox(unittest.IsolatedAsyncioTestCase):
         self.assertIn("{{task}}", INSTANCE_TEMPLATE)
         self.assertNotIn("{{task}}", rendered)
 
+    def test_prepare_vanillux_prefers_home_user_cwd(self):
+        env = SWERLVanilluxSandboxEnv()
+        env._backend = _FakeBackend()
+        env._prepare_vanillux_runtime()
+        joined = "\n".join(env._backend.commands)
+        self.assertIn("/home/user", joined)
+        self.assertIn(".swerl_vanillux_cwd", joined)
+
     def test_truncate_observation_keeps_short_outputs(self):
         short = "hello world"
 

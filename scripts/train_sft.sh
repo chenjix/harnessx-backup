@@ -108,6 +108,7 @@ PY
 #   LR 2e-5, linear schedule, 2 epochs, long context, larger global batch.
 # We still train LoRA (official uses full FT + ZeRO-3 on 32 GPUs); override via env.
 case "$MODEL_SIZE" in
+  2b)  _def_epochs="${SFT_EPOCHS_2B:-2}";  _def_lr="${SFT_LR_2B:-2.0e-5}" ;;
   4b)  _def_epochs="${SFT_EPOCHS_4B:-2}";  _def_lr="${SFT_LR_4B:-2.0e-5}" ;;
   9b)  _def_epochs="${SFT_EPOCHS_9B:-2}";  _def_lr="${SFT_LR_9B:-2.0e-5}" ;;
   27b) _def_epochs="${SFT_EPOCHS_27B:-2}"; _def_lr="${SFT_LR_27B:-2.0e-5}" ;;

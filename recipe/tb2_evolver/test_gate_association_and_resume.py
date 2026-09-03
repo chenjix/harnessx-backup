@@ -97,6 +97,22 @@ def test_resume_restores_best() -> None:
         assert dumped == {"score": 0.5333, "config": str(cfg.resolve()), "round": 0}
 
 
+def test_gate_keeps_unique_gain_below_bar() -> None:
+    best = (8 / 15, "R0", 0)
+    decision, reason, new_best, reverted = gate(
+        round_idx=1,
+        round_score=4 / 15,
+        round_config="R1",
+        best=best,
+        tolerance=TOL,
+        unique_gained=["task_new"],
+    )
+    assert decision == "accept"
+    assert reverted is None
+    assert new_best[2] == 0
+    assert "unique" in reason
+
+
 def test_resume_without_best_does_not_crash() -> None:
     assert best_from_state({}) is None
     assert best_from_state({"history": [{"score": 0.5}]}) is None
@@ -108,4 +124,5 @@ if __name__ == "__main__":
     print("=== resume best restore ===")
     test_resume_restores_best()
     test_resume_without_best_does_not_crash()
+    test_gate_keeps_unique_gain_below_bar()
     print("RESULT: PASS")

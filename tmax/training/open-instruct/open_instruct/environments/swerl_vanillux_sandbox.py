@@ -397,11 +397,16 @@ class SWERLVanilluxSandboxEnv(RLEnvironment):
 
     def _prepare_vanillux_runtime(self) -> None:
         assert self._backend is not None
+        # Official vanillux images keep the task under /workspace and symlink
+        # /app there. Tmax eval images bake %post into WORKDIR /home/user, and
+        # taxonomy statements use that path. Prefer /home/user when it exists
+        # so the first `ls` sees the task files instead of an empty /workspace.
         self._backend.run_command(
-            "mkdir -p /workspace /root && "
-            "cd /workspace && "
-            '[ -d /app ] || { _P="$(pwd)"; [ "$_P" != "/" ] && ln -sf "$_P" /app; } && '
-            f"printf '%s\\n' /app > {shlex.quote(_BASH_CWD_PATH)} && "
+            "mkdir -p /workspace /root /home/user && "
+            'if [ -d /home/user ]; then _CWD=/home/user; else _CWD=/workspace; fi && '
+            'cd "$_CWD" && '
+            '[ -e /app ] || ln -sfn "$_CWD" /app && '
+            f"printf '%s\\n' \"$_CWD\" > {shlex.quote(_BASH_CWD_PATH)} && "
             f": > {shlex.quote(_BASH_ENV_PATH)}"
         )
         self._backend.write_file(_BASH_WRAPPER_PATH, _BASH_WRAPPER)

@@ -56,16 +56,18 @@ export PER_TASK="${PER_TASK:-3}"
 export MODEL_RATCHET_TOL="${MODEL_RATCHET_TOL:-0}"
 export SFT_EPOCHS="${SFT_EPOCHS:-2}"
 export TMAX_CONCURRENT="${TMAX_CONCURRENT:-8}"
-export HOLDOUT_CONCURRENT="${HOLDOUT_CONCURRENT:-2}"
+export HOLDOUT_CONCURRENT="${HOLDOUT_CONCURRENT:-8}"
 export CUMULATIVE_CORPUS="${CUMULATIVE_CORPUS:-1}"
 export TMAX_MAX_TOKENS="${TMAX_MAX_TOKENS:-4096}"
-# Online DPPO/GRPO after SFT (trains on up to RL_N_TASKS taxonomy tasks;
-# holdout-102 is eval-only). Default 0 until smoke passes:
-#   ENABLE_RL=1 RL_N_TASKS=100 RL_EPISODES=512 sbatch --export=ALL ...
+# Online DPPO/GRPO after SFT. Leave 0 here; the wired ENABLE_RL=1 launcher is
+# scripts/slurm/tmax/h200_tmax_coevolve_rl.sbatch (do not overlap job 2235).
 export ENABLE_RL="${ENABLE_RL:-0}"
 export RL_EPISODES="${RL_EPISODES:-512}"
 export RL_N_TASKS="${RL_N_TASKS:-100}"
 export INSTALL_RL_DEPS="${INSTALL_RL_DEPS:-1}"
+# Screened-population evolve. Empty = --fanout 1 (legacy 1+1). Dedicated
+# launcher: scripts/slurm/tmax/h200_tmax_coevolve_fanout.sbatch
+export EVOLVE_EXTRA_ARGS="${EVOLVE_EXTRA_ARGS:-}"
 
 mkdir -p /fsx/home/jixuan.chen/logs "$REPO/outputs/tmax_coevolve"
 
@@ -81,6 +83,7 @@ echo "  SEED_HARNESS       : ${SEED_HARNESS:-configs/baseline_tmax_harness.yaml}
 echo "  META_MODEL         : $META_MODEL"
 echo "  ENABLE_RL          : $ENABLE_RL  (RL train n=$RL_N_TASKS; holdout=eval only)"
 echo "  RL_EPISODES        : $RL_EPISODES"
+echo "  EVOLVE_EXTRA_ARGS  : ${EVOLVE_EXTRA_ARGS:-<none: --fanout 1>}"
 
 # Soft Bedrock preflight
 "$PYTHON_BIN" - <<'PY' || echo "WARN: bedrock preflight failed"

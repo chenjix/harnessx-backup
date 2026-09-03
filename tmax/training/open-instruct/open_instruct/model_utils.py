@@ -66,7 +66,12 @@ def detect_hf_attn_implementation() -> str:
 
 
 def _is_flash_attn_4_available() -> bool:
-    return importlib.util.find_spec("flash_attn.cute") is not None
+    # find_spec("flash_attn.cute") raises ModuleNotFoundError when the parent
+    # package `flash_attn` is absent (Python does not treat that as None).
+    try:
+        return importlib.util.find_spec("flash_attn.cute") is not None
+    except ModuleNotFoundError:
+        return False
 
 
 @functools.lru_cache(maxsize=1)

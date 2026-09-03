@@ -37,7 +37,13 @@ from pathlib import Path
 
 import torch
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    AutoTokenizer,
+)
 
 base = os.environ["BASE_MODEL"]
 adapter = os.environ["ADAPTER_DIR"]
@@ -49,9 +55,17 @@ tok = AutoTokenizer.from_pretrained(adapter, trust_remote_code=True)
 if tok.chat_template is None:
     tok = AutoTokenizer.from_pretrained(base, trust_remote_code=True)
 
+base_config = AutoConfig.from_pretrained(base, trust_remote_code=True)
+# Qwen3.5 and friends ship as a VLM shell: a vision tower plus a text tower under
+# `model.language_model`. SFT only touches the text tower, but vLLM builds the
+# whole shell from config.json, so the merged checkpoint has to stay a shell —
+# saving the bare text tower yields a config without `vision_config` and vLLM
+# dies in Qwen3_5ForConditionalGeneration.__init__.
+is_vlm_shell = getattr(base_config, "vision_config", None) is not None
+
 model = AutoModelForCausalLM.from_pretrained(
     base,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,
     trust_remote_code=True,
     device_map="cpu",
 )
@@ -59,8 +73,32 @@ print(f"loading adapter {adapter}")
 model = PeftModel.from_pretrained(model, adapter)
 print("merge_and_unload…")
 model = model.merge_and_unload()
+
 Path(out).mkdir(parents=True, exist_ok=True)
-model.save_pretrained(out, safe_serialization=True)
+if is_vlm_shell:
+    print("base is a VLM shell; re-attaching merged text tower to the vision tower")
+    text_state = {
+        (f"model.language_model.{k[len('model.'):]}" if k.startswith("model.") else k): v
+        for k, v in model.state_dict().items()
+    }
+    del model
+    shell = AutoModelForImageTextToText.from_pretrained(
+        base, dtype=torch.bfloat16, trust_remote_code=True, device_map="cpu"
+    )
+    unexpected = sorted(set(text_state) - set(shell.state_dict()))
+    if unexpected:
+        raise SystemExit(f"merged text weights do not fit the VLM shell: {unexpected[:8]}")
+    shell.load_state_dict(text_state, strict=False, assign=True)
+    del text_state
+    shell.save_pretrained(out, safe_serialization=True)
+    # vLLM needs the image/video processor to build the multimodal shell.
+    try:
+        AutoProcessor.from_pretrained(base, trust_remote_code=True).save_pretrained(out)
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: could not save processor from {base}: {exc}")
+else:
+    model.save_pretrained(out, safe_serialization=True)
+# Saved last so the SFT chat template wins over the processor's copy.
 tok.save_pretrained(out)
 print(f"wrote merged model → {out}")
 PY

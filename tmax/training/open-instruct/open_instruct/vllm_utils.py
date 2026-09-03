@@ -114,6 +114,49 @@ RESET_FAILURE_ZERO_REWARD_MARKERS = (
 MambaSpec.__dataclass_fields__["dtypes"].type = tuple[torch.dtype, ...]
 MambaSpec.__annotations__["dtypes"] = tuple[torch.dtype, ...]
 
+# vLLM 0.24+ added MambaAttentionBackendEnum.CUSTOM = None (and the same on
+# AttentionBackendEnum) so third-party backends do not alias an empty string.
+# msgspec refuses mixed str/None enums, so the first EngineCore utility RPC
+# that returns MambaSpec (get_kv_cache_spec after Qwen3.5 GDN init) dies with:
+#   msgspec.ValidationError: Enums must contain either all str or all int
+#   values - type `<enum 'MambaAttentionBackendEnum'>` is not supported
+# Official TMax RL (scripts/tmax/RL/qwen35_9b.sh) pins vLLM 0.19.1, which does
+# not have this member. Serving here is 0.24.0, so patch CUSTOM to a unique
+# string before AsyncLLM builds the EngineCoreOutputs decoder.
+_CUSTOM_ATTENTION_BACKEND_SENTINEL = "vllm.custom_attention_backend"
+
+
+def _patch_mixed_attention_backend_enums_for_msgspec() -> list[str]:
+    """Make vLLM 0.24+ attention backend enums msgspec-safe. Idempotent."""
+    patched: list[str] = []
+    try:
+        from vllm.v1.attention.backends import registry as attn_registry
+    except ImportError:
+        return patched
+
+    for attr_name, sentinel in (
+        ("AttentionBackendEnum", _CUSTOM_ATTENTION_BACKEND_SENTINEL),
+        ("MambaAttentionBackendEnum", "vllm.custom_mamba_backend"),
+    ):
+        enum_cls = getattr(attn_registry, attr_name, None)
+        if enum_cls is None:
+            continue
+        custom = getattr(enum_cls, "CUSTOM", None)
+        if custom is None or getattr(custom, "value", "x") is not None:
+            continue
+        custom._value_ = sentinel
+        value_map = getattr(enum_cls, "_value2member_map_", None)
+        if isinstance(value_map, dict):
+            value_map.pop(None, None)
+            value_map[sentinel] = custom
+        patched.append(enum_cls.__name__)
+    return patched
+
+
+_patched_attn_enums = _patch_mixed_attention_backend_enums_for_msgspec()
+if _patched_attn_enums:
+    logger.info("Patched vLLM mixed-type attention enums for msgspec: %s", ", ".join(_patched_attn_enums))
+
 
 def _patch_vllm_model_class_lm_head_fp32(model_cls: type) -> bool:
     """Keep a vLLM model's final projection in fp32."""
@@ -926,6 +969,20 @@ class LLMRayActor:
         request = WeightTransferUpdateRequest(update_info=update_info)
         return self._run_async(self.llm_engine.update_weights(request))
 
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        """Open a vLLM >=0.24 weight-update session (required before update_weights)."""
+        fn = getattr(self.llm_engine, "start_weight_update", None)
+        if fn is None:
+            return None
+        return self._run_async(fn(is_checkpoint_format=is_checkpoint_format))
+
+    def finish_weight_update(self) -> None:
+        """Close the vLLM weight-update session (layerwise reload finalize)."""
+        fn = getattr(self.llm_engine, "finish_weight_update", None)
+        if fn is None:
+            return None
+        return self._run_async(fn())
+
     def reset_prefix_cache(self) -> None:
         return self._run_async(self.llm_engine.reset_prefix_cache())
 
@@ -1626,6 +1683,69 @@ def _collect_weight_metadata(
     return names, dtype_names, shapes
 
 
+class _VllmWeightUpdateSession:
+    """vLLM 0.24+ requires start_weight_update → update_weights → finish_weight_update.
+
+    Job 3259 logged `start_weight_update must be called before update_weights` at
+    08:36, then blocked on the NCCL send for WEIGHT_SYNC_TIMEOUT_S (2h). GPUs sat
+    idle; cluster MONITOR idle-cancelled the job at 12:00.
+    """
+
+    def __init__(
+        self,
+        vllm_engines: list,
+        is_rank_0: bool,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        self.vllm_engines = vllm_engines
+        self.is_rank_0 = is_rank_0
+        self.is_checkpoint_format = is_checkpoint_format
+        self._started = False
+
+    def __enter__(self) -> "_VllmWeightUpdateSession":
+        if self.is_rank_0 and self.vllm_engines:
+            ray.get(
+                [engine.start_weight_update.remote(self.is_checkpoint_format) for engine in self.vllm_engines]
+            )
+            self._started = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if not self._started:
+            return False
+        try:
+            ray.get([engine.finish_weight_update.remote() for engine in self.vllm_engines])
+        except Exception:
+            if exc_type is None:
+                raise
+            logger.warning(
+                "finish_weight_update failed after a weight-sync error; "
+                "the original exception will be re-raised",
+                exc_info=True,
+            )
+        return False
+
+
+def _raise_if_weight_update_already_failed(refs: list) -> None:
+    """Fail fast if vLLM rejected update_weights before the NCCL/IPC send starts.
+
+    Without this, the trainer broadcasts into a dead consumer and hangs until the
+    2h weight-sync timeout (or the cluster idle-cancels the job).
+    """
+    if not refs:
+        return
+    ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
+    for ref in ready:
+        ray.get(ref)
+
+
+def _wait_weight_update_refs(refs: list) -> list:
+    """Block until engine.update_weights RPCs finish so finish_weight_update is legal."""
+    if refs:
+        ray.get(refs)
+    return []
+
+
 def _broadcast_weights_ipc(
     model: torch.nn.Module,
     vllm_engines: list[ray.actor.ActorHandle],
@@ -1684,57 +1804,65 @@ def broadcast_weights_to_vllm(
     if is_rank_0:
         ray.get([engine.sleep.remote() for engine in vllm_engines])
 
-    if model_update_group is None:
-        return _broadcast_weights_ipc(model, vllm_engines, name_mapper, gather_whole_model)
+    # vLLM 0.24+ rejects update_weights unless a session is open. IPC's
+    # trainer_send_weights also documents start → send → finish.
+    with _VllmWeightUpdateSession(vllm_engines, is_rank_0):
+        if model_update_group is None:
+            return _broadcast_weights_ipc(model, vllm_engines, name_mapper, gather_whole_model)
 
-    fsdp_submodules = _get_fsdp2_submodules(model) if isinstance(model, FSDPModule) else None
-    names, dtype_names, shapes = _collect_weight_metadata(model, name_mapper, fsdp_submodules=fsdp_submodules)
-    # Packed mode expects one transfer matching the full metadata list. When
-    # gathering per-parameter, send unpacked tensors so vLLM consumes the same
-    # granularity the trainer emits.
-    use_packed = gather_whole_model
+        fsdp_submodules = _get_fsdp2_submodules(model) if isinstance(model, FSDPModule) else None
+        names, dtype_names, shapes = _collect_weight_metadata(model, name_mapper, fsdp_submodules=fsdp_submodules)
+        # Packed mode expects one transfer matching the full metadata list. When
+        # gathering per-parameter, send unpacked tensors so vLLM consumes the same
+        # granularity the trainer emits.
+        use_packed = gather_whole_model
 
-    if is_rank_0:
-        refs = [engine.update_weights.remote(names, dtype_names, shapes, packed=use_packed) for engine in vllm_engines]
-    else:
-        refs = []
+        if is_rank_0:
+            refs = [
+                engine.update_weights.remote(names, dtype_names, shapes, packed=use_packed) for engine in vllm_engines
+            ]
+            _raise_if_weight_update_already_failed(refs)
+        else:
+            refs = []
 
-    trainer_args = NCCLTrainerSendWeightsArgs(group=model_update_group, packed=use_packed)
+        trainer_args = NCCLTrainerSendWeightsArgs(group=model_update_group, packed=use_packed)
 
-    if isinstance(model, FSDPModule):
-        if not fsdp_submodules:
-            raise ValueError("FSDP2 model has no FSDP submodules.")
-        for block_name, block in fsdp_submodules:
-            block.unshard()
-            try:
+        if isinstance(model, FSDPModule):
+            if not fsdp_submodules:
+                raise ValueError("FSDP2 model has no FSDP submodules.")
+            for block_name, block in fsdp_submodules:
+                block.unshard()
+                try:
+                    if is_rank_0:
+                        block_params = [
+                            (name_mapper(f"{block_name}.{n}") if name_mapper else f"{block_name}.{n}", p.data)
+                            for n, p in block.named_parameters()
+                        ]
+                        NCCLWeightTransferEngine.trainer_send_weights(
+                            iterator=iter(block_params), trainer_args=trainer_args
+                        )
+                finally:
+                    block.reshard()
+            return _wait_weight_update_refs(refs)
+
+        params = list(model.named_parameters())
+        deepspeed_stage_3 = any(hasattr(p, "ds_id") for p in model.parameters())
+
+        if isinstance(model, FSDP):
+            batches = [(FSDP.summon_full_params(model, writeback=False, rank0_only=False), params)]
+        elif gather_whole_model:
+            batches = [(deepspeed.zero.GatheredParameters(model.parameters(), enabled=deepspeed_stage_3), params)]
+        else:
+            batches = [
+                (deepspeed.zero.GatheredParameters([param], enabled=deepspeed_stage_3), [(name, param)])
+                for name, param in params
+            ]
+
+        for ctx, batch_params in batches:
+            with ctx:
                 if is_rank_0:
-                    block_params = [
-                        (name_mapper(f"{block_name}.{n}") if name_mapper else f"{block_name}.{n}", p.data)
-                        for n, p in block.named_parameters()
-                    ]
+                    mapped_params = _prepare_params_for_sync(batch_params, name_mapper)
                     NCCLWeightTransferEngine.trainer_send_weights(
-                        iterator=iter(block_params), trainer_args=trainer_args
+                        iterator=iter(mapped_params), trainer_args=trainer_args
                     )
-            finally:
-                block.reshard()
-        return refs
-
-    params = list(model.named_parameters())
-    deepspeed_stage_3 = any(hasattr(p, "ds_id") for p in model.parameters())
-
-    if isinstance(model, FSDP):
-        batches = [(FSDP.summon_full_params(model, writeback=False, rank0_only=False), params)]
-    elif gather_whole_model:
-        batches = [(deepspeed.zero.GatheredParameters(model.parameters(), enabled=deepspeed_stage_3), params)]
-    else:
-        batches = [
-            (deepspeed.zero.GatheredParameters([param], enabled=deepspeed_stage_3), [(name, param)])
-            for name, param in params
-        ]
-
-    for ctx, batch_params in batches:
-        with ctx:
-            if is_rank_0:
-                mapped_params = _prepare_params_for_sync(batch_params, name_mapper)
-                NCCLWeightTransferEngine.trainer_send_weights(iterator=iter(mapped_params), trainer_args=trainer_args)
-    return refs
+        return _wait_weight_update_refs(refs)

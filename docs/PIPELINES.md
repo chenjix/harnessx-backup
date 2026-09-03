@@ -43,14 +43,22 @@ Baseline harness: `configs/baseline_harness.yaml`.
 ```bash
 sbatch scripts/slurm/tmax/h200_tmax_coevolve.sbatch     # 8x H200
 sbatch scripts/slurm/tmax/a100_tmax_coevolve.sbatch     # 8x A100-40GB (p4d)
-# with GRPO (H200 only — 40GB cards cannot hold trainer + vLLM):
+# with GRPO after SFT (H200 only — 40GB cards cannot hold trainer + vLLM):
 sbatch --export=ALL,ENABLE_RL=1,RL_N_TASKS=100,REPLICATE=2 \
   scripts/slurm/tmax/h200_tmax_coevolve.sbatch
+# harness evolve + RL, no SFT:
+sbatch scripts/slurm/tmax/h200_tmax_coevolve_evolve_rl.sbatch
 ```
 
-Stages: rotate evolve set → evolve(50) → holdout(102) harness ratchet → corpus
-→ SFT → optional GRPO(≤100) → holdout(102) model ratchet.
-See `recipe/tb2_sft/RL_AFTER_SFT.md`.
+Stages: rotate evolve set → evolve(50, inner gate 0.04) → holdout(102)
+harness ratchet (ties on pass count) → **SFT-gen top-up to 100 unique
+non-holdout tasks** under the eval harness → winner-only corpus → SFT →
+optional GRPO(≤100) → holdout(102) model ratchet.
+
+`ENABLE_SFT=0 ENABLE_RL=1` skips B2/C/D and RLs the base (or last accepted
+full ckpt) on the evolve-set tasks. Launcher:
+`scripts/slurm/tmax/h200_tmax_coevolve_evolve_rl.sbatch`.
+See `docs/COEVOLVE_PIPELINE.md` and `recipe/tb2_sft/RL_AFTER_SFT.md`.
 
 Baseline harness: `configs/baseline_tmax_harness.yaml`.
 
@@ -64,15 +72,14 @@ measured with the incumbent model (stage B) and only becomes the new incumbent
 if it wins; otherwise it is discarded and the next iteration re-seeds from the
 harness that did win. `HARNESS_RATCHET=0` restores unconditional carry-forward.
 
-### Relaxed ratchet: ties count, crashes do not
+### Relaxed ratchet: ties on pass count
 
 `ACCEPT_TIES=1` (default) accepts a candidate that *equals* the incumbent's
-holdout score, provided its own eval run was clean — at most
-`TIE_MAX_SYSTEM_ERRORS` (default 0) tasks with a status in
-`SYSTEM_ERROR_STATUSES` (default `error,agent_error`) and no missing results.
-A flat score produced by a run where containers or endpoints died is not
-evidence of parity, so it is still rejected. `ACCEPT_TIES=0` goes back to
-requiring a strict improvement.
+holdout pass count. `agent_error` / `error` statuses already contribute 0 to
+`n_passed`, so a second sys_err gate on ties double-counts the same tasks and
+blocks legitimate parity (this is what stalled the 4B chain at 64).
+`ACCEPT_TIES=0` goes back to requiring a strict improvement. The unused env
+`TIE_MAX_SYSTEM_ERRORS` is kept only so old sbatches do not error.
 
 ### Rotating evolve set
 
@@ -100,3 +107,32 @@ evolve on a different 50 tasks than the trajectories already on disk came from.
 Because the SFT corpus is cumulative, `CORPUS_PREFER_CURRENT=1` (default) fills
 the traj budget from this iteration's rollouts first so older high-quality demos
 cannot crowd out the fresh material the rotation exists to collect.
+
+### SFT-gen plane (100 unique non-holdout tasks)
+
+Harness evolve and SFT harvest are **not** the same set. After stage B, stage B2
+reuses this iteration's evolve-set evals and tops up with new taxonomy tasks
+until `SFT_GEN_TASKS` (default 100) unique non-holdout ids have been attempted
+under the **eval** harness (`harness_used` — incumbent if B rejected the
+candidate). `PER_TASK=1`. Concurrent `SFT_GEN_CONCURRENT=8`. If `(H*, M)` is
+unchanged since the last extra rollout, B2 is skipped. Corpus `winner_only`
+keeps only dirs whose sidecar YAML+prompt fingerprint matches the eval harness;
+losing `fe-c*` tournament siblings never enter SFT.
+
+Knobs: `SFT_GEN_ROLLOUT=1`, `SFT_GEN_TASKS=100`, `SFT_GEN_CONCURRENT=8`.
+`SFT_GEN_ROLLOUT=0` restores evolve-set-only harvest.
+
+### Inner gate, holdout concurrency, quality, prompt chaining
+
+- Tournament sbatches pass `--regression-tolerance 0.04` (not `-1`). A candidate
+  that drops more than 4% of the evolve-set vs the parent is reverted.
+- Single-harness holdout default is `HOLDOUT_CONCURRENT=8`. Tournament *evolve*
+  still uses `TMAX_CONCURRENT=4` because five harnesses share the node.
+- SFT quality prefers compact, fast successes (sweet spot ~8–20 tool turns);
+  long loops and slow wall-clock are penalized.
+- Seeding iteration k+1 from iteration k's winner copies sibling
+  `system_prompt.txt` with the YAML (`_materialize_config_bundle` /
+  `_copy_config_as_round`). Standalone `run_eval` writes `harness_config.yaml`
+  + `system_prompt.txt` sidecars into the traj dir so `winner_only` can match.
+
+Full stage-by-stage walkthrough: `docs/COEVOLVE_PIPELINE.md`.

@@ -35,9 +35,57 @@ PREFER_TASKS_JSON="${PREFER_TASKS_JSON:-$ROOT/recipe/tb2_evolver/tasks_tmax_evol
 TAXONOMY_PARQUET="${TAXONOMY_PARQUET:-$ROOT/data/external/tmax-taxonomy/data/train-00000-of-00001.parquet}"
 DATA_ROOT="${RL_DATA_ROOT:-$ROOT/recipe/tb2_sft/data/$RL_DATASET_NAME}"
 RL_ENVS_JSONL="${RL_ENVS_JSONL:-}"
+# Optional: rank/drop the RL pool from tournament-evolve pass/fail patterns.
+# RL_EVOLVE_REPLICATE=22 scans .benchmarks/tmax/tmax-coev-rep22-i*-r*-traj.
+RL_EVOLVE_REPLICATE="${RL_EVOLVE_REPLICATE:-}"
+RL_EVOLVE_MASTERED="${RL_EVOLVE_MASTERED:-}"
+RL_EVOLVE_SELECT_DIR="${RL_EVOLVE_SELECT_DIR:-$DATA_ROOT/evolve_select}"
+RL_EXCLUDE_EXTRA_JSON="${RL_EXCLUDE_EXTRA_JSON:-}"
 
-if [[ ! -f "$DATA_ROOT/summary.json" || ! -f "$DATA_ROOT/train.jsonl" ]]; then
-  echo "Building RL dataset → $DATA_ROOT (n_tasks=$RL_N_TASKS, exclude holdout)"
+if [[ -n "$RL_EVOLVE_REPLICATE" ]]; then
+  echo "Selecting RL tasks from evolve outcomes (rep=$RL_EVOLVE_REPLICATE n=$RL_N_TASKS)"
+  sel_args=(
+    --replicate "$RL_EVOLVE_REPLICATE"
+    --n-tasks "$RL_N_TASKS"
+    --out-dir "$RL_EVOLVE_SELECT_DIR"
+    --holdout "$HOLDOUT_TASKS_JSON"
+  )
+  [[ -n "$RL_EVOLVE_MASTERED" ]] && sel_args+=(--mastered "$RL_EVOLVE_MASTERED")
+  "$(python_bin)" -m recipe.tb2_sft.src.select_rl_tasks_from_evolve "${sel_args[@]}"
+  PREFER_TASKS_JSON="$RL_EVOLVE_SELECT_DIR/prefer_tasks.json"
+  RL_EXCLUDE_EXTRA_JSON="$RL_EVOLVE_SELECT_DIR/exclude_extra.json"
+  n_sel="$("$(python_bin)" -c "import json;print(len(json.load(open('$PREFER_TASKS_JSON'))))")"
+  if (( n_sel < 1 )); then
+    echo "ERROR: evolve selector produced 0 tasks" >&2
+    exit 2
+  fi
+  if (( n_sel < RL_N_TASKS )); then
+    echo "NOTE: evolve select has $n_sel split tasks < RL_N_TASKS=$RL_N_TASKS — using $n_sel (no random taxonomy fill)"
+    RL_N_TASKS="$n_sel"
+  fi
+  RL_REBUILD_DATASET=1
+fi
+# vanillux_instance_v1 = user message embeds COMPLETE_TASK submit boilerplate.
+# Older jsonl rows were raw taxonomy text; system_prompt_override then stripped
+# the only remaining submit hint, so every episode scored 0.
+RL_PROMPT_SCHEMA="${RL_PROMPT_SCHEMA:-vanillux_instance_v1}"
+
+need_build=0
+if [[ "${RL_REBUILD_DATASET:-0}" == "1" ]]; then
+  echo "RL_REBUILD_DATASET=1 — rebuilding $DATA_ROOT"
+  need_build=1
+elif [[ ! -f "$DATA_ROOT/summary.json" || ! -f "$DATA_ROOT/train.jsonl" ]]; then
+  need_build=1
+else
+  schema="$("$(python_bin)" -c "import json;print(json.load(open('$DATA_ROOT/summary.json')).get('prompt_schema',''))" 2>/dev/null || true)"
+  if [[ "$schema" != "$RL_PROMPT_SCHEMA" ]]; then
+    echo "NOTE: RL dataset prompt_schema='${schema:-<missing>}' != $RL_PROMPT_SCHEMA — rebuilding"
+    need_build=1
+  fi
+fi
+
+if (( need_build )); then
+  echo "Building RL dataset → $DATA_ROOT (n_tasks=$RL_N_TASKS, exclude holdout, schema=$RL_PROMPT_SCHEMA)"
   build_args=(
     --name "$RL_DATASET_NAME"
     --out-root "$ROOT/recipe/tb2_sft/data"
@@ -48,6 +96,9 @@ if [[ ! -f "$DATA_ROOT/summary.json" || ! -f "$DATA_ROOT/train.jsonl" ]]; then
     --env-name "${RL_ENV_NAME:-swerl_vanillux_sandbox}"
     --image-mode "${RL_IMAGE_MODE:-local}"
   )
+  if [[ -n "$RL_EXCLUDE_EXTRA_JSON" && -f "$RL_EXCLUDE_EXTRA_JSON" ]]; then
+    build_args+=(--exclude-extra "$RL_EXCLUDE_EXTRA_JSON")
+  fi
   [[ -n "${RL_IMAGE_REGISTRY:-}" ]] && build_args+=(--image-registry "$RL_IMAGE_REGISTRY")
   if [[ -n "$RL_ENVS_JSONL" ]]; then
     build_args+=(--envs-jsonl "$RL_ENVS_JSONL")
@@ -167,12 +218,15 @@ RL_OUTPUT_DIR="${RL_OUTPUT_DIR:?set RL_OUTPUT_DIR}"
 RL_INIT_MODEL="${RL_INIT_MODEL:-}"
 ADAPTER_DIR="${ADAPTER_DIR:-}"
 if [[ -z "$RL_INIT_MODEL" ]]; then
-  if [[ -n "$ADAPTER_DIR" && -d "$ADAPTER_DIR" ]]; then
+  if [[ -n "$ADAPTER_DIR" && -f "$ADAPTER_DIR/adapter_config.json" ]]; then
     RL_INIT_MODEL="${RL_MERGED_DIR:-$ROOT/outputs/rl/merged/$(basename "$ADAPTER_DIR")}"
     if [[ ! -f "$RL_INIT_MODEL/config.json" ]]; then
       BASE_MODEL="${BASE_MODEL:-$MODEL}" ADAPTER_DIR="$ADAPTER_DIR" OUTPUT_DIR="$RL_INIT_MODEL" \
         bash "$ROOT/scripts/tmax/merge_sft_adapter.sh"
     fi
+  elif [[ -n "$ADAPTER_DIR" && -f "$ADAPTER_DIR/config.json" ]]; then
+    # Full HF checkpoint (previous RL iter / merged weights), not a LoRA dir.
+    RL_INIT_MODEL="$ADAPTER_DIR"
   else
     RL_INIT_MODEL="${MODEL_OVERRIDE:-${BASE_MODEL:-$MODEL}}"
   fi
@@ -322,6 +376,13 @@ TRAIN_MIXER="$(cd "$(dirname "$TRAIN_MIXER")" && pwd)/$(basename "$TRAIN_MIXER")
 TASK_DATA_DIR="$(cd "$TASK_DATA_DIR" && pwd)"
 if [[ -d "$RL_INIT_MODEL" ]]; then
   RL_INIT_MODEL="$(cd "$RL_INIT_MODEL" && pwd)"
+  # Cheap (json + safetensors headers). Catches a bare Qwen3.5 text tower that
+  # vLLM cannot load, before we spend minutes on ray / sandbox startup.
+  _audit="$ROOT/scripts/tmax/check_rl_ckpt.py"
+  if [[ -f "$_audit" ]]; then
+    python3 "$_audit" "$RL_INIT_MODEL" \
+      || { echo "ERROR: RL init checkpoint failed the VLM/tokenizer audit: $RL_INIT_MODEL" >&2; exit 2; }
+  fi
 fi
 RL_OUTPUT_DIR="$(mkdir -p "$RL_OUTPUT_DIR" && cd "$RL_OUTPUT_DIR" && pwd)"
 
@@ -397,6 +458,24 @@ if [[ -n "$RL_SYSTEM_PROMPT_FILE" && -f "$RL_SYSTEM_PROMPT_FILE" ]]; then
   SYSTEM_PROMPT_ARGS=(--system_prompt_override_file "$RL_SYSTEM_PROMPT_FILE")
 fi
 
+# Official Qwen3.5 RL (tmax/training/open-instruct/scripts/tmax/RL/qwen35_9b.sh)
+# always passes --vllm_gdn_prefill_backend triton so vLLM skips FlashInfer GDN
+# prefill JIT (the 0.24 log even tells you to set this). The msgspec
+# MambaAttentionBackendEnum crash is patched in open_instruct/vllm_utils.py.
+GDN_ARGS=()
+RL_GDN_PREFILL_BACKEND="${RL_GDN_PREFILL_BACKEND:-triton}"
+if [[ -n "$RL_GDN_PREFILL_BACKEND" && "$RL_GDN_PREFILL_BACKEND" != "0" ]]; then
+  GDN_ARGS=(--vllm_gdn_prefill_backend "$RL_GDN_PREFILL_BACKEND")
+fi
+
+# Official also sets --lm_head_fp32 true for Qwen3.5 (bf16 logits round).
+# --use_liger_grpo_loss is decided after RL_PY is known (needs liger_kernel).
+LM_HEAD_ARGS=()
+if [[ "${RL_LM_HEAD_FP32:-1}" == "1" ]]; then
+  LM_HEAD_ARGS=(--lm_head_fp32 true)
+fi
+LIGER_ARGS=()
+
 echo "===== RL plan ====="
 echo "  mixer       : $TRAIN_MIXER ($n_tasks tasks; holdout excluded)"
 echo "  task_data   : $TASK_DATA_DIR"
@@ -410,6 +489,7 @@ echo "  max_steps   : $RL_MAX_STEPS  per_turn=$RL_PER_TURN_MAX_TOKENS  resp=$RL_
 echo "  filter0std  : $RL_FILTER_ZERO_STD  tool_parser=$RL_TOOL_PARSER"
 echo "  sandbox pool: $RL_POOL_SIZE concurrent container(s)"
 echo "  lr          : $RL_LR  loss=dppo  gather_whole_model=$RL_GATHER_WHOLE_MODEL zpg=$RL_DEEPSPEED_ZPG"
+echo "  vllm extras : gdn=${RL_GDN_PREFILL_BACKEND:-off} lm_head_fp32=${RL_LM_HEAD_FP32:-1}"
 
 # The coevolve loop calls this script without RL_PYTHON, and the old fallback
 # chain landed on SFT_PYTHON — the conda env that has trl but NO ray/deepspeed/
@@ -421,20 +501,67 @@ if [[ -z "${RL_PYTHON:-}" && -x "$_OI_VENV_PY" ]]; then
 fi
 RL_PY="${RL_PYTHON:-${SFT_PYTHON:-${PYTHON_BIN:-$(python_bin)}}}"
 
+# Official Qwen3.5 recipe also passes --use_liger_grpo_loss. serving ~/.venv
+# does not ship liger_kernel, so only enable it when the env actually has it.
+if [[ "${RL_USE_LIGER:-0}" == "1" ]]; then
+  if "$RL_PY" -c "import importlib.util as u; raise SystemExit(0 if u.find_spec('liger_kernel') else 1)" 2>/dev/null; then
+    LIGER_ARGS=(--use_liger_grpo_loss --liger_grpo_loss_chunk_size "${RL_LIGER_CHUNK:-8}")
+  else
+    echo "NOTE: RL_USE_LIGER=1 but liger_kernel is not installed in $RL_PY; skipping"
+  fi
+fi
+echo "  liger       : ${LIGER_ARGS[*]:-off}"
+
+# Flashinfer JIT-compiles the top-k/top-p sampler the first time vLLM
+# profile_run's it (v1/sample/ops/topk_topp_sampler.py → flashinfer.jit).
+# That subprocess is a raw `ninja` on PATH, not a Python import. Official
+# open-instruct uv.lock ships ninja; the serving ~/.venv fallback does not,
+# which killed iter1 RL with FileNotFoundError: 'ninja' after 12 min of
+# engine startup. Put this interpreter's bin first so Ray EngineCore
+# children (they inherit env_vars from the driver) can see it too.
+_rl_bin="$(cd "$(dirname "$RL_PY")" && pwd)"
+export PATH="${_rl_bin}${CUDA_HOME:+:$CUDA_HOME/bin}:$PATH"
+if [[ -z "${CUDA_HOME:-}" ]]; then
+  for _ch in /usr/local/cuda /usr/local/cuda-12.9 /usr/local/cuda-12.8 /usr/local/cuda-12.4; do
+    if [[ -x "$_ch/bin/nvcc" ]]; then
+      export CUDA_HOME="$_ch"
+      export PATH="$CUDA_HOME/bin:$PATH"
+      break
+    fi
+  done
+fi
+export FLASHINFER_WORKSPACE_BASE="${FLASHINFER_WORKSPACE_BASE:-$RL_TMPDIR/flashinfer}"
+mkdir -p "$FLASHINFER_WORKSPACE_BASE"
+
 # Optional auto-install of critical missing packages (smoke / first coevolve RL).
 if [[ "${INSTALL_RL_DEPS:-0}" == "1" ]]; then
   "$RL_PY" - <<'PY'
-import importlib.util as u, subprocess, sys
+import importlib.util as u, shutil, subprocess, sys
 need=[]
 for mod, pip in [("ray","ray[default]>=2.9"),("deepspeed","deepspeed>=0.14"),
-                 ("openenv","openenv-core>=0.2.1"),("docker","docker>=7.0")]:
+                 ("openenv","openenv-core>=0.2.1"),("docker","docker>=7.0"),
+                 ("ninja","ninja")]:
     if u.find_spec(mod) is None:
         need.append(pip)
+if shutil.which("ninja") is None and "ninja" not in need:
+    need.append("ninja")
 if need:
     print("Installing RL deps:", need)
     subprocess.check_call([sys.executable,"-m","pip","install","-q",*need])
 PY
+  hash -r 2>/dev/null || true
 fi
+
+if ! command -v ninja >/dev/null 2>&1; then
+  echo "ERROR: ninja is not on PATH (flashinfer sampler JIT needs the binary)." >&2
+  echo "       RL_PYTHON=$RL_PY" >&2
+  echo "       Install into that env:  $RL_PY -m pip install ninja" >&2
+  echo "       Or skip the JIT path:   export VLLM_USE_FLASHINFER_SAMPLER=0" >&2
+  exit 2
+fi
+echo "ninja        : $(command -v ninja) ($(ninja --version 2>/dev/null || echo '?'))"
+echo "CUDA_HOME    : ${CUDA_HOME:-unset}  nvcc=$(command -v nvcc 2>/dev/null || echo missing)"
+echo "FLASHINFER_WORKSPACE_BASE: $FLASHINFER_WORKSPACE_BASE"
 
 # A real import of vllm+torch costs ~3.5 minutes cold on Lustre, and inside a GPU
 # job every second of it is time the cards are reserved and doing nothing. The
@@ -509,6 +636,10 @@ CMD=(
   --seed 42 \
   --gradient_checkpointing \
   --vllm_enable_prefix_caching \
+  "${GDN_ARGS[@]}" \
+  "${LM_HEAD_ARGS[@]}" \
+  "${LIGER_ARGS[@]}" \
+  --inflight_updates true \
   --push_to_hub false \
   --tools swerl_vanillux_sandbox \
   --tool_configs "$TOOL_CONFIGS" \
@@ -647,6 +778,12 @@ rc_train=${PIPESTATUS[0]}
 set -e
 echo "trainer exit status: $rc_train"
 
+if [[ -f "$LOG_ROOT/train_rl_grpo.log" ]]; then
+  echo "===== RL metrics (from train log) ====="
+  grep -E 'training_step|objective|approx_kl|non_submitting|scores|loss |reward' \
+    "$LOG_ROOT/train_rl_grpo.log" | tail -60 || true
+fi
+
 # save_final_model writes into <output_dir>/<exp_name>__<seed>__<timestamp>/, and
 # save_freq writes <...>_checkpoints/step_N/. Look for the weights themselves
 # instead of assuming a layout.
@@ -654,6 +791,7 @@ final_ckpt="$(find "$RL_OUTPUT_DIR" -maxdepth 2 -name config.json -not -path "*_
 step_ckpts="$(find "$RL_OUTPUT_DIR" -maxdepth 3 -type d -name "step_*" 2>/dev/null | sort | tr '\n' ' ')"
 if [[ -n "$final_ckpt" ]]; then
   echo "RL final checkpoint: $(dirname "$final_ckpt")"
+  dirname "$final_ckpt" >"$RL_OUTPUT_DIR/checkpoint.path"
 else
   echo "WARNING: no final checkpoint under $RL_OUTPUT_DIR" >&2
 fi

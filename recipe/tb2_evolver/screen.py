@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "Candidate",
     "changeset_signature",
+    "focus_tasks_from_notes",
     "screen_structural",
     "screen_llm_review",
     "screen_mini_eval",
@@ -84,6 +85,18 @@ class Candidate:
     predicted: dict = field(default_factory=dict)
     probe_results: dict[str, bool] = field(default_factory=dict)
     probe_score: float | None = None
+    probe_gained: list[str] = field(default_factory=list)
+    probe_regressed: list[str] = field(default_factory=list)
+    net_score: float | None = None
+    merged_from: tuple[int, ...] | None = None
+    focus_tasks: list[str] = field(default_factory=list)
+    parent_results: dict[str, bool] = field(default_factory=dict)
+    parent_config: Path | None = None
+    trajectories_dir: Path | None = None
+    synthesize: bool = False
+    full_solved: list[str] = field(default_factory=list)
+    full_score: float | None = None
+    source_parent_id: str | None = None
 
     @property
     def alive(self) -> bool:
@@ -174,6 +187,7 @@ async def screen_llm_review(
     llm: LLMComplete,
     keep: int,
     parent_results: dict[str, bool] | None = None,
+    system: str | None = None,
 ) -> list[Candidate]:
     """Rank candidates by predicted impact, keep the top ``keep``.
 
@@ -199,7 +213,7 @@ async def screen_llm_review(
         summary["parent_failed"] = sorted(t for t, ok in parent_results.items() if not ok)
 
     try:
-        raw = await llm(_REVIEW_SYSTEM, json.dumps(summary, indent=2))
+        raw = await llm(system or _REVIEW_SYSTEM, json.dumps(summary, indent=2))
         ranked = _parse_review(raw)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[screen] llm review failed (%s) — keeping first %d", exc, keep)
@@ -261,30 +275,109 @@ def _parse_review(raw: str) -> list[dict]:
 # ─── screen 3: mini eval (one wave) ────────────────────────────────────────
 
 
+_TASK_FAIL_RE = re.compile(r"\*\*Task `([^`]+)` fails")
+_TASKS_BOTH_FAIL_RE = re.compile(
+    r"\*\*Tasks `([^`]+)` and `([^`]+)` both fail"
+)
+
+
+def focus_tasks_from_notes(notes: Sequence[str]) -> list[str]:
+    """Named failing tasks assigned to this fan-out (order preserved)."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(task: str) -> None:
+        if task and task not in seen:
+            seen.add(task)
+            out.append(task)
+
+    for note in notes:
+        for a, b in _TASKS_BOTH_FAIL_RE.findall(note or ""):
+            _add(a)
+            _add(b)
+        for task in _TASK_FAIL_RE.findall(note or ""):
+            _add(task)
+    return out
+
+
+def _stable_canary_key(task: str, stability: float) -> tuple:
+    """High stability first; hash tie-break so we never always pick lex-first IDs."""
+    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
+    return (-float(stability), digest)
+
+
 def select_probe_tasks(
     *,
     parent_results: dict[str, bool],
     task_universe: Sequence[str],
     n_solved: int = 2,
     n_unsolved: int = 1,
+    focus_tasks: Sequence[str] | None = None,
+    canary_mode: str = "lex",
+    archive_solved: Sequence[Sequence[str]] | None = None,
+    max_total: int | None = None,
 ) -> list[str]:
-    """Pick the probe set: mostly parent-solved tasks, plus one it failed.
+    """Pick the probe set: canaries (parent-solved) plus upside (parent-failed).
 
-    The solved ones are the regression detector — an edit that breaks what the
-    parent could already do is the failure mode a cheap screen most needs to
-    catch. The unsolved one is the upside detector: without it the screen can
-    only ever punish, and would rank a do-nothing edit top every time.
+    ``canary_mode="lex"`` (v1 default) takes lexicographic slices so a resumed
+    campaign probes the same tasks. ``canary_mode="stable"`` ranks parent-solved
+    tasks by how often scored archive nodes still pass them (true canaries),
+    with a hash tie-break so the screen is not stuck on ``task_000024`` forever.
 
-    Deterministic (sorted, not sampled) so a resumed campaign probes the same
-    tasks and its mini-eval scores stay comparable across rounds.
+    ``focus_tasks`` (v2) are always included when the parent failed them — otherwise
+    a proposer assigned to fix ``task_000028`` is scored on a different failure
+    and the screen cannot see the thing it asked for.
     """
-    solved = sorted(t for t in task_universe if parent_results.get(t))
-    unsolved = sorted(t for t in task_universe if not parent_results.get(t))
-    probes = solved[:n_solved] + unsolved[:n_unsolved]
-    # Degenerate corners: a parent that solved everything (or nothing) still
-    # needs a non-empty probe set, or the screen silently becomes a no-op.
+    universe = list(task_universe)
+    solved = [t for t in universe if parent_results.get(t)]
+    unsolved = [t for t in universe if not parent_results.get(t)]
+
+    def _stability(task: str) -> float:
+        if not archive_solved:
+            return 1.0
+        return sum(1 for s in archive_solved if task in s) / len(archive_solved)
+
+    if canary_mode == "stable":
+        canaries = sorted(solved, key=lambda t: _stable_canary_key(t, _stability(t)))[:n_solved]
+        extra_unsolved = sorted(
+            unsolved,
+            key=lambda t: hashlib.sha256(t.encode("utf-8")).hexdigest(),
+        )
+    else:
+        canaries = sorted(solved)[:n_solved]
+        extra_unsolved = sorted(unsolved)
+
+    focus = [t for t in (focus_tasks or []) if t in universe]
+    focus_unsolved = [t for t in focus if not parent_results.get(t)]
+
+    probes: list[str] = []
+    seen: set[str] = set()
+
+    def _push(task: str) -> None:
+        if task and task not in seen:
+            if max_total is not None and len(probes) >= max_total:
+                return
+            seen.add(task)
+            probes.append(task)
+
+    # v1 (no named focus): canaries then unsolved, matching the historical order
+    # tests pin. v2: assigned failures first so a proposer is scored on the task
+    # it was asked to fix, then extra unsolved, then stable canaries.
+    if focus_unsolved:
+        for t in focus_unsolved:
+            _push(t)
+        for t in extra_unsolved[:n_unsolved]:
+            _push(t)
+        for t in canaries:
+            _push(t)
+    else:
+        for t in canaries:
+            _push(t)
+        for t in extra_unsolved[:n_unsolved]:
+            _push(t)
     if not probes:
-        probes = list(task_universe)[: max(1, n_solved + n_unsolved)]
+        for t in universe[: max(1, n_solved + n_unsolved)]:
+            _push(t)
     return probes
 
 
@@ -328,14 +421,17 @@ async def screen_mini_eval(
     for c in alive:
         if not c.probe_results:
             continue
+        parent = c.parent_results or parent_results
         regressed = [
             t for t in probe_tasks
-            if parent_results.get(t) and not c.probe_results.get(t, False)
+            if parent.get(t) and not c.probe_results.get(t, False)
         ]
         gained = [
             t for t in probe_tasks
-            if not parent_results.get(t) and c.probe_results.get(t, False)
+            if not parent.get(t) and c.probe_results.get(t, False)
         ]
+        c.probe_gained = gained
+        c.probe_regressed = regressed
         c.probe_score = sum(1 for t in probe_tasks if c.probe_results.get(t)) / len(probe_tasks)
         if len(regressed) > max_regressions:
             c.drop(

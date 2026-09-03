@@ -64,6 +64,38 @@ def test_promoting_from_winner_dir_carries_sidecars():
             "processors/ was not promoted"
 
 
+def test_copy_config_as_round_carries_sibling_prompt():
+    from recipe.tb2_evolver.run import _copy_config_as_round
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        src_dir = tmp / "incumbent"
+        src_dir.mkdir()
+        shutil.copy(BASELINE, src_dir / "config.yaml")
+        (src_dir / "system_prompt.txt").write_text("CHAINED PROMPT\n")
+        run_root = tmp / "run"
+        promoted = _copy_config_as_round(
+            run_root=run_root, output_round=3, config=src_dir / "config.yaml"
+        )
+        assert (Path(promoted).parent / "system_prompt.txt").read_text() == "CHAINED PROMPT\n"
+        assert (run_root / "R3" / "evolve" / "system_prompt.txt").read_text() == "CHAINED PROMPT\n"
+
+
+def test_materialize_bundle_copies_sibling_prompt():
+    from recipe.tb2_evolver.run import _materialize_config_bundle
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        src_dir = tmp / "prev"
+        src_dir.mkdir()
+        shutil.copy(BASELINE, src_dir / "config.yaml")
+        (src_dir / "system_prompt.txt").write_text("SEEDED FROM PREVIOUS ITER\n")
+        dest = tmp / "R0" / "config.yaml"
+        copied = _materialize_config_bundle(src_dir / "config.yaml", dest, tmp / "R0" / "assets")
+        assert "system_prompt.txt" in copied
+        assert (dest.parent / "system_prompt.txt").read_text() == "SEEDED FROM PREVIOUS ITER\n"
+
+
 def test_promoting_from_round_root_loses_the_prompt_edit():
     # Documents the bug the fix prevents: same winner, wrong rx_output_dir.
     with tempfile.TemporaryDirectory() as td:

@@ -584,10 +584,23 @@ async def run_sharded(
     # corpus builder is handed 112 trajectories with nothing in them. Callers
     # must be able to tell "the model scored 0" from "nothing ran".
     if _ABORT_REASON is not None:
+        # Discard the claim pool. Tasks burned by the fault are recorded 'done'
+        # with passed=0, and init_pool only inserts missing rows — so a re-run
+        # after the fix would skip exactly the tasks that never ran and fold
+        # them in as model failures, which is the silent corruption this abort
+        # exists to prevent.
+        try:
+            db_path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(
+                f"[sharded_tb2_eval] WARN could not remove claim pool {db_path}: "
+                f"{exc}. Delete it before re-running or the tasks it marks done "
+                f"will be skipped.",
+                file=sys.stderr, flush=True,
+            )
         raise EvalAborted(
             f"{_ABORT_REASON}\n"
-            f"No results were merged for job '{job_name}'. Fix the cause and re-run; "
-            f"completed stages are skipped on resume."
+            f"No results were merged for job '{job_name}'. Fix the cause and re-run."
         )
 
     # ── Merge into one canonical job dir, same shape a plain single-endpoint

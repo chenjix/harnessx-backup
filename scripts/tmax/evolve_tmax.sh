@@ -90,6 +90,8 @@ r0_dir_args=()
 
 # Free-form pass-through to recipe.tb2_evolver.run, word-split on spaces, e.g.
 #   EVOLVE_EXTRA_ARGS="--fanout 8 --fanout-keep 2 --explore-every 3"
+#   EVOLVE_EXTRA_ARGS="--fanout 8 --fanout-keep 3 --fanout-mode v2 --explore-every 3 --probe-solved 4 --probe-unsolved 2"
+#   EVOLVE_EXTRA_ARGS="--fanout 5 --fanout-keep 5 --fanout-concurrent 5 --fanout-mode tournament --fanout-eval-concurrent 5 --regression-tolerance 0.04 --explore-every 0 --skip-final-score"
 # Exists so a new run.py flag can be A/B'd from sbatch without editing this
 # script for each one. Not quoted on purpose — the whole point is word splitting.
 extra_args=()
@@ -126,11 +128,34 @@ echo "Evolving harness on Tmax: base=$MODEL meta=$META_MODEL rounds=$NUM_ROUNDS 
 echo "  tasks : $TASKS_JSON"
 echo "  envs  : $TMAX_ENVS_JSONL"
 echo "  conc  : $CONCURRENT"
+echo "  extra : ${EVOLVE_EXTRA_ARGS:-<none: --fanout 1>}"
 echo "Results: $ROOT/recipe/tb2_evolver/runs/$RUN_TAG"
 
-if [[ -n "${GPU_POOL:-}" ]]; then
-  echo "GPU pool: $GPU_POOL"
-  bash "$ROOT/scripts/with_server_pool.sh" -- "${cmd[@]}" 2>&1 | tee "$LOG_ROOT/evolve_tmax.log"
-else
-  bash "$ROOT/scripts/with_server.sh" -- "${cmd[@]}" 2>&1 | tee "$LOG_ROOT/evolve_tmax.log"
+# Run the evolve command under vLLM, tee the log, then decide success from
+# PIPESTATUS + the evolve STATE — not from vLLM teardown. Job 2824 completed
+# all 5 rounds (state status=completed) then died here: python's asyncio
+# shutdown raised "Event loop is closed", pipefail treated that as the
+# evolve failing, and `set -e` aborted the coevolve loop at iter2/A_evolve.
+_run_evolve() {
+  if [[ -n "${GPU_POOL:-}" ]]; then
+    echo "GPU pool: $GPU_POOL"
+    bash "$ROOT/scripts/with_server_pool.sh" -- "${cmd[@]}"
+  else
+    bash "$ROOT/scripts/with_server.sh" -- "${cmd[@]}"
+  fi
+}
+
+set +e
+_run_evolve 2>&1 | tee "$LOG_ROOT/evolve_tmax.log"
+rc=${PIPESTATUS[0]}
+set -e
+
+if (( rc != 0 )); then
+  if grep -q '"status": "completed"' "$STATE_JSON" 2>/dev/null \
+    || grep -q "meta_harness evolve done" "$LOG_ROOT/evolve_tmax.log" 2>/dev/null; then
+    echo "WARN: evolve wrapper exited $rc after a completed evolve — treating as success" >&2
+    echo "      state=$STATE_JSON" >&2
+    rc=0
+  fi
 fi
+exit "$rc"

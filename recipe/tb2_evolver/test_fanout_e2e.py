@@ -35,7 +35,7 @@ class FakeMetaAgent:
         self.seen_focuses: list[str] = []
         self.calls = 0
 
-    async def evolve(self, *, current_config, trajectories_dir, output_dir, focus_note=None):
+    async def evolve(self, *, current_config, trajectories_dir, output_dir, focus_note=None, **_kw):
         idx = self.calls
         self.calls += 1
         self.seen_focuses.append(focus_note or "")

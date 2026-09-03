@@ -39,6 +39,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# harbor and terminal_bench are installed in the project venv, so a bare
+# `python` only resolves when that venv is activated. Interactive tmux runs
+# activate it; a Slurm job does not, and there the name does not exist at all --
+# `exec python` then fails with rc=127 and every task records a trial with no
+# input tokens, which is indistinguishable from a container that never started.
+# /usr/bin/python3 is no substitute: it lacks both packages.
+PY_BIN="${PYTHON_BIN:-}"
+if [[ -z "$PY_BIN" ]]; then
+  PY_BIN="$(command -v python || command -v python3 || true)"
+fi
+[[ -n "$PY_BIN" ]] || {
+  echo "ERROR: no python interpreter found. Set PYTHON_BIN to the venv that has harbor." >&2
+  exit 2
+}
+
 # ── Pre-process script-level flags ───────────────────────────────────────────
 # --harness-config and --tasks are handled here; all other args pass through.
 HARNESS_CONFIG="${TB2_HARNESS_CONFIG:-}"
@@ -78,7 +93,7 @@ if [[ -n "$TASKS_JSON" ]]; then
   while IFS= read -r _name; do
     [[ -n "$_name" ]] && TASK_ARGS+=(-t "$_name")
   done < <(
-    python - "$TASKS_JSON" <<'PYEOF'
+    "$PY_BIN" - "$TASKS_JSON" <<'PYEOF'
 import json, sys
 data = json.loads(open(sys.argv[1], encoding="utf-8").read())
 if not isinstance(data, list):
@@ -93,7 +108,7 @@ PYEOF
 fi
 
 # ── Launch tb2_eval.py ────────────────────────────────────────────────────────
-exec python "$SCRIPT_DIR/tb2_eval.py" \
+exec "$PY_BIN" "$SCRIPT_DIR/tb2_eval.py" \
   --env docker \
   -m "$TB2_MODEL" \
   -k "$TB2_API_KEY" \

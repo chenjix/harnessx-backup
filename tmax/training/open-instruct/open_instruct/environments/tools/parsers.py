@@ -256,9 +256,10 @@ VLLM_PARSERS: dict[str, VllmParserConfig] = {
         },
         output_postfix="<|im_start|>assistant\n",
     ),
-    # Qwen 3.5
+    # Qwen 3.5 XML tool calls. vLLM >=0.24 maps qwen3_xml -> Qwen3EngineToolParser
+    # (the old qwen3xml_tool_parser module was removed/renamed).
     "vllm_qwen3_xml": VllmParserConfig(
-        import_path="vllm.tool_parsers.qwen3xml_tool_parser:Qwen3XMLToolParser",
+        import_path="vllm.tool_parsers.qwen3_engine_tool_parser:Qwen3EngineToolParser",
         role_templates={
             "tool": "<|im_start|>user\n<tool_response>\n{output}\n</tool_response>\n<|im_end|>\n",
             "user": "<|im_start|>user\n{output}<|im_end|>\n",

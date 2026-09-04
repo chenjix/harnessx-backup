@@ -322,6 +322,7 @@ class Archive:
         explore_every: int = 3,
         tie_eps: float = 0.0,
         max_parents: int = 4,
+        min_unique_solves: int = 1,
     ) -> list[Node]:
         """All live branch points for the next fan-out.
 
@@ -351,7 +352,7 @@ class Archive:
             for n in scored:
                 if n.round != latest:
                     continue
-                if set(n.solved) - inc_set:
+                if len(set(n.solved) - inc_set) >= max(1, int(min_unique_solves)):
                     extra.append(n)
             extra.sort(key=lambda n: (-len(set(n.solved) - inc_set), n.id))
 

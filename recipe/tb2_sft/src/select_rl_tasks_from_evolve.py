@@ -85,13 +85,13 @@ def band_task(attempts: int, successes: int, min_runs: int) -> str:
 
 
 def rank_key(rec: dict[str, Any]) -> tuple:
-    """Lower is better: split first, then more runs, closer to 50% pass."""
+    """Lower is better: split first, closest to 50% pass, then more evidence."""
     band = rec["band"]
     band_rank = {BAND_SPLIT: 0, BAND_SPARSE: 1, BAND_ALL_FAIL: 2, BAND_ALL_PASS: 3}[band]
     return (
         band_rank,
-        -int(rec["attempts"]),
         abs(float(rec["pass_rate"]) - 0.5),
+        -int(rec["attempts"]),
         rec["task_id"],
     )
 

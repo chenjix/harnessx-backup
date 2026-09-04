@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 import threading
@@ -237,6 +238,10 @@ class HFDataLoader(data_loader.DataLoaderBase):
         drop_last: bool = True,
         fs_local_rank: int | None = None,
         max_seq_length: int = 1,
+        frontier_prior: dict[str, dict[str, float]] | None = None,
+        frontier_num_rollouts: int = 8,
+        frontier_exploration_fraction: float = 0.2,
+        frontier_domain_balanced: bool = False,
     ) -> None:
         """Initialize the HFDataLoader.
 
@@ -300,6 +305,13 @@ class HFDataLoader(data_loader.DataLoaderBase):
         self._epoch: int = 0
         self._current_iter: Iterator[dict[str, Any]] | None = None
         self._device = device
+        self._frontier_prior = frontier_prior or {}
+        self._frontier_num_rollouts = frontier_num_rollouts
+        self._frontier_exploration_fraction = frontier_exploration_fraction
+        self._frontier_domain_balanced = frontier_domain_balanced
+        # index -> (successes, valid submissions, attempts).  Older checkpoints
+        # stored only (successes, attempts) and are upgraded in load_state_dict.
+        self._frontier_online: dict[int, tuple[int, int, int]] = {}
 
         self._reshard(epoch=0)
 
@@ -374,11 +386,20 @@ class HFDataLoader(data_loader.DataLoaderBase):
             "epoch": self._epoch,
             "batches_processed": self.batches_processed,
             "excluded_indices": list(self._excluded_indices),
+            "frontier_online": {str(k): list(v) for k, v in self._frontier_online.items()},
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Load a state dictionary to restore the data loader's state."""
         self._excluded_indices = set(state_dict.get("excluded_indices", []))
+        self._frontier_online = {}
+        for k, v in state_dict.get("frontier_online", {}).items():
+            if len(v) == 2:
+                successes, attempts = map(int, v)
+                submissions = attempts
+            else:
+                successes, submissions, attempts = map(int, v)
+            self._frontier_online[int(k)] = (successes, submissions, attempts)
         # Set epoch to one less than target since reshuffle() increments it
         self._epoch = state_dict["epoch"] - 1
         self.reshuffle()
@@ -393,6 +414,57 @@ class HFDataLoader(data_loader.DataLoaderBase):
             index: The index to exclude.
         """
         self._excluded_indices.add(index)
+
+    def record_frontier_outcome(
+        self, index: int, scores: list[float], submitted: list[bool] | None = None
+    ) -> None:
+        """Update current-policy evidence used on the next reshuffle."""
+        successes, submissions, attempts = self._frontier_online.get(index, (0, 0, 0))
+        successes += sum(float(score) > 0.0 for score in scores)
+        submissions += sum(submitted if submitted is not None else [True] * len(scores))
+        attempts += len(scores)
+        self._frontier_online[index] = (successes, submissions, attempts)
+
+    def _frontier_weight(self, index: int) -> float:
+        row = self._full_dataset[int(index)]
+        task_id = str(row.get("ground_truth") or row.get("task_id") or index)
+        prior = self._frontier_prior.get(task_id, {})
+        attempts = float(prior.get("attempts", 0.0))
+        successes = float(prior.get("successes", 0.0))
+        online_successes, online_submissions, online_attempts = self._frontier_online.get(int(index), (0, 0, 0))
+        p = (1.0 + successes + online_successes) / (2.0 + attempts + online_attempts)
+        prior_submissions = float(prior.get("submissions", prior.get("valid_submissions", attempts)))
+        submit_p = (1.0 + prior_submissions + online_submissions) / (2.0 + attempts + online_attempts)
+        k = max(1, self._frontier_num_rollouts)
+        information = 1.0 - p**k - (1.0 - p) ** k
+        # All-fail groups can still be useful when the agent reliably submits;
+        # all-fail/non-submit groups cannot provide binary GRPO contrast.
+        submission_value = 0.25 + 0.75 * submit_p
+        explore = min(max(self._frontier_exploration_fraction, 0.0), 1.0)
+        return explore + (1.0 - explore) * max(information * submission_value, 1e-6)
+
+    def _domain_balanced_indices(self, weights: torch.Tensor, generator: torch.Generator) -> np.ndarray:
+        """Weighted ordering with round-robin domain coverage."""
+        by_domain: dict[str, list[int]] = {}
+        for i in range(len(self._full_dataset)):
+            domain = str(self._full_dataset[i].get("domain") or "unknown")
+            by_domain.setdefault(domain, []).append(i)
+        queues: dict[str, list[int]] = {}
+        for domain, indices in by_domain.items():
+            local = torch.tensor(indices, dtype=torch.long)
+            order = torch.multinomial(weights[local], len(indices), replacement=False, generator=generator)
+            queues[domain] = local[order].tolist()
+        domains = sorted(queues)
+        ordered: list[int] = []
+        while domains:
+            next_domains = []
+            for domain in domains:
+                if queues[domain]:
+                    ordered.append(queues[domain].pop(0))
+                if queues[domain]:
+                    next_domains.append(domain)
+            domains = next_domains
+        return np.asarray(ordered, dtype=np.int64)
 
     def reshuffle(self, epoch: int | None = None, **kwargs: Any) -> None:
         """Reshuffle and reshard the dataset for a new epoch.
@@ -413,7 +485,16 @@ class HFDataLoader(data_loader.DataLoaderBase):
         generator = torch.Generator()
         generator.manual_seed(self.seed + epoch)
         dataset_len = len(self._full_dataset)
-        all_indices = torch.randperm(dataset_len, generator=generator).numpy()
+        if self._frontier_prior or self._frontier_online:
+            weights = torch.tensor(
+                [self._frontier_weight(i) for i in range(dataset_len)], dtype=torch.float64
+            )
+            if self._frontier_domain_balanced:
+                all_indices = self._domain_balanced_indices(weights, generator)
+            else:
+                all_indices = torch.multinomial(weights, dataset_len, replacement=False, generator=generator).numpy()
+        else:
+            all_indices = torch.randperm(dataset_len, generator=generator).numpy()
         if self._excluded_indices:
             mask = np.isin(all_indices, list(self._excluded_indices), invert=True)
             all_indices = all_indices[mask]
@@ -567,6 +648,15 @@ class StreamingDataLoaderConfig:
     # GRPO sampling/filtering
     active_sampling: bool = False
     filter_zero_std_samples: bool = True
+    max_sampled_prompt_groups_per_step: int | None = None
+    """Hard active-sampling cost ceiling, including rejected groups."""
+    filter_infra_error_groups: bool = False
+    """Exclude groups containing an infrastructure error from the RL loss."""
+    frontier_prior_file: str | None = None
+    """Optional evolve outcome report containing per-task attempts/successes."""
+    frontier_exploration_fraction: float = 0.2
+    frontier_domain_balanced: bool = False
+    """Interleave domains while ranking tasks by frontier value."""
     no_resampling_pass_rate: float | None = None
     advantage_normalization_type: Literal["standard", "centered", "maxrl"] = "centered"
     """How to normalize per-prompt rollout rewards into policy advantages.
@@ -715,11 +805,20 @@ class StreamingDataLoaderConfig:
                 "filter_zero_std_samples must be True when active_sampling is True. "
                 "Active sampling requires filtering to work correctly."
             )
+        if (
+            self.max_sampled_prompt_groups_per_step is not None
+            and self.max_sampled_prompt_groups_per_step < self.num_unique_prompts_rollout
+        ):
+            raise ValueError(
+                "max_sampled_prompt_groups_per_step must be >= num_unique_prompts_rollout"
+            )
         if self.num_samples_per_prompt_rollout == 1 and self.filter_zero_std_samples:
             raise ValueError(
                 "`filter_zero_std_samples` cannot be True when `num_samples_per_prompt_rollout` is 1, "
                 "as the reward standard deviation will always be 0, causing all samples to be filtered."
             )
+        if not 0.0 <= self.frontier_exploration_fraction <= 1.0:
+            raise ValueError("frontier_exploration_fraction must be in [0, 1]")
         if self.async_steps < 1:
             raise ValueError("`async_steps` must be greater than 0. Fully synchronous training is not supported.")
         if not 0.0 <= self.mask_non_submitting_completions_percent < 1.0:
@@ -864,6 +963,7 @@ class BatchStatistics:
     percent_solved_hist: np.ndarray
     no_resampled_prompts: int
     total_prompts: int
+    sampled_prompt_groups: int
 
 
 def _compute_avg_group_performance(n_solved: int, n_zero: int, n_kept: int, batch_avg_score: float) -> float:
@@ -1008,6 +1108,8 @@ def accumulate_inference_batches(
     timeout: float | None = None,
     active_sampling: bool = False,
     filter_zero_std_samples: bool = False,
+    max_sampled_prompt_groups: int | None = None,
+    filter_infra_error_groups: bool = False,
     replenish_prompts: bool = False,
     no_resampling_pass_rate: float | None = None,
     iter_dataloader: HFDataLoader | None = None,
@@ -1048,11 +1150,21 @@ def accumulate_inference_batches(
     all_percent_solved = []
     all_model_steps = []
     total_filtered_prompts = 0
+    total_infra_error_prompts = 0
     filtered_prompt_zero = 0
     filtered_prompt_solved = 0
     filtered_prompt_nonzero = 0
     total_no_resampled = 0
     stale_results_dropped = 0
+    termination_counts = {
+        "success": 0,
+        "failed_submission": 0,
+        "eos_without_submit": 0,
+        "max_turns": 0,
+        "max_tokens": 0,
+        "invalid_submit": 0,
+        "tool_error": 0,
+    }
     progress_bar = tqdm(
         total=num_prompts,
         desc=f"Accumulating Responses and Rewarding {num_prompts} prompts",
@@ -1065,6 +1177,15 @@ def accumulate_inference_batches(
     num_prompts_sampled = 0
     collected_results = []  # Track results for potential requeue on timeout
     while num_prompts_sampled < num_prompts:
+        if max_sampled_prompt_groups is not None and len(collected_results) >= max_sampled_prompt_groups:
+            logger.warning(
+                "[Data Preparation Thread] Sampling budget exhausted: %s/%s useful "
+                "groups after consuming %s groups",
+                num_prompts_sampled,
+                num_prompts,
+                len(collected_results),
+            )
+            break
         logger.info(
             f"[accumulate_inference_batches] Waiting for result {num_prompts_sampled + 1}/{num_prompts} from inference_results_Q"
         )
@@ -1128,6 +1249,29 @@ def accumulate_inference_batches(
         )
 
         example = dataset[result.index]
+        states = result.request_info.rollout_states
+        submitted = [i < len(states) and bool(states[i].get("done", False)) for i in range(len(result.responses))]
+        if iter_dataloader is not None and not any(result.request_info.tool_errors):
+            iter_dataloader.record_frontier_outcome(result.index, result.reward_scores, submitted)
+
+        for i, score in enumerate(result.reward_scores):
+            state = states[i] if i < len(states) else {}
+            info = state.get("info", {}) or {}
+            error = result.request_info.tool_errors[i] if i < len(result.request_info.tool_errors) else None
+            reason = str(info.get("termination_reason") or info.get("done_reason") or "").lower()
+            if error:
+                category = "tool_error"
+            elif float(score) > 0.0:
+                category = "success"
+            elif submitted[i]:
+                category = "invalid_submit" if "invalid" in reason else "failed_submission"
+            elif "turn" in reason or "step" in reason:
+                category = "max_turns"
+            elif result.finish_reasons[i] != "stop" or "token" in reason:
+                category = "max_tokens"
+            else:
+                category = "eos_without_submit"
+            termination_counts[category] += 1
         query = example[INPUT_IDS_PROMPT_KEY]
         ground_truth = example[GROUND_TRUTHS_KEY]
         dataset_name = example[VERIFIER_SOURCE_KEY]
@@ -1170,6 +1314,28 @@ def accumulate_inference_batches(
         )
 
         percent_solved = np.mean(result.reward_scores).item() / max_possible_score
+
+        infra_markers = (
+            "No test.sh found",
+            "No test data directory",
+            "docker api",
+            "container disappeared",
+            "connection reset",
+            "not a valid stream",
+        )
+        has_infra_error = filter_infra_error_groups and any(
+            any(marker.lower() in str(error).lower() for marker in infra_markers)
+            for error in result.request_info.tool_errors
+            if error
+        )
+        if has_infra_error:
+            total_filtered_prompts += 1
+            total_infra_error_prompts += 1
+            logger.warning(
+                "[Data Preparation Thread] Excluding infra-invalid prompt group index=%s",
+                result.index,
+            )
+            continue
         if no_resampling_pass_rate is not None and percent_solved >= no_resampling_pass_rate:
             assert iter_dataloader is not None
             iter_dataloader.exclude_index(result.index)
@@ -1336,6 +1502,13 @@ def accumulate_inference_batches(
 
     combined_reward_metrics = combine_reward_metrics(all_reward_metrics)
     combined_reward_metrics["stale_results_dropped"] = float(stale_results_dropped)
+    combined_reward_metrics["infra_error_groups"] = float(total_infra_error_prompts)
+    termination_total = sum(termination_counts.values())
+    for category, count in termination_counts.items():
+        combined_reward_metrics[f"termination/{category}_count"] = float(count)
+        combined_reward_metrics[f"termination/{category}_fraction"] = (
+            float(count / termination_total) if termination_total else 0.0
+        )
     if all_model_steps:
         model_steps_array = np.array(all_model_steps, dtype=float)
         combined_reward_metrics["model_step_min"] = float(model_steps_array.min())
@@ -1354,6 +1527,7 @@ def accumulate_inference_batches(
         percent_solved_hist=np.array(all_percent_solved),
         no_resampled_prompts=total_no_resampled,
         total_prompts=len(results),
+        sampled_prompt_groups=len(collected_results),
     )
     return combined_result, batch, combined_reward_metrics, batch_stats
 
@@ -1560,6 +1734,13 @@ class DataPreparationActor:
         self.base_env_config = base_env_config
         self.image_prewarm_actors = image_prewarm_actors or []
 
+        frontier_prior: dict[str, dict[str, float]] = {}
+        if self.config.frontier_prior_file:
+            with open(self.config.frontier_prior_file, encoding="utf-8") as f:
+                payload = json.load(f)
+            frontier_prior = payload.get("tasks", payload)
+            logger.info("Loaded frontier priors for %s tasks", len(frontier_prior))
+
         self.iter_dataloader = HFDataLoader(
             dataset=dataset,
             batch_size=1,
@@ -1569,6 +1750,10 @@ class DataPreparationActor:
             work_dir=work_dir,
             automatic_reshuffle=True,
             collator=single_example_collator,
+            frontier_prior=frontier_prior,
+            frontier_num_rollouts=self.config.num_samples_per_prompt_rollout,
+            frontier_exploration_fraction=self.config.frontier_exploration_fraction,
+            frontier_domain_balanced=self.config.frontier_domain_balanced,
         )
 
         self.prepared_data: dict[int, list[data_types.CollatedBatchData]] = {}
@@ -1643,6 +1828,8 @@ class DataPreparationActor:
                 actor_manager=self.actor_manager,
                 active_sampling=self.config.active_sampling,
                 filter_zero_std_samples=self.config.filter_zero_std_samples,
+                max_sampled_prompt_groups=self.config.max_sampled_prompt_groups_per_step,
+                filter_infra_error_groups=self.config.filter_infra_error_groups,
                 replenish_prompts=True,
                 no_resampling_pass_rate=self.config.no_resampling_pass_rate,
                 iter_dataloader=self.iter_dataloader,

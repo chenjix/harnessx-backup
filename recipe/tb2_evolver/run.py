@@ -480,6 +480,7 @@ async def _full_eval_survivors(
     force_eval: bool = False,
     eval_concurrent: int = 0,
     job_suffix_traj: bool = False,
+    min_unique_pivot: int = 1,
 ):
     """Full-eval the screened survivors and return (primary, kept_pivots).
 
@@ -547,17 +548,27 @@ async def _full_eval_survivors(
                        input_round)
         return survivors[0], list(survivors)
 
+    def _candidate_parent_set(cand) -> set[str]:
+        own = getattr(cand, "parent_results", None) or {}
+        return {t for t, ok in own.items() if ok} if own else parent_set
+
     def _unique(cand) -> int:
-        return len(set(getattr(cand, "full_solved", None) or []) - parent_set)
+        return len(
+            set(getattr(cand, "full_solved", None) or [])
+            - _candidate_parent_set(cand)
+        )
 
     scored.sort(key=lambda t: (-t[0], -_unique(t[1]), t[1].idx))
     best_score, primary = scored[0]
     kept = []
     seen = set()
     for score, cand in scored:
-        unique = set(getattr(cand, "full_solved", None) or []) - parent_set
+        unique = (
+            set(getattr(cand, "full_solved", None) or [])
+            - _candidate_parent_set(cand)
+        )
         tied = score >= best_score - max(0.0, float(tie_eps))
-        if tied or unique:
+        if tied or len(unique) >= max(1, int(min_unique_pivot)):
             if cand.idx not in seen:
                 kept.append(cand)
                 seen.add(cand.idx)
@@ -1207,7 +1218,8 @@ async def main() -> None:
             "and MERGE complementary candidates into one extra harness (complementary "
             "changesets are enough; the union does not have to beat either parent). "
             "Tied and unique-gain harnesses stay as simultaneous parents. "
-            "tournament: propose N distinct harnesses, drop only system errors / "
+            "tournament: propose N distinct harnesses in round 1 and a cheaper "
+            "continuation + complementary-synthesis pair in later rounds; drop only system errors / "
             "no-ops / dupes, full-eval all of them in parallel, keep the highest "
             "pass-rate as the next parent. No probe, no LLM rank. "
             "Only applies when --fanout > 1."
@@ -1224,6 +1236,20 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
+        "--tournament-later-fanout",
+        type=int,
+        default=2,
+        help="Tournament proposal count after the first evolve round (default: 2). "
+        "One slot continues a pivot and one can synthesize complementary pivots.",
+    )
+    parser.add_argument(
+        "--pivot-min-new-solves",
+        type=int,
+        default=3,
+        help="Keep a non-winning candidate as a next-round pivot only when it "
+        "solves at least this many tasks its parent missed (default: 3).",
+    )
+    parser.add_argument(
         "--no-fanout-merge",
         action="store_true",
         default=False,
@@ -1233,6 +1259,10 @@ async def main() -> None:
 
     if args.fanout < 1:
         raise ValueError("--fanout must be >= 1")
+    if args.tournament_later_fanout < 2:
+        raise ValueError("--tournament-later-fanout must be >= 2")
+    if args.pivot_min_new_solves < 1:
+        raise ValueError("--pivot-min-new-solves must be >= 1")
     if args.fanout_mode == "tournament":
         # Eval every valid proposal; --fanout-keep is ignored.
         args.fanout_keep = int(args.fanout)
@@ -1578,10 +1608,11 @@ async def main() -> None:
     tournament = args.fanout_mode == "tournament"
     if fanout_on and tournament:
         logger.info(
-            "Fan-out ON (tournament): %d proposals/round, drop only system "
+            "Fan-out ON (tournament): %d proposals first round, %d later, drop only system "
             "errors / no-ops / dupes, then parallel full eval of every survivor "
             "(eval-concurrent=%s)",
             args.fanout,
+            args.tournament_later_fanout,
             args.fanout_eval_concurrent or "all",
         )
     elif fanout_on:
@@ -1876,7 +1907,15 @@ async def main() -> None:
                     # lineages stay as simultaneous pivots so the meta-agent
                     # can read each of their trajectories, not just the incumbent.
                     if tournament:
-                        parent_nodes = [_arch_node]
+                        parent_nodes = (
+                            archive.select_parents(
+                                round=input_round,
+                                explore_every=0,
+                                tie_eps=float(getattr(args, "parent_tie_eps", 0.0)),
+                                min_unique_solves=int(args.pivot_min_new_solves),
+                            )
+                            or [_arch_node]
+                        )
                     else:
                         parent_nodes = (
                             archive.select_parents(
@@ -1934,7 +1973,11 @@ async def main() -> None:
                             None if args.no_screen_probe
                             else _make_probe_runner(input_round)
                         ),
-                        n=int(args.fanout),
+                        n=(
+                            int(args.fanout)
+                            if not tournament or input_round == 0
+                            else max(2, int(args.tournament_later_fanout))
+                        ),
                         keep=int(args.fanout_keep),
                         max_concurrent=int(args.fanout_concurrent),
                         n_probe_solved=int(args.probe_solved),
@@ -1942,6 +1985,8 @@ async def main() -> None:
                     )
                     if args.fanout_mode == "v2":
                         propose_kw["merge"] = not args.no_fanout_merge
+                        propose_kw["pivots"] = pivot_dicts
+                    elif tournament:
                         propose_kw["pivots"] = pivot_dicts
                     survivors = await propose(**propose_kw)
                     if not survivors:
@@ -1971,6 +2016,7 @@ async def main() -> None:
                             force_eval=tournament,
                             eval_concurrent=int(getattr(args, "fanout_eval_concurrent", 0) or 0),
                             job_suffix_traj=tournament,
+                            min_unique_pivot=int(args.pivot_min_new_solves),
                         )
                         tournament_eval = winner
                         output_config_path = Path(winner.config).resolve()
@@ -1986,6 +2032,12 @@ async def main() -> None:
                                         if c.trajectories_dir
                                         else None
                                     ),
+                                    "new_solves": sorted(set(c.full_solved or []) - {
+                                        t for t, ok in (c.parent_results or {}).items() if ok
+                                    }),
+                                    "regressions": sorted({
+                                        t for t, ok in (c.parent_results or {}).items() if ok
+                                    } - set(c.full_solved or [])),
                                 }
                                 for c in survivors
                                 if c.full_score is not None

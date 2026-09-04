@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Online Tmax RL (DPPO / GRPO-fast) after coevolve SFT.
 #
-# Train pool: up to RL_N_TASKS (default 100) from taxonomy parquet, always
+# Train pool: RL_N_TASKS (default 100) from taxonomy parquet, always
 # excluding holdout-102. Prefer keeping evolve-50 inside the pool.
 #
 # Usage:
@@ -38,30 +38,34 @@ RL_ENVS_JSONL="${RL_ENVS_JSONL:-}"
 # Optional: rank/drop the RL pool from tournament-evolve pass/fail patterns.
 # RL_EVOLVE_REPLICATE=22 scans .benchmarks/tmax/tmax-coev-rep22-i*-r*-traj.
 RL_EVOLVE_REPLICATE="${RL_EVOLVE_REPLICATE:-}"
+RL_EVOLVE_RUN_TAG="${RL_EVOLVE_RUN_TAG:-}"
 RL_EVOLVE_MASTERED="${RL_EVOLVE_MASTERED:-}"
+RL_EVOLVE_KEEP_UNANIMOUS="${RL_EVOLVE_KEEP_UNANIMOUS:-1}"
 RL_EVOLVE_SELECT_DIR="${RL_EVOLVE_SELECT_DIR:-$DATA_ROOT/evolve_select}"
 RL_EXCLUDE_EXTRA_JSON="${RL_EXCLUDE_EXTRA_JSON:-}"
 
-if [[ -n "$RL_EVOLVE_REPLICATE" ]]; then
-  echo "Selecting RL tasks from evolve outcomes (rep=$RL_EVOLVE_REPLICATE n=$RL_N_TASKS)"
+if [[ -n "$RL_EVOLVE_REPLICATE" || -n "$RL_EVOLVE_RUN_TAG" ]]; then
+  echo "Selecting RL tasks from evolve outcomes (rep=${RL_EVOLVE_REPLICATE:-none} tag=${RL_EVOLVE_RUN_TAG:-none} n=$RL_N_TASKS)"
   sel_args=(
-    --replicate "$RL_EVOLVE_REPLICATE"
     --n-tasks "$RL_N_TASKS"
     --out-dir "$RL_EVOLVE_SELECT_DIR"
     --holdout "$HOLDOUT_TASKS_JSON"
   )
+  [[ -n "$RL_EVOLVE_REPLICATE" ]] && sel_args+=(--replicate "$RL_EVOLVE_REPLICATE")
+  [[ -n "$RL_EVOLVE_RUN_TAG" ]] && sel_args+=(--run-tag "$RL_EVOLVE_RUN_TAG")
   [[ -n "$RL_EVOLVE_MASTERED" ]] && sel_args+=(--mastered "$RL_EVOLVE_MASTERED")
+  [[ "$RL_EVOLVE_KEEP_UNANIMOUS" == "1" ]] && sel_args+=(--keep-unanimous)
   "$(python_bin)" -m recipe.tb2_sft.src.select_rl_tasks_from_evolve "${sel_args[@]}"
   PREFER_TASKS_JSON="$RL_EVOLVE_SELECT_DIR/prefer_tasks.json"
   RL_EXCLUDE_EXTRA_JSON="$RL_EVOLVE_SELECT_DIR/exclude_extra.json"
+  RL_FRONTIER_PRIOR_FILE="${RL_FRONTIER_PRIOR_FILE:-$RL_EVOLVE_SELECT_DIR/report.json}"
   n_sel="$("$(python_bin)" -c "import json;print(len(json.load(open('$PREFER_TASKS_JSON'))))")"
   if (( n_sel < 1 )); then
     echo "ERROR: evolve selector produced 0 tasks" >&2
     exit 2
   fi
   if (( n_sel < RL_N_TASKS )); then
-    echo "NOTE: evolve select has $n_sel split tasks < RL_N_TASKS=$RL_N_TASKS — using $n_sel (no random taxonomy fill)"
-    RL_N_TASKS="$n_sel"
+    echo "NOTE: evolve evidence contributes $n_sel high-value split task(s); taxonomy sampling will stratify-fill to $RL_N_TASKS"
   fi
   RL_REBUILD_DATASET=1
 fi
@@ -272,12 +276,12 @@ RL_GATHER_WHOLE_MODEL="${RL_GATHER_WHOLE_MODEL:-false}"
 # only costs memory, and the default 8 does not even divide our 6 learners. The
 # official 27B run sets 1 for the same reason.
 RL_DEEPSPEED_ZPG="${RL_DEEPSPEED_ZPG:-1}"
-RL_EPISODES="${RL_EPISODES:-512}"
-RL_SAMPLES_PER_PROMPT="${RL_SAMPLES_PER_PROMPT:-8}"
-RL_UNIQUE_PROMPTS="${RL_UNIQUE_PROMPTS:-4}"
-RL_MAX_STEPS="${RL_MAX_STEPS:-40}"
+RL_EPISODES="${RL_EPISODES:-5120}"
+RL_SAMPLES_PER_PROMPT="${RL_SAMPLES_PER_PROMPT:-16}"
+RL_UNIQUE_PROMPTS="${RL_UNIQUE_PROMPTS:-2}"
+RL_MAX_STEPS="${RL_MAX_STEPS:-80}"
 RL_PER_TURN_MAX_TOKENS="${RL_PER_TURN_MAX_TOKENS:-4096}"
-RL_RESPONSE_LENGTH="${RL_RESPONSE_LENGTH:-16384}"
+RL_RESPONSE_LENGTH="${RL_RESPONSE_LENGTH:-32768}"
 RL_LR="${RL_LR:-1e-6}"
 # Derived below from the rollout group: see the note next to POOL_NEEDED.
 RL_POOL_SIZE="${RL_POOL_SIZE:-}"
@@ -286,7 +290,28 @@ RL_ASYNC_STEPS="${RL_ASYNC_STEPS:-2}"
 RL_DEEPSPEED_STAGE="${RL_DEEPSPEED_STAGE:-3}"
 # 1 = drop zero-std groups (large runs); 0 for tiny smokes
 RL_FILTER_ZERO_STD="${RL_FILTER_ZERO_STD:-1}"
+RL_ACTIVE_SAMPLING="${RL_ACTIVE_SAMPLING:-1}"
+RL_MAX_SAMPLED_PROMPT_GROUPS="${RL_MAX_SAMPLED_PROMPT_GROUPS:-0}"
+RL_FILTER_INFRA_ERRORS="${RL_FILTER_INFRA_ERRORS:-1}"
+RL_FRONTIER_PRIOR_FILE="${RL_FRONTIER_PRIOR_FILE:-}"
+RL_FRONTIER_EXPLORATION="${RL_FRONTIER_EXPLORATION:-0.2}"
+RL_FRONTIER_DOMAIN_BALANCED="${RL_FRONTIER_DOMAIN_BALANCED:-1}"
+RL_BETA="${RL_BETA:-0.01}"
 RL_SYSTEM_PROMPT_FILE="${RL_SYSTEM_PROMPT_FILE:-$OPEN_INSTRUCT_ROOT/scripts/train/debug/envs/swerl_vanillux_sandbox_system_prompt.txt}"
+RL_HARNESS_CONFIG="${RL_HARNESS_CONFIG:-}"
+
+# Materialize the live eval/evolve harness policy into the RL-only bash protocol.
+# Processors cannot be imported into open-instruct directly, but the behavioral
+# contract can and should be identical: system policy, submit discipline,
+# self-verification, background-service persistence, and step budget.
+if [[ -n "$RL_HARNESS_CONFIG" ]]; then
+  require_file "$RL_HARNESS_CONFIG"
+  _rl_prompt_dir="$DATA_ROOT/harness_policy"
+  mkdir -p "$_rl_prompt_dir"
+  RL_SYSTEM_PROMPT_FILE="$_rl_prompt_dir/system_prompt.txt"
+  "$(python_bin)" "$ROOT/scripts/tmax/materialize_rl_harness_prompt.py" \
+    --harness "$RL_HARNESS_CONFIG" --output "$RL_SYSTEM_PROMPT_FILE"
+fi
 # The parser has to match the family's tool-call syntax. Qwen3.5/3.6 emit the XML
 # form (scripts/tmax/RL/qwen35_9b.sh uses vllm_qwen3_xml); Qwen3 *-Instruct emits
 # the Hermes form (scripts/train/debug/envs/swerl_sandbox_8gpu.sh pairs that model
@@ -452,6 +477,8 @@ fi
 PACK_LENGTH=$(( RL_RESPONSE_LENGTH + 2048 ))
 FILTER_ARG=(--filter_zero_std_samples true)
 [[ "$RL_FILTER_ZERO_STD" == "0" ]] && FILTER_ARG=(--filter_zero_std_samples false)
+ACTIVE_ARG=()
+[[ "$RL_ACTIVE_SAMPLING" == "1" ]] && ACTIVE_ARG=(--active_sampling)
 
 SYSTEM_PROMPT_ARGS=()
 if [[ -n "$RL_SYSTEM_PROMPT_FILE" && -f "$RL_SYSTEM_PROMPT_FILE" ]]; then
@@ -486,7 +513,11 @@ echo "  group       : prompts=$RL_UNIQUE_PROMPTS x samples=$RL_SAMPLES_PER_PROMP
 echo "  steps       : ~$(( RL_EPISODES / GROUP )) (episodes=$RL_EPISODES)"
 echo "  prompt pool : need async($RL_ASYNC_STEPS) x prompts($RL_UNIQUE_PROMPTS) = $POOL_NEEDED <= $n_tasks tasks"
 echo "  max_steps   : $RL_MAX_STEPS  per_turn=$RL_PER_TURN_MAX_TOKENS  resp=$RL_RESPONSE_LENGTH"
-echo "  filter0std  : $RL_FILTER_ZERO_STD  tool_parser=$RL_TOOL_PARSER"
+echo "  filter0std  : $RL_FILTER_ZERO_STD  active_sampling=$RL_ACTIVE_SAMPLING  tool_parser=$RL_TOOL_PARSER"
+echo "  sample cap  : ${RL_MAX_SAMPLED_PROMPT_GROUPS} group(s)/step (0=upstream unlimited)  filter_infra=$RL_FILTER_INFRA_ERRORS"
+echo "  frontier    : prior=${RL_FRONTIER_PRIOR_FILE:-none} exploration=$RL_FRONTIER_EXPLORATION"
+echo "  domain/KL   : domain_balanced=$RL_FRONTIER_DOMAIN_BALANCED beta=$RL_BETA"
+echo "  harness     : ${RL_HARNESS_CONFIG:-<none>}  system_prompt=$RL_SYSTEM_PROMPT_FILE"
 echo "  sandbox pool: $RL_POOL_SIZE concurrent container(s)"
 echo "  lr          : $RL_LR  loss=dppo  gather_whole_model=$RL_GATHER_WHOLE_MODEL zpg=$RL_DEEPSPEED_ZPG"
 echo "  vllm extras : gdn=${RL_GDN_PREFILL_BACKEND:-off} lm_head_fp32=${RL_LM_HEAD_FP32:-1}"
@@ -628,7 +659,7 @@ CMD=(
   --vllm_num_engines "$N_VLLM" \
   --vllm_tensor_parallel_size 1 \
   "${SINGLE_GPU_ARGS[@]}" \
-  --beta 0.0 \
+  --beta "$RL_BETA" \
   --use_vllm_logprobs true \
   --gather_whole_model "$RL_GATHER_WHOLE_MODEL" \
   --deepspeed_zpg "$RL_DEEPSPEED_ZPG" \
@@ -648,6 +679,7 @@ CMD=(
   --verification_reward 1.0 \
   --tool_parser_type "$RL_TOOL_PARSER" \
   "${FILTER_ARG[@]}" \
+  "${ACTIVE_ARG[@]}" \
   "${SYSTEM_PROMPT_ARGS[@]}" \
   --backend_timeout 1200 \
   --advantage_normalization_type centered \
@@ -659,6 +691,21 @@ CMD=(
   --save_freq "${RL_SAVE_FREQ:-50}" \
   --checkpoint_state_freq "${RL_CKPT_FREQ:-25}"
 )
+
+if (( RL_MAX_SAMPLED_PROMPT_GROUPS > 0 )); then
+  CMD+=(--max_sampled_prompt_groups_per_step "$RL_MAX_SAMPLED_PROMPT_GROUPS")
+fi
+if [[ "$RL_FILTER_INFRA_ERRORS" == "1" ]]; then
+  CMD+=(--filter_infra_error_groups true)
+fi
+if [[ -n "$RL_FRONTIER_PRIOR_FILE" ]]; then
+  require_file "$RL_FRONTIER_PRIOR_FILE"
+  CMD+=(--frontier_prior_file "$RL_FRONTIER_PRIOR_FILE")
+fi
+CMD+=(--frontier_exploration_fraction "$RL_FRONTIER_EXPLORATION")
+if [[ "$RL_FRONTIER_DOMAIN_BALANCED" == "1" ]]; then
+  CMD+=(--frontier_domain_balanced true)
+fi
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo
@@ -789,11 +836,34 @@ fi
 # instead of assuming a layout.
 final_ckpt="$(find "$RL_OUTPUT_DIR" -maxdepth 2 -name config.json -not -path "*_checkpoints/*" 2>/dev/null | head -1)"
 step_ckpts="$(find "$RL_OUTPUT_DIR" -maxdepth 3 -type d -name "step_*" 2>/dev/null | sort | tr '\n' ' ')"
-if [[ -n "$final_ckpt" ]]; then
-  echo "RL final checkpoint: $(dirname "$final_ckpt")"
-  dirname "$final_ckpt" >"$RL_OUTPUT_DIR/checkpoint.path"
+trained=0
+if [[ -n "$step_ckpts" ]] || grep -Eq 'training_step[^0-9]*[1-9]|global_step[^0-9]*[1-9]|optimizer.step' "$LOG_ROOT/train_rl_grpo.log" 2>/dev/null; then
+  trained=1
+fi
+if [[ -n "$final_ckpt" && "$trained" == "1" ]]; then
+  _trained_dir="$(dirname "$final_ckpt")"
+  _servable_dir="$_trained_dir"
+  _model_type="$(python3 -c "import json;print(json.load(open('$_trained_dir/config.json')).get('model_type',''))")"
+  if [[ "$_model_type" == "qwen3_5_text" ]]; then
+    _servable_dir="${_trained_dir}_shell"
+    echo "Reattaching trained Qwen3.5 text tower to servable shell → $_servable_dir"
+    "$RL_PY" "$ROOT/scripts/tmax/reattach_rl_text_shell.py" \
+      --text-checkpoint "$_trained_dir" --base-shell "$RL_INIT_MODEL" --output "$_servable_dir"
+  fi
+  python3 "$ROOT/scripts/tmax/check_rl_ckpt.py" "$_servable_dir" || {
+    echo "ERROR: trained checkpoint is not servable" >&2
+    rc_train=4
+    trained=0
+  }
+fi
+if [[ -n "${_servable_dir:-}" && "$trained" == "1" ]]; then
+  echo "RL final checkpoint: $_servable_dir"
+  printf '%s\n' "$_servable_dir" >"$RL_OUTPUT_DIR/checkpoint.path"
+  touch "$RL_OUTPUT_DIR/.rl_training_complete"
 else
-  echo "WARNING: no final checkpoint under $RL_OUTPUT_DIR" >&2
+  rm -f "$RL_OUTPUT_DIR/checkpoint.path" "$RL_OUTPUT_DIR/.rl_training_complete"
+  echo "ERROR: no checkpoint with evidence of at least one optimizer step under $RL_OUTPUT_DIR" >&2
+  [[ "$rc_train" == "0" ]] && rc_train=3
 fi
 [[ -n "$step_ckpts" ]] && echo "step checkpoints: $step_ckpts"
 echo "$RL_OUTPUT_DIR" >"$ROOT/outputs/rl/${RL_DATASET_NAME}.path" 2>/dev/null || true

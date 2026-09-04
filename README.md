@@ -7,7 +7,11 @@ Two closed loops share one codebase:
 | **Tmax** | `scripts/tmax/` | Docker Tmax (`recipe/tmax_eval`) | LoRA SFT + optional open-instruct GRPO |
 | **TB2** | `scripts/tb2/` | Harbor TB2 | LoRA SFT + optional slime replay-GRPO |
 
-See **[docs/PIPELINES.md](docs/PIPELINES.md)** for the split and launch commands.
+For mentor handoff and all Tmax entry points, start with
+**[docs/TMAX_RUNBOOK.md](docs/TMAX_RUNBOOK.md)**. See
+**[docs/PIPELINES.md](docs/PIPELINES.md)** for the Tmax/TB2 split.
+Environment setup and requirements ownership: **[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)**.
+Ready-to-run 4B/9B experiment settings: **[docs/TMAX_EXPERIMENT_MATRIX.md](docs/TMAX_EXPERIMENT_MATRIX.md)**.
 Data notes: **[docs/DATA.md](docs/DATA.md)**.
 
 ## Layout
@@ -37,9 +41,12 @@ bash scripts/doctor.sh
 **Tmax coevolve:**
 
 ```bash
-sbatch scripts/slurm/tmax/h200_tmax_coevolve.sbatch   # 8x H200
-sbatch scripts/slurm/tmax/a100_tmax_coevolve.sbatch   # 8x A100-40GB (p4d)
+bash scripts/tmax/run.sh preflight
+REPLICATE=30 N_ITERS=3 bash scripts/tmax/run.sh submit-coevolve  # 8x H200
 ```
+
+Run `bash scripts/tmax/run.sh help` for individual harness-evolve, evaluation,
+SFT, RL, and full-loop commands.
 
 Each iteration resumes from the best (model, harness) pair so far, accepts a tie
 when the eval run was clean, and rotates mastered tasks out of the evolve set —

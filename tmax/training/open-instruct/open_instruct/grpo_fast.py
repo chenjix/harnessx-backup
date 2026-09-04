@@ -145,6 +145,9 @@ logger = logger_utils.setup_logger(__name__)
 def _count_sampled_episodes_for_step(
     streaming_config: data_loader_lib.StreamingDataLoaderConfig, step_metrics: dict[str, Any]
 ) -> int:
+    measured_groups = step_metrics.get("batch/sampled_prompt_groups")
+    if measured_groups is not None:
+        return int(measured_groups) * streaming_config.num_samples_per_prompt_rollout
     sampled_prompt_groups = streaming_config.num_unique_prompts_rollout
     if streaming_config.active_sampling:
         sampled_prompt_groups += int(step_metrics.get("batch/filtered_prompts", 0))

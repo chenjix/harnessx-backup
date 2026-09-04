@@ -849,6 +849,45 @@ class TestAccumulateInferenceBatches(TestGrpoFastBase):
         self.assertIsNone(reward_metrics)
         self.assertIsNone(batch_stats)
 
+    def test_active_sampling_stops_at_prompt_group_budget(self):
+        """Zero-variance rejection must not make per-step cost unbounded."""
+        num_samples = 4
+        queries, ground_truths, datasets, raw_queries, _ = self.create_test_data(3)
+        inference_results_Q = ray_queue.Queue(maxsize=3)
+        self._ray_queues.append(inference_results_Q)
+        mock_dataset = self.create_mock_dataset(queries, ground_truths, datasets, raw_queries)
+        for i in range(3):
+            inference_results_Q.put(
+                self.create_mock_result(
+                    i,
+                    f"0_{i}",
+                    num_samples_per_prompt=num_samples,
+                    reward_scores=[0.0] * num_samples,
+                )
+            )
+
+        generation_config = Mock()
+        generation_config.n = num_samples
+        tokenizer, _ = self.create_mock_tokenizer_and_reward_fn()
+        result, batch, reward_metrics, batch_stats = data_loader_lib.accumulate_inference_batches(
+            inference_results_Q,
+            generation_config,
+            num_prompts=2,
+            model_dims=self.create_llama7b_model_dims(),
+            tokenizer=tokenizer,
+            dataset=mock_dataset,
+            base_env_config=EnvConfig(),
+            active_sampling=True,
+            filter_zero_std_samples=True,
+            max_sampled_prompt_groups=3,
+        )
+
+        self.assertIsNone(result)
+        self.assertIsNone(batch)
+        self.assertIsNone(reward_metrics)
+        self.assertIsNone(batch_stats)
+        self.assertTrue(inference_results_Q.empty())
+
     def test_save_filtered_rollouts(self):
         num_samples_per_prompt = 4
         queries, ground_truths, datasets, raw_queries, _ = self.create_test_data(1)

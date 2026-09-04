@@ -292,6 +292,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-initial", action="store_true")
     ap.add_argument("--keep-container", action="store_true")
     ap.add_argument("--network", default=os.environ.get("TMAX_DOCKER_NETWORK", "bridge"))
+    ap.add_argument("--system-error-retries", type=int,
+                    default=int(os.environ.get("TMAX_SYSTEM_ERROR_RETRIES", "0")),
+                    help="rerun only error/agent_error tasks before summarizing")
     ap.add_argument("--resume", action="store_true", help="skip tasks with existing result.json")
     ap.add_argument(
         "--harness-config",
@@ -405,6 +408,19 @@ def main(argv: list[str] | None = None) -> int:
             for fut in as_completed(futs):
                 with lock:
                     results.append(fut.result())
+
+    # Runner/transport failures are not policy failures. Verifier failures with
+    # status=ok are deliberately never retried.
+    for retry_idx in range(max(0, args.system_error_retries)):
+        current = {r["task_id"]: r for r in results}
+        retry_items = [(tid, endpoints[i % len(endpoints)]) for i, tid in enumerate(task_ids)
+                       if str((current.get(tid) or {}).get("status") or "error") in {"error", "agent_error"}]
+        if not retry_items: break
+        print(f"[retry-system-errors] attempt={retry_idx + 1} tasks={len(retry_items)}")
+        with ThreadPoolExecutor(max_workers=max(1, args.concurrent)) as ex:
+            replacement = {r["task_id"]: r for r in
+                           (f.result() for f in as_completed([ex.submit(_worker, x) for x in retry_items]))}
+        results = [replacement.get(r["task_id"], r) for r in results]
 
     # Summary
     by_id = {r["task_id"]: r for r in results}

@@ -336,7 +336,18 @@ class DockerBackend(SandboxBackend):
         start_time = time.perf_counter()
         with self._EXEC_SEMAPHORE.acquire() as semaphore_wait_s:
             exec_start_time = time.perf_counter()
-            result = self._container.exec_run(["bash", "-c", wrapped], demux=True)
+            # Docker Engine 29 can return an unframed raw stream through the
+            # TCP/socat endpoint used on Slurm nodes even though docker-py
+            # expects the classic 8-byte multiplex header for demux=True.
+            # docker-py then interprets the first output byte (e.g. ASCII 'a'
+            # == 97) as a stream id and raises "97 is not a valid stream".
+            # TTY mode explicitly defines a single raw stream and therefore
+            # needs no Docker multiplex decoding. Tmax observations already
+            # combine stdout/stderr, so preserving the split is unnecessary.
+            raw = self._container.exec_run(
+                ["bash", "-c", wrapped], tty=True, demux=False
+            )
+            result = (raw.exit_code, (raw.output or b"", b""))
         elapsed_s = time.perf_counter() - start_time
         exec_s = time.perf_counter() - exec_start_time
         if self._TIMING_LOGS and elapsed_s >= self._TIMING_LOG_THRESHOLD_S:

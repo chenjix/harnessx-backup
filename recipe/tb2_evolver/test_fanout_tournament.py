@@ -8,7 +8,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from recipe.tb2_evolver.fanout_tournament import propose_tournament
+from recipe.tb2_evolver.fanout_tournament import (
+    _proposal_specs,
+    _tournament_focus_notes,
+    propose_tournament,
+)
 from recipe.tb2_evolver.population import Archive
 from recipe.tb2_evolver.run import _full_eval_survivors
 from recipe.tb2_evolver.screen import Candidate
@@ -87,6 +91,43 @@ def test_each_proposal_gets_a_distinct_focus():
     _run(meta_agent=agent, n=5)
     assert len(set(agent.seen_focuses)) == 5
     assert "`t3`" in agent.seen_focuses[0] and "`t4`" in agent.seen_focuses[1]
+
+
+def test_focus_requires_failure_class_and_forbids_task_specific_trigger():
+    notes = _tournament_focus_notes(2, parent_results=PARENT_RESULTS)
+    assert all("Generalization contract" in n for n in notes)
+    assert all("at least two other trajectories" in n for n in notes)
+    assert all("do not mention" in n and "task IDs" in n for n in notes)
+
+
+def test_later_round_reserves_complementary_synthesis_slot():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        configs = []
+        trajectories = []
+        for i in range(2):
+            cfg = tmp / f"p{i}.yaml"
+            shutil.copy(BASELINE, cfg)
+            traj = tmp / f"traj{i}"
+            traj.mkdir()
+            configs.append(cfg)
+            trajectories.append(traj)
+        specs = _proposal_specs(
+            n=2,
+            focus_notes=_tournament_focus_notes(2, parent_results=PARENT_RESULTS),
+            parent_config=configs[0],
+            trajectories_dir=trajectories[0],
+            parent_results=PARENT_RESULTS,
+            parent_id="n0",
+            pivots=[
+                {"id": "n0", "config": str(configs[0]), "trajectories": str(trajectories[0])},
+                {"id": "n1", "config": str(configs[1]), "trajectories": str(trajectories[1])},
+            ],
+        )
+        assert len(specs) == 2
+        assert specs[0].synthesize is False
+        assert specs[1].synthesize is True
+        assert "unique regressions" in specs[1].focus
 
 
 def test_system_error_and_noop_are_dropped_others_kept():

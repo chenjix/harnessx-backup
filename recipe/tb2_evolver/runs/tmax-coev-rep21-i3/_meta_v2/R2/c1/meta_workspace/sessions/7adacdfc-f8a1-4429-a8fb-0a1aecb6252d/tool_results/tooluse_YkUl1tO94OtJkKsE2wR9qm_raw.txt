@@ -1,0 +1,73 @@
+1	# Evolve Journal — tmax-coev-rep21-i3
+2	
+3	## Round 1 — strict literal self-verify
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_strict_self_verify_v1
+9	levers: [control]
+10	predicted_affected: [task_000069_41f1682c, task_001979_a1e24b6f, task_000409_ff1246d3]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=7/50; +1/-2 gained=task_001447_8bde38ef lost=task_000328_80fb4c9f,task_000456_91b022e3; gating disabled (tolerance < 0)
+14	expected_global_gain: "Flips premature-commit failures in the no_tool_calls/done+reward=0 cluster where the verifier fails on a literal mismatch (exact format/count/behavioural verb) the agent never tested."
+15	regression_risk: "Adds one extra one-shot verification turn on already-passing tasks (8); their answers already match so a stronger re-check should not flip pass->fail. No loop-control/budget/tool-registry change."
+16	cost_shift: "Small, bounded per task that reaches the no-tool exit (one verification turn + a few Bash checks, one-shot). Negligible on budget_exceeded tasks."
+17	rollback_trigger: "If R2 shows the passing cluster shrinking or the no_tool_calls+reward=0 count not improving, revert to stock CustomSelfVerifyProcessor."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus task_000069_41f1682c fails despite exiting cleanly
+23	(`no_tool_calls`/`done`, reward 0). The task said to "redirect
+24	(**append**)" the executable's stdout to `deployment.log`; the agent used
+25	`>` (truncate). Its own idempotency test ran the script twice, saw one log
+26	line, and *declared success* — but the verifier ran the script twice and
+27	expected the log to grow to exactly 2 lines while `routes.txt` stayed at 2
+28	lines (config idempotent, log append-only). The agent conflated "idempotent
+29	persistent state" with "truncate the log". The stock `CustomSelfVerifyProcessor`
+30	checklist asked "does your solution address every requirement", but let the
+31	agent *assert* compliance in prose without ever testing the specific literal
+32	behaviour. This is the dominant shape in the round's 42 failures: the large
+33	`no_tool_calls`/`done`+`reward=0` cluster is mostly premature commits where the
+34	verifier fails on an exact format/count/behavioural-verb mismatch the agent
+35	never actually exercised.
+36	
+37	### Changes
+38	
+39	- `processors/strict_self_verify.py` — new `StrictSelfVerifyProcessor`
+40	  (`MultiHookProcessor`); same one-shot keepalive mechanics + singleton group
+41	  (`tb2_self_verify`) as the stock processor, but injects a checklist that
+42	  forces (1) verbatim enumeration of the task's LITERAL requirements (exact
+43	  formats, counts, behavioural verbs like "append"/"idempotent", thresholds)
+44	  and (2) a proof command per requirement whose output is compared to the spec,
+45	  explicitly rejecting a single happy-path run.
+46	- `config.yaml` — replaced the
+47	  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` entry with a
+48	  `file://` reference to the new class. No other pipeline change.
+49	
+50	### Evidence
+51	
+52	- `task_000069_41f1682c` result.json: `finished=no_tool_calls`, `reward=0`;
+53	  final_pytest: "deployment.log should have exactly 2 lines after running
+54	  twice, but has 1." Body (last assistant turn after `_tb2_self_verify` fired):
+55	  "running it again ... doesn't append duplicate lines to the log file" while
+56	  the script uses `... > /home/user/deployment.log` (truncate).
+57	- `task_001979_a1e24b6f` result.json: `reward=0`; final_pytest: "At index 4
+58	  diff: '33.0' != '33.00'." Body (last assistant turn after `_tb2_self_verify`
+59	  at msg 15): "✅ Rolling statistics ... rounded to 2 decimal places" and "The
+60	  expected output matches the actual output exactly" — a prose assertion, not a
+61	  byte comparison.
+62	- `task_000409_ff1246d3` result.json: `reward=0`; final_pytest: "Output
+63	  mismatch at output line 6. Oracle produced: 41225,0.00,0.00,CAT / Agent
+64	  produced: 99614,-100.00,-100.00,CAT" — committed on a happy-path run without
+65	  comparing to the exact spec.
+66	
+67	### Uncertainty
+68	
+69	The change is Instruction-content delivered through a Control hook, so its
+70	effect depends on the 4B model actually following a longer checklist. If the
+71	model ignores the added steps, we get cost with no flips (revert per trigger).
+72	Downside is bounded: one-shot, no loop-control change, and it cannot block a
+73	genuine exit. Contract/dry_fire/canonicalize/literals all pass clean.

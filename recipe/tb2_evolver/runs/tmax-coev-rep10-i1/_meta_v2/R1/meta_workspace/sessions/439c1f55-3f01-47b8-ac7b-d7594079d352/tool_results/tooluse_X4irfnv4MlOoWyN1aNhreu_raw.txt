@@ -1,0 +1,42 @@
+1201	                # Preserve restored effective context exactly as recovered.
+1202	                # Fallback only when callers pass a partial state manually.
+1203	                if not state.messages and state.raw_messages:
+1204	                    state.messages = list(state.raw_messages)
+1205	                # Keep state.run_id as-is — whether restored from disk or passed
+1206	                # in-memory.  A new run_id is only ever created by a
+1207	                # SegmentBoundaryEvent (compaction, system-prompt change, etc.)
+1208	                # emitted from within RunLoop.  Reassigning it here would break
+1209	                # journal continuity and produce orphaned JSONL segments.
+1210	                state.max_steps = state.step + task.max_steps
+1211	                if task.token_budget is not None:
+1212	                    state.token_budget = state.cumulative_tokens + task.token_budget
+1213	                if task.max_cost_usd is not None:
+1214	                    state.max_cost_usd = state.cumulative_cost_usd + task.max_cost_usd
+1215	                # Append the new user turn to the restored conversation.
+1216	                # Without this, the model sees the prior history but not the
+1217	                # current user input — causing completely unrelated responses.
+1218	                user_content = task.description or ""
+1219	                if user_content:
+1220	                    state.add_raw_message(Message(role="user", content=user_content))
+1221	            else:
+1222	                # Truly fresh session — generate the initial run_id.
+1223	                # Subsequent turns inherit this via resume_state.run_id.
+1224	                state = State(
+1225	                    run_id=make_run_id(),
+1226	                    max_steps=task.max_steps,
+1227	                    token_budget=task.token_budget,
+1228	                    max_cost_usd=task.max_cost_usd,
+1229	                    spawn_depth=task.spawn_depth,
+1230	                )
+1231	                user_content = task.description or ""
+1232	                if user_content:
+1233	                    state.add_raw_message(Message(role="user", content=user_content))
+1234	
+1235	            # Transfer any pending plugin side-channels so processors / run_loop
+1236	            # can read them.  Command prompts and allowed_tools are stored as
+1237	            # plain attributes on the state object (not in state.slots, which
+1238	            # requires StateSlot objects).  Slash slots use set_slot().
+1239	            pending_cmd_prompt = getattr(self, "_pending_command_prompt", None)
+1240	            if pending_cmd_prompt is not None:
+
+[Showing lines 1201–1240 of 1369 total. Use offset=1240 to read the next section.]

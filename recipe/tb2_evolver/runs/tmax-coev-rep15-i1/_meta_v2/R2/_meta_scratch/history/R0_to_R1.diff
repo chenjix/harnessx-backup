@@ -1,0 +1,15 @@
+--- R0
++++ R1
+@@ -70,2 +70,12 @@
+   _hook_: '*'
++# Network-service verifier-dependency guard. On tasks where the agent stands up
++# or probes an HTTP/socket service, the external verifier's test module often
++# `import requests` at collection time; if that library is absent the whole
++# verification crashes (ModuleNotFoundError) and scores 0 even for a correct
++# service. This one-shot, exit-time reminder (keyed off the agent's own Bash
++# activity, never off task ids) nudges the agent to make the HTTP client
++# importable via an idempotent check-then-install. Runs after the self-verify
++# processor so the two exit-intent hooks serialize.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep15-i1/_meta_v2/R1/c2/processors/service_deps_reminder.py::ServiceDepsReminderProcessor
++  _hook_: '*'
+ workspace: null

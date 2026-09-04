@@ -1,0 +1,47 @@
+706	            # and no tool calls. NOT a done turn — the model is mid-reasoning (e.g.
+707	            # extended-thinking models that emit <think> before deciding which tool
+708	            # to call). Append a user continuation so the next step's assembled
+709	            # context ends with "user" (required by all provider APIs) and give the
+710	            # model another turn to emit content or a tool call.
+711	            _thinking_only = (
+712	                not model_event.content
+713	                and not model_event.tool_calls
+714	                and (bool(model_event.thinking) or bool(model_event.thinking_blocks))
+715	            )
+716	            if _thinking_only:
+717	                state.add_raw_message(
+718	                    Message(
+719	                        role="user",
+720	                        content="Please continue. Use a tool or provide your final answer.",
+721	                    )
+722	                )
+723	            # Token-limit truncation: model hit max_tokens mid-generation with no tool
+724	            # calls.  The assistant message is already in state; inject a user nudge so
+725	            # the next step's context ends with "user" (required by all provider APIs).
+726	            _length_truncated = (
+727	                model_event.finish_reason == "length" and not model_event.tool_calls and not _thinking_only
+728	            )
+729	            if _length_truncated:
+730	                state.add_raw_message(
+731	                    Message(
+732	                        role="user",
+733	                        content=(
+734	                            "Your previous response was cut off by the token limit. "
+735	                            "Please continue from where you left off."
+736	                        ),
+737	                    )
+738	                )
+739	                _logger.warning(
+740	                    "run_loop: finish_reason=length with no tool calls at step=%d — "
+741	                    "injecting user continuation (run_id=%s)",
+742	                    step_id,
+743	                    state.run_id,
+744	                )
+745	            if (
+746	                not _thinking_only
+747	                and not _length_truncated
+748	                and model_event.finish_reason in ("end_turn", "stop")
+749	                and not model_event.tool_calls
+750	            ):
+
+[Showing lines 706–750 of 981 total. Use offset=750 to read the next section.]

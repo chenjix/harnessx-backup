@@ -1,0 +1,99 @@
+class MultiHookProcessor:
+    """Recommended base class for implementing harness processors.
+
+    **Why subclass this instead of implementing ``Processor`` directly?**
+
+    - Override only the ``on_*`` methods you need; all others are no-ops.
+    - Use ``@on(EventClass)`` to name handler methods freely (see module docs).
+    - ``HarnessBuilder.add()`` auto-registers subclasses under ``"*"`` with no
+      extra configuration — just set ``_singleton_group`` and ``_order``.
+
+    Internally, ``process()`` dispatches to the right ``on_*`` method via
+    ``_DISPATCH`` (a ``{EventType: method_name}`` table built at class creation).
+    Subclasses that use ``@on()`` have their entries merged into ``_DISPATCH``
+    automatically by ``__init_subclass__``.
+
+    Example — two hooks, one class::
+
+        class AuditProcessor(MultiHookProcessor):
+            _singleton_group = "audit"
+            _order = 50
+
+            def __init__(self):
+                self._log: list[dict] = []
+
+            async def on_step_end(self, event: StepEndEvent):
+                self._log.append({"step": event.step_id, "cost": event.cumulative_cost_usd})
+                yield event
+
+            async def on_task_end(self, event: TaskEndEvent):
+                print(f"Audit: {len(self._log)} steps, "
+                      f"${event.total_cost_usd:.4f} total")
+                yield event
+
+    Example — free method name via ``@on``::
+
+        class CostGuard(MultiHookProcessor):
+            _singleton_group = "cost_guard"
+            _order = 10
+
+            @on(BeforeModelEvent)
+            async def check(self, event: BeforeModelEvent):
+                if event.cumulative_cost_usd >= self.limit:
+                    raise BudgetExceededError()
+                yield event
+    """
+
+    # Dispatch table: event type → method name.
+    # Subclasses that use @on() have their entries merged in by __init_subclass__.
+    _DISPATCH: dict[type, str] = {
+        TaskStartEvent: "on_task_start",
+        StepStartEvent: "on_step_start",
+        BeforeModelEvent: "on_before_model",
+        ModelResponseEvent: "on_after_model",
+        ToolCallEvent: "on_before_tool",
+        ToolResultEvent: "on_after_tool",
+        StepEndEvent: "on_step_end",
+        TaskEndEvent: "on_task_end",
+    }
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Merge @on() decorated methods into this subclass's _DISPATCH table.
+
+        Also validates that any method named ``on_*`` is either a recognised
+        hook name or decorated with ``@on(EventClass)``.  This catches typos
+        like ``on_tool_call`` (should be ``on_before_tool``) at import time
+        rather than silently never being called.
+        """
+        super().__init_subclass__(**kwargs)
+        dispatch: dict[type, str] = dict(cls._DISPATCH)  # inherit parent entries
+
+        # First pass: register @on()-decorated methods (they may use any name).
+        for name in vars(cls):
+            method = vars(cls)[name]  # use vars() to avoid MRO lookup
+            if callable(method) and hasattr(method, "_on_event_type"):
+                dispatch[method._on_event_type] = name
+
+        # Second pass: flag on_* methods that aren't valid hooks and aren't @on()-decorated.
+        valid_hook_names = set(dispatch.values())
+        for name in vars(cls):
+            method = vars(cls)[name]
+            if (
+                callable(method)
+                and name.startswith("on_")
+                and name not in valid_hook_names
+                and not hasattr(method, "_on_event_type")
+            ):
+                raise TypeError(
+                    f"{cls.__qualname__}.{name}: unrecognised hook method name. "
+                    f"Valid on_* names: {sorted(valid_hook_names)}. "
+                    f"Use @on(EventClass) to handle a custom event type under a free name."
+                )
+
+        cls._DISPATCH = dispatch
+
+    # Ordering hints — set on subclasses, read by HarnessBuilder.
+    # _order:  use PRE / NORMAL / POST constants (or fine-grained int offsets).
+    # _after:  list of _singleton_group names that must run before this processor
+    #          within the same hook.  Soft: unregistered groups are silently ignored.
+    _after: list[str] = []

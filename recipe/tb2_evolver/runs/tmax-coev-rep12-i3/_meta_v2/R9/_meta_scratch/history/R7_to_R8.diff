@@ -1,0 +1,36 @@
+--- R7
++++ R8
+@@ -2,2 +2,5 @@
+ # Combine: model_config.agentic(HarnessConfig.from_yaml(this))
++#
++# R8: adds IdenticalCommandLoopCompactor (C-008) after the R7
++# TruncationLoopCompactor. Everything else copied byte-for-byte from R7.
+ #
+@@ -118,2 +121,27 @@
+   _hook_: '*'
++# R8 (C-008): durably break identical-Bash-command loops. Distinct failure from
++# the R7 TruncationLoopCompactor (which only touches finish_reason=length
++# narration turns with NO tool call). Here the agent emits the byte-identical
++# single Bash command turn after turn, each with a well-formed tool call, gets
++# the same (empty/failing) result, and burns the whole 80-step budget on it
++# (measured this round: task_000730 x31 `tesseract ...`, task_001028 x19
++# `strings /home/user/log_analyzer`). The R2 RepeatCommandBreaker is registered
++# but is a SILENT NO-OP: its redirect is injected in on_before_model and the run
++# loop rebuilds input from state.raw_messages each step, so the nudge evaporates
++# (grep of "loop detected by the harness" across all 50 traces = 0 hits). The
++# reverted R5 blocker persisted but BLOCKED execution and disrupted legitimate
++# iteration. This processor is the middle path: it runs at on_step_start (like
++# the working TruncationLoopCompactor), so its edit to event.messages changes the
++# history_hash and the run loop auto-generates a SegmentBoundary that writes the
++# trimmed window durably into state.raw_messages/state.messages
++# (runloop.py ~345-368). It NEVER blocks/drops/fabricates a tool call — the
++# commands already ran; it collapses a maximal run of >=min_run consecutive
++# identical-command turns (+ their tool results) to the first one and appends ONE
++# corrective directive. min_run=10 sits safely above the passing set's max
++# identical non-empty Bash run (task_001537 x7, a truncation-interleaved iterative
++# PASS), so it cannot fire on any currently-passing trajectory. Structural trigger
++# only; no task ids/paths/commands. See processors/identical_command_loop_compactor.py.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R8/processors/identical_command_loop_compactor.py::IdenticalCommandLoopCompactor
++  min_run: 10
++  _hook_: '*'
+ - _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard

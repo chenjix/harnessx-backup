@@ -1,0 +1,136 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	#
+16	# R4 (meta): the dominant cross-round failure shape (R0-R3 all flat at 0.20) is
+17	# a DEGENERATE ASSISTANT-TURN LOOP — the model emits the byte-identical
+18	# assistant turn 4-41 times in a row, sometimes with a useless repeated Bash
+19	# call, sometimes with NO tool call at all (a self-verify ack loop). 16 distinct
+20	# FAILING tasks in R3 showed a run >= 4; no PASSING task ever exceeded 2. Four of
+21	# the 16 ended in exit_reason=error (agent_error crash). The R1 BashLoopBreaker
+22	# only fingerprints the Bash tool INPUT, so it is blind to the no-tool-call half
+23	# of the loop, and its soft "BLOCKED" redirect is ignored verbatim (transcripts
+24	# show 12-38 blocks the model re-emits identically). The R2 system prompt already
+25	# tells the model to stop looping; it ignores that too. Instruction + soft
+26	# redirect are proven-saturated. R4 adds DegenerateTurnTerminatorProcessor: it
+27	# fingerprints the whole last assistant turn, warns at warn_threshold=4, and at
+28	# terminate_threshold=6 sets skip_model + synthetic_output so the run loop takes
+29	# its own clean-exit path (finish_reason=stop, no tool calls -> exit_reason=done).
+30	# This converts the error/budget_exceeded runaways into a clean done that banks
+31	# partial work and lets exit-intent processors (verifier-dep guard) fire, and
+32	# reclaims 20-70 wasted step-generations per looping task. Thresholds leave the
+33	# entire passing set (max identical-assistant run = 2) untouched. Rest of the
+34	# pipeline + sibling system_prompt.txt copied byte-for-byte from R3.
+35	
+36	tool_registry:
+37	  builtin:
+38	  - Bash
+39	  custom: []
+40	tracer: null
+41	processors:
+42	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+43	  system_builder:
+44	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+45	  _hook_: '*'
+46	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+47	  working_dir: /home/user
+48	  constraints: {}
+49	  header: Environment
+50	  max_tree_lines: 20
+51	  non_interactive: true
+52	  inject_integrity_rules: true
+53	  show_project_dir: false
+54	  _hook_: '*'
+55	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+56	  tool_schemas: {}
+57	  _hook_: '*'
+58	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+59	  warn_at:
+60	  - 0.7
+61	  - 0.9
+62	  _hook_: '*'
+63	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+64	# Without this, one stuck task can block an entire evolve round.
+65	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+66	  repeat_threshold: 2
+67	  head_chars: 1200
+68	  tail_chars: 600
+69	  _hook_: '*'
+70	# R1 (meta): break degenerate identical-Bash repetition loops. Distinct from
+71	# LengthTruncationRecoveryProcessor (which only handles finish_reason=length /
+72	# no tool call). Kept from R1 (accepted). NOTE for R3: post-hoc analysis shows
+73	# the model frequently IGNORES the BLOCKED redirect and re-emits the identical
+74	# command many times; the R2 system prompt reinforces "don't burn budget on a
+75	# doomed subgoal" to help the model act on this signal rather than ignore it.
+76	# R4: BashLoopBreaker is retained (it still trims the Bash-input half of the
+77	# loop early), but the new DegenerateTurnTerminatorProcessor below now provides
+78	# the HARD escalation the model needs when it ignores the soft block.
+79	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R1/processors/bash_loop_breaker.py::BashLoopBreakerProcessor
+80	  warn_threshold: 3
+81	  break_threshold: 6
+82	  _hook_: '*'
+83	# R4 (meta): degenerate assistant-turn terminator. Fingerprints the whole last
+84	# assistant turn (not just a Bash input), so it catches Bash loops AND
+85	# no-tool-call / self-verify loops that BashLoopBreaker cannot see. Warns at 4
+86	# consecutive identical turns; at 6 it force-terminates via skip_model +
+87	# synthetic_output so the run loop exits cleanly (exit_reason=done) instead of
+88	# crashing to error or burning the whole step budget. Passing set (max identical
+89	# run = 2) is untouched; fires only after the loop is provably dead.
+90	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R4/processors/degenerate_turn_terminator.py::DegenerateTurnTerminatorProcessor
+91	  warn_threshold: 4
+92	  terminate_threshold: 6
+93	  _hook_: '*'
+94	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+95	  token_threshold: 140000
+96	  message_threshold: 100
+97	  retention_window: 6
+98	  eviction_fraction: 0.5
+99	  summarize_key: summarize
+100	  preserve_first_message: true
+101	  _hook_: '*'
+102	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+103	  max_consecutive_errors: 1
+104	  _hook_: '*'
+105	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+106	  drop_threshold: 5
+107	  _hook_: '*'
+108	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+109	  _hook_: '*'
+110	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+111	  threshold: 7
+112	  _hook_: '*'
+113	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+114	  _hook_: '*'
+115	# R3 (meta): proactive verifier-dep guard. Ensures common verifier test-deps
+116	# (HTTP client / config parser) are importable in the container Python BEFORE
+117	# the agent's session ends, regardless of exit reason. The prior exit-intent-
+118	# only guard never fired on budget_exceeded HTTP-service tasks (steps=80), so
+119	# their verifier aborted at pytest collection time with
+120	# `ModuleNotFoundError: No module named 'requests'` and a correct solution
+121	# scored 0. This version prepends the dep-ensure onto the first mid-run
+122	# tool-call turn at/after proactive_step, and keeps the exit-intent fallback.
+123	# Fires at most once per run; a no-op when the module is already present.
+124	# R4 note: R3 result confirms this works — the three target tasks (796/910/2108)
+125	# no longer hit collection ImportError; they now fail with real ConnectionError
+126	# (server capability gap, not a harness gap). Kept unchanged.
+127	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R3/processors/verifier_dep_guard_proactive.py::ProactiveVerifierDepGuardProcessor
+128	  proactive_step: 4
+129	  _hook_: '*'
+130	workspace: null
+131	workspace_template: default
+132	init_workspace: false
+133	step_snapshots: true
+134	sandbox_provider: null
+135	sandbox_hint_id: null
+136	plugins: []

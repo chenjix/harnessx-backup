@@ -1,0 +1,76 @@
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+from collections import deque
+
+import json
+
+from ...core.events import (
+    StepStartEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from ...core.processor import MultiHookProcessor
+from ...core.runloop import LoopDetectedError
+
+
+_WARN_TEMPLATE = (
+    "\n\n[LoopDetection] ⚠️  The exact same tool call(s) have been issued {count} times "
+    "in a row ({tools}). You are stuck in a loop. Stop and reconsider your approach: "
+    "re-read the task, check what you have already tried, and try something fundamentally "
+    "different."
+)
+
+_NAME_WARN_TEMPLATE = (
+    "\n\n[LoopDetection] ⚠️  You have called `{tool}` {count} times consecutively with "
+    "different arguments. This suggests you are stuck in a repetitive pattern "
+    "({pattern}). Stop and ask yourself: is this work actually necessary, or are "
+    "you going in circles? Re-read the task requirements and consider a completely "
+    "different approach — or simply finish if the task is already done."
+)
+
+
+class LoopDetectionProcessor(MultiHookProcessor):
+    """Detect repeating step patterns using two parallel fingerprint strategies.
+
+    **Strategy 1 — exact** (name + inputs): high-precision, two-phase
+    (warn then raise).  Catches identical tool calls repeated verbatim.
+
+    **Strategy 2 — name-only** (tool names, inputs ignored): catches semantic
+    loops where the agent repeatedly calls the same *type* of tool with varying
+    arguments (document-generation loops, infinite analysis sampling, etc.).
+    Warn-only — never raises, because name-only matching is noisier and
+    terminating on a loose signal would cause false-positive task failures.
+
+    Both strategies use the **consecutive run length** at the tail of their
+    respective sliding windows, so interleaved steps break the count and avoid
+    false positives on legitimate exploration.
+
+    **Compaction awareness**: fingerprint windows are cleared when a
+    message-count drop of ≥ ``compaction_drop_threshold`` is detected in
+    ``on_step_start``, preventing stale pre-compaction fingerprints from
+    contributing to spurious loop counts.
+
+    Args:
+        window_size:               Sliding window size for both strategies
+...
+93:        # Maps tool_call_id → exact fingerprint (captured in on_before_tool,
+101:    def _compute_fingerprint(self, tool_call_summary: str) -> str:
+102:        """sha256 of tool_call_summary; empty string if no tool calls."""
+103:        if not tool_call_summary:
+105:        return hashlib.sha256(tool_call_summary.encode()).hexdigest()[:16]
+128:    async def on_task_start(self, event: TaskStartEvent):
+134:    async def on_step_start(self, event: StepStartEvent):
+150:    async def on_before_tool(self, event: ToolCallEvent):
+153:        Stored by tool_call_id so on_after_tool can look it up without needing
+160:        self._pending_fp[event.tool_call_id] = self._compute_fingerprint(f"{event.tool_name}\x00{input_str}")
+163:    async def on_after_tool(self, event: ToolResultEvent):
+167:        The warning is appended to the result content so the system prompt is
+170:        fp = self._pending_fp.pop(event.tool_call_id, None)
+172:        # Steps with no fingerprint (e.g. on_before_tool not seen) break the run.
+211:    async def on_task_end(self, event: TaskEndEvent):

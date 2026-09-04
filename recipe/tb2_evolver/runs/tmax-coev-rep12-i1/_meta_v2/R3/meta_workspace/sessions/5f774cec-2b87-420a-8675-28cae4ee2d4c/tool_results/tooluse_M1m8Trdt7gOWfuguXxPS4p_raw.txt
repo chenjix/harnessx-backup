@@ -1,0 +1,66 @@
+1	# Learnings — tmax-coev-rep12-i1
+2	
+3	## Round 1 — no-progress repeat guard
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-22T11:06:50Z
+8	hypothesis_id: h_noprogress_repeat_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_002108_a8cfbf2a, task_000470_f819ab03, task_000840_b2ac4603, task_000908_170e5e4e]
+11	cited_candidates: [C-001]
+12	gating_outcome: reverted
+13	gating_attribution: score=25/50; +2/-6 gained=task_000987_31a34277,task_001400_7ed02d97 lost=task_000175_ef5ab90b,task_000529_8bcc67c9,task_000891_aa1685c7,task_001059_05af3d65; score 0.5000 < incumbent(mean) 0.5800 - tol 0.0400 -> revert to R0
+14	expected_global_gain: "Flips/recovers the budget_exceeded+error loop cluster (>=4 tasks with hard identical-command loops) by breaking no-progress repetition and freeing step budget"
+15	regression_risk: "Very low — guard only appends advisory text to a tool result, only fires on >=3 consecutive identical (command,output) pairs (a shape absent from passing runs), never blocks a command or mutates event.messages"
+16	cost_shift: "Net neutral-to-negative: breaking 80-step loops early reduces tokens on affected cluster; only additive cost is warning text on rare legitimate 3x repeats"
+17	rollback_trigger: "If R2 pass_rate does not improve and any previously-passing task in the loop-free set regresses, or if tokens rise materially, revert the processor"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 29/50 (58%). Analysis of the 21 failing trajectories showed a
+23	dominant, mechanical failure shape: the agent issues the SAME Bash command
+24	repeatedly, receives the SAME output every time, and makes zero progress
+25	until it either exhausts the 80-step budget (`exit_reason=budget_exceeded`,
+26	5 tasks) or crashes (`exit_reason=error`, task_002108). Counting maximal
+27	runs of consecutive identical commands over `.messages.json`: task_002108
+28	= 44, task_000470 = 28, task_000840 = 10 (paired cmd+output), task_000908
+29	= 8 (paired). The existing `LengthTruncationRecoveryProcessor` only fires on
+30	`finish_reason=length`; these loops have a normal finish reason plus a real
+31	(repeated) tool call, so nothing in the pipeline intercepted them.
+32	
+33	### Changes
+34	
+35	- `processors/norepeat_guard.py` — new `NoProgressRepeatGuard`
+36	  (`MultiHookProcessor`). Captures the Bash command in `on_before_tool`
+37	  keyed by `tool_call_id`; in `on_after_tool` builds a (command, truncated
+38	  output) signature and counts consecutive identical repeats; appends a
+39	  corrective "stop repeating / inspect real state" nudge to the tool result
+40	  at `repeat_threshold=3`, escalating at `escalate_threshold=6`. Only mutates
+41	  `event.result` (contract-safe, mirrors in-tree `CustomEditToolProcessor`).
+42	- `config.yaml` — register `NoProgressRepeatGuard` after
+43	  `CustomEditToolProcessor` in the processor pipeline via absolute `file://`
+44	  path (`repeat_threshold: 3`, `escalate_threshold: 6`, `tool_name: Bash`).
+45	
+46	### Evidence
+47	
+48	- `task_000470_f819ab03`: `exit_reason=budget_exceeded`, 80/80 steps; body
+49	  shows `CMD "cat << 'EOF' | nc -w 2 127.0.0.1 8080..."` → `OUT '(exit 0, no
+50	  output captured)'` repeated ~11x back-to-back; 31/33 total commands
+51	  identical.
+52	- `task_002108_a8cfbf2a`: `exit_reason=error`, 68 steps; last 8 assistant
+53	  tool calls byte-identical `cat > /app/frame_server/src/main.rs << 'ENDOFFILE'`.
+54	- `task_000840_b2ac4603` / `task_000908_170e5e4e`: `budget_exceeded` 80/80;
+55	  max consecutive identical (command+output) pairs measured 10 and 8.
+56	
+57	### Uncertainty
+58	
+59	The nudge redirects the agent to observe state rather than solving the task
+60	for it, so a flip depends on the agent then choosing a productive next action
+61	— capability, not harness, from that point. If the underlying tasks also have
+62	a capability gap (e.g. the Go/Rust server logic was simply wrong), breaking
+63	the loop frees budget but may not flip the task. Signal to watch: does the
+64	`budget_exceeded` count drop in R2 even if pass_rate moves less? If loops
+65	persist despite the guard, the threshold or signature (command-only vs
+66	command+output) needs tuning next round.

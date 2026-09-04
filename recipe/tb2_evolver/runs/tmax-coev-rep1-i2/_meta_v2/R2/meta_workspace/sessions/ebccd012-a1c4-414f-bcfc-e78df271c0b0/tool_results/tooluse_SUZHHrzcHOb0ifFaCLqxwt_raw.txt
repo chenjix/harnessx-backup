@@ -1,0 +1,62 @@
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+159:class CustomEditToolProcessor(MultiHookProcessor):
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+---
+class CustomSelfVerifyProcessor(MultiHookProcessor):
+    """Inject a one-shot verification prompt when the model tries to exit without tool calls.
+
+    Fires at most once per task run.  On the next no-tool-call turn it stays silent.
+    """
+
+    _singleton_group = "tb2_self_verify"
+    _order = 90
+
+    def __init__(self) -> None:
+        self._verified = False
+        self._pending_message: str = ""
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._verified = False
+        self._pending_message = ""
+        yield event
+
+    async def on_before_model(self, event: BeforeModelEvent):
+        if not self._pending_message:
+            yield event
+            return
+        msg = self._pending_message
+        self._pending_message = ""
+        # last message is a tool result (role≠user) → append exactly +1 user
+        yield dataclasses.replace(
+            event,
+            messages=event.messages + (Message(role="user", content=msg),),
+        )
+
+    async def on_after_model(self, event: ModelResponseEvent):
+        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+        if exit_intent and not self._verified:
+            self._verified = True
+            self._pending_message = _SELF_VERIFY_MSG
+            keepalive = ToolCall(
+                id=f"sv-{uuid.uuid4().hex[:8]}",
+                name=_SELF_VERIFY_TOOL,
+                input={},
+            )
+            yield dataclasses.replace(event, tool_calls=(keepalive,))
+        else:
+            yield event
+
+    async def on_before_tool(self, event: ToolCallEvent):
+        if event.tool_name == _SELF_VERIFY_TOOL:
+            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+        else:
+            yield event
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._verified = False
+        self._pending_message = ""
+        yield event
+
+
+class CustomEditToolProcessor(MultiHookProcessor):

@@ -1,0 +1,233 @@
+61	### Uncertainty
+62	
+63	The block frees budget but does not guarantee the agent finds the real
+64	fix (e.g. the nginx socket-path/permission bug on task_000028). If the
+65	cluster stays red at `budget_exceeded` even with steps freed, the gap is
+66	a capability/knowledge one (debugging reverse-proxy integration), not a
+67	loop-mechanism one — logged for a future round. Watch for any BLOCKED
+68	line landing on a legitimately-retried idempotent poll.
+69	
+70	## Round 2 — no-op: task_000117 has a broken grader
+71	
+72	<!-- journal:frontmatter
+73	round: 2
+74	timestamp: 2026-06-02T00:00:00Z
+75	hypothesis_id: h_task117_broken_grader_noop_v1
+76	levers: []
+77	predicted_affected: []
+78	gating_outcome: noop
+79	gating_attribution: noop
+80	expected_global_gain: "None — assigned focus task_000117 is graded by a verifier whose own reference-value computation crashes; no harness mechanism can flip it, and touching the pipeline only risks the 18 passing tasks."
+81	regression_risk: "None — byte-identical config copy."
+82	cost_shift: "None."
+83	rollback_trigger: "N/A (no change)."
+84	-->
+85	
+86	### Why
+87	
+88	Assigned focus was `task_000117_1b598e44` (scientific_computing: fix an
+89	OpenMP float-reduction bug in `compute_centroid.cpp`, emit a PDB centroid
+90	to `final_centroid.txt`). `exit_reason=done`, reward 0, 75 steps.
+91	
+92	The failure is **not** a harness deficiency and **not** even an
+93	achievable model gap — the task's grader is intrinsically broken. The
+94	verifier's `test_final_state.py::get_expected_centroid()` computes the
+95	reference centroid by reading `complex.pdb` with FIXED-WIDTH column
+96	slices (`float(line[30:38])`, `float(line[38:46])`, `float(line[46:54])`).
+97	But `complex.pdb` is WHITESPACE-separated with variable-width fields:
+98	`ATOM      1  CA  ALA A    1      27.885 -94.998 -44.994  1.00 ...`.
+99	So `line[38:46]` = `'5 -94.99'` (a digit from one number + a space +
+100	part of the next) and `float()` raises
+101	`ValueError: could not convert string to float: '5 -94.99'` — the crash
+102	originates INSIDE the grader's own expected-value function, before any
+103	comparison to the agent's output. No `final_centroid.txt` the agent
+104	could write can make this task pass; it is impossible as graded.
+105	
+106	Notably the agent actually produced the numerically correct answer:
+107	its centroid `[0.19137382 0.14408625 -0.12847214]` matches the
+108	whitespace-parsed Python reference (`Python centroid_x: 0.19137382…`),
+109	written to `final_centroid.txt` as `0.191374 0.144086 -0.128472`. It
+110	even explicitly discovered the fixed-width-vs-whitespace mismatch
+111	(step body: "The PDB file is not in the standard fixed-width format").
+112	The only conceivable pass path — reformatting `complex.pdb` into
+113	standard fixed-width PDB columns so the grader's slices parse — is (a)
+114	never requested by the task, (b) a domain-specific guess, and (c)
+115	exactly the task-specific knowledge SOUL forbids baking into the harness.
+116	
+117	Secondary observation (logged, not acted on): the agent burned ~60 of
+118	its 75 steps in a reasoning oscillation ("Actually, I think… Let me
+119	check… Actually…"), repeatedly re-`cat`-ing the .cpp and re-running the
+120	same 5x determinism probe, and hit `response truncated by harness`
+121	(output-token limit) several times mid-thought. `RepeatedCommandBreaker`
+122	and `LengthTruncationRecoveryProcessor` both fired; the model churned
+123	anyway. This is a model reasoning-quality gap, and even a perfect loop
+124	break cannot pass an impossible-grader task — so no mechanism is worth
+125	the regression risk to the 18 passing tasks this round.
+126	
+127	### Changes
+128	
+129	- `config.yaml` — byte-identical copy of R1 config (explicit no-op).
+130	
+131	### Evidence
+132	
+133	- `task_000117_1b598e44` result.json `final_pytest.output_tail`:
+134	  `y_sum += float(line[38:46])` → `ValueError: could not convert string
+135	  to float: '5 -94.99'`, raised inside `get_expected_centroid()` at
+136	  `/tmp/test_final_state.py:23`, called from `test_final_centroid_value`
+137	  at line 53 — i.e. the reference computation, not output validation.
+138	- `task_000117_1b598e44` messages step (probe): `Line 0: Parse error -
+139	  X='   27.88', Y='5 -94.99', Z='8 -44.99'` on the raw PDB line.
+140	- Agent's final artifact matches the correct whitespace-parse reference:
+141	  centroid.h5 `/centroid = [0.19137382 0.14408625 -0.12847214]`,
+142	  `final_centroid.txt = 0.191374 0.144086 -0.128472`.
+143	
+144	### Uncertainty
+145	
+146	If a future round's data regenerates `complex.pdb` in standard PDB
+147	fixed-width layout, the grader would work and this becomes a genuine
+148	(model-capability) task — revisit then. Until then, treat task_000117
+149	as a dead grader: do not spend evolve rounds on it.
+150	
+151	## Round 2 — optimum-selection clause on exit-intent nudge
+152	
+153	<!-- journal:frontmatter
+154	round: 2
+155	timestamp: 2026-06-02T00:00:00Z
+156	hypothesis_id: h_optimum_selection_argmin_v1
+157	levers: [control]
+158	predicted_affected: [task_000017_fed73abc]
+159	cited_candidates: [C-001]
+160	gating_outcome: pending
+161	gating_attribution: pending
+162	expected_global_gain: "Flips task_000017 and any 'return the optimum of a stochastic/iterative search' task where the agent commits the last-iterate value instead of the argmin/argmax candidate; targets the 7/7-red scientific_computing cluster via a pure strategy clause with no task literals."
+163	regression_risk: "Low — adds one gated bullet to a message that fires at most once per task on the voluntary exit-intent turn; runs that die at the step cap never see it, and no already-passing cluster depends on committing a last-iterate value."
+164	cost_shift: "Negligible-to-slightly-up: one ~120-word paragraph on <=1 turn/task, plus maybe 1-2 verification Bash calls on genuine optimum tasks."
+165	rollback_trigger: "If a previously-passing scientific_computing task newly fails and its trajectory shows the agent second-guessing a correct last-iterate optimum after reading the [NumericCrossCheck] optimum-selection bullet, drop the clause."
+166	-->
+167	
+168	### Why
+169	
+170	Assigned focus `task_000017_fed73abc` (scientific_computing) exited `done` in
+171	17/80 steps with reward 0. Every mechanical step was correct: it found the
+172	`temp *= 1.05` bug, changed it to `0.95`, confirmed `libnetcdf-dev`, compiled,
+173	ran the annealer, and `ncdump`ed the trajectory. The single error: the objective
+174	`score_position(pos) = (pos-42)^2 - 50` has its minimum at position 42, but the
+175	agent took the LAST element of the `position` array (43) — a stochastic accepted
+176	step, one index off the optimum — and never inspected the `score` variable at
+177	all. Expected primer `AGCTAGCGCGCTAGC` (pos 42); committed `GCTAGCGCGCTAGCT`
+178	(pos 43). This is a generalizable failure shape: for "return the optimum of a
+179	search" deliverables the answer is the candidate at argmin/argmax of the recorded
+180	objective, not the last iterate the search happened to log.
+181	
+182	### Changes
+183	
+184	- `processors/numeric_crosscheck_nudge.py` — copy of the R1/c3 NumericCrossCheckNudge
+185	  with one added bullet (#2): if the deliverable is the optimum of a search/
+186	  optimization (annealing, MCMC, gradient descent, genetic/random search, grid
+187	  sweep), select it by inspecting the recorded score/energy/error series and
+188	  taking the argmin/argmax candidate, and reconcile against the last-iterate
+189	  value rather than assuming the last logged value is the optimum. Same
+190	  exit-intent trigger, singleton, order 91, no tool calls.
+191	- `config.yaml` — repoint NumericCrossCheckNudge `_target_` to the new file;
+192	  updated the accompanying comment to describe the optimum-selection clause.
+193	
+194	### Evidence
+195	
+196	- `task_000017_fed73abc` result.json: `exit_reason=done`, steps=17; final_pytest
+197	  `AssertionError: Expected primer sequence 'AGCTAGCGCGCTAGC', but got
+198	  'GCTAGCGCGCTAGCT'` — a one-position shift (42 vs 43).
+199	- `task_000017` messages.json (assistant after `ncdump -v position`): "The final
+200	  position (last value in the array) is 43 ... So the optimal position is 43";
+201	  the `score` variable was never inspected. The subsequent `_tb2_self_verify`
+202	  exit-intent turn fired the existing nudge, but its "re-derive by a second
+203	  method" wording gave no reason to re-select the trajectory value, so the agent
+204	  re-verified file existence and committed 43.
+205	- Cluster context: all 7 scientific_computing tasks scored 0 this round
+206	  (task_000017/000111/000117/001035/001048/001330/001937); task_001035 (optimal
+207	  primer GCGG vs GCAT) and task_001937 (optimal grid 60 vs 50) are same-cluster
+208	  "find the optimum" deliverables, weaker corroboration (different mechanisms).
+209	
+210	### Uncertainty
+211	
+212	The clause frees the correct selection path but does not guarantee the agent
+213	executes it — it must still inspect the `score` series and take argmin. If
+214	task_000017 stays red at `done` with the same one-shift answer even with the
+215	clause present, the gap is a model-capability one (won't act on the reminder),
+216	not a harness one — log and stop spending rounds on it. Watch for any
+217	previously-passing scientific_computing task regressing after reading the new
+218	bullet.
+219	
+220	## Round 2 — spec-convention audit on exit-intent nudge
+221	
+222	<!-- journal:frontmatter
+223	round: 2
+224	timestamp: 2026-08-30T23:47:06Z
+225	hypothesis_id: h_spec_convention_audit_v1
+226	levers: [control]
+227	predicted_affected: [task_000111_cbada64a, task_001330_f5aff1f5, task_001048_14335141, task_000017_fed73abc, task_001035_26564093, task_001937_ac874115]
+228	cited_candidates: [C-010]
+229	gating_outcome: pending
+230	gating_attribution: pending
+231	expected_global_gain: "Targets the 7/7-red scientific_computing cluster whose single recurring mechanism is a self-consistent implementation off by a SPEC CONVENTION (regression axis/order, RNG seed & call order, indexing/off-by-one, integration endpoints, search stopping rule, rounding). Reorients the pre-exit nudge to an adversarial line-by-line convention audit — the correct remedy for convention bugs, where a second-method cross-check is useless because both methods share the misread convention."
+232	regression_risk: "Low — SUPERSEDES (does not add to) the R1 NumericCrossCheckNudge in the same pipeline slot, so no double-injection; fires at most once per task on the voluntary exit-intent turn, appends one user message, emits no tool call. Runs that die at the step cap never see it; non-computational tasks ignore it. No confirmed-passing cluster depends on the old wording (R1 nudge attribution still pending)."
+233	cost_shift: "Negligible-to-slightly-up: one ~250-word message on <=1 turn/task, plus possibly a few extra verification Bash calls on genuine exact-value tasks (intended — buys correctness)."
+234	rollback_trigger: "If a previously-passing scientific_computing (or any exact-value) task newly fails and its trajectory shows the agent thrashing/second-guessing a correct value after reading the [SpecConventionAudit] message, revert to the R1 nudge wording."
+235	-->
+236	
+237	### Why
+238	
+239	Assigned focus `task_000111_cbada64a` (scientific_computing) exited `done` in
+240	8/80 steps, reward 0. The agent wrote a textbook OLS + bootstrap C++ program,
+241	ran it once, got slope `m=2.5056`, verified only that `/home/user/result.txt`
+242	existed and was formatted, and committed. The grader expected `m=2.5997` — a
+243	~3.7% gap on a deterministic regression, i.e. not float noise but a spec-
+244	convention deviation the agent never audited. This is the whole cluster's
+245	shape: all 7 scientific_computing tasks scored 0, and every verifier tail shows
+246	a self-consistent implementation off by a convention (task_001330 regressed
+247	y-on-x instead of the required x-on-y and mis-ordered the seed-42 draws → m=0.048
+248	vs 0.050; task_001048 integration off by an endpoint/bin convention → 165.79 vs
+249	161.80; task_000017 primer shifted one char; task_001035/001937 wrong optimization
+250	convention). The R1 NumericCrossCheckNudge leads with "re-derive by a SECOND
+251	INDEPENDENT METHOD and compare", which is weak here: two methods that share the
+252	same misread convention agree with each other and both stay wrong. The nudge
+253	needs to lead with an adversarial, line-by-line convention re-read.
+254	
+255	### Changes
+256	
+257	- `processors/spec_convention_audit.py` — new `SpecConventionAuditNudge`, same
+258	  one-shot exit-intent trigger / singleton / order 91 / no-tool-call shape as the
+259	  R1 NumericCrossCheckNudge, but message content reoriented: step 1 forces an
+260	  adversarial re-read of every value-changing convention (axis/order, seed & RNG
+261	  call order, indexing/off-by-one, endpoint/boundary, sample size, rounding,
+262	  units), citing the exact spec sentence and code line per convention, and treats
+263	  "close but not exact" as a convention-mismatch signal; the second-method
+264	  cross-check and magnitude/sign sanity-check are retained as steps 2-3.
+265	- `config.yaml` — replace the last processor entry (NumericCrossCheckNudge) with
+266	  SpecConventionAuditNudge pointing at the new file; updated the comment to
+267	  describe the convention-audit reorientation. No other pipeline change.
+268	
+269	### Evidence
+270	
+271	- `task_000111_cbada64a` result.json: `exit_reason=done`, steps=8; final_pytest
+272	  `AssertionError: Expected m to be approx 2.5997, got 2.5056`. messages.json
+273	  final assistant: "The task is complete ... The output is: `2.5056,1.2262,3.9742,6.2925`"
+274	  — committed after one run, only file/format re-checked.
+275	- `task_001330_f5aff1f5` spec quotes "you must regress x on y (x = my + c)" and
+276	  "numpy.random.seed(42)"; final assistant "The task is complete ... m=0.048,
+277	  c=40.237"; grader: "Ensure you used numpy.random.seed(42) and the correct
+278	  parameters" — convention misread, committed with no audit.
+279	- Cluster: all 7 scientific_computing tasks reward 0 with self-consistent-but-off
+280	  values (000111/000117/000017/001035/001048/001330/001937), not crashes/format
+281	  errors.
+282	
+283	### Uncertainty
+284	
+285	The audit frees the correct diagnosis path but does not guarantee the model
+286	executes it — it must actually re-read the spec and spot the deviation. For
+287	task_000111 specifically the win is less certain (its convention deviation is
+288	subtle); the bet is cluster-level, not a single-task guarantee. Note a sibling
+289	R2 proposal (`h_optimum_selection_argmin_v1`) edits the same R1 nudge for the
+290	argmin/argmax sub-case; only one proposal is selected, so no live collision.
+291	If the cluster stays red at `done` with the same self-consistent values even
+292	with this nudge present, the residual gap is model-capability (won't act on the
+293	reminder), not harness — log and stop spending rounds on it.

@@ -1,0 +1,66 @@
+    _order = 5
+
+    def __init__(
+        self,
+        repeat_threshold: int = 2,
+        head_chars: int = _HEAD_CHARS,
+        tail_chars: int = _TAIL_CHARS,
+    ) -> None:
+        self.repeat_threshold = max(1, int(repeat_threshold))
+        self.head_chars = max(0, int(head_chars))
+        self.tail_chars = max(0, int(tail_chars))
+        self._consecutive: int = 0
+        self._pending_nudge: str = ""
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._consecutive = 0
+        self._pending_nudge = ""
+        yield event
+
+    async def on_after_model(self, event: ModelResponseEvent):
+        length_truncated = event.finish_reason == "length" and not event.tool_calls
+        if not length_truncated:
+            self._consecutive = 0
+            self._pending_nudge = ""
+            yield event
+            return
+
+        self._consecutive += 1
+        self._pending_nudge = (
+            _NUDGE_REPEAT if self._consecutive >= self.repeat_threshold else _NUDGE_FIRST
+        )
+
+        content = event.content or ""
+        if len(content) > (self.head_chars + self.tail_chars + len(_TRUNC_MARKER)):
+            collapsed = (
+                content[: self.head_chars]
+                + _TRUNC_MARKER
+                + (content[-self.tail_chars :] if self.tail_chars else "")
+            )
+            yield dataclasses.replace(event, content=collapsed)
+        else:
+            yield event
+
+    async def on_before_model(self, event: BeforeModelEvent):
+        if not self._pending_nudge:
+            yield event
+            return
+        nudge = self._pending_nudge
+        self._pending_nudge = ""
+        msgs = list(event.messages)
+        # Run-loop may already have appended a passive "continue" user message
+        # for finish_reason=length. Replacing it avoids the before_model
+        # contract warning (must not insert when last role is already user).
+        if msgs and getattr(msgs[-1], "role", None) == "user":
+            msgs[-1] = Message(role="user", content=nudge)
+            yield dataclasses.replace(event, messages=tuple(msgs))
+        else:
+            yield dataclasses.replace(
+                event,
+                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+            )
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._consecutive = 0
+        self._pending_nudge = ""
+        yield event

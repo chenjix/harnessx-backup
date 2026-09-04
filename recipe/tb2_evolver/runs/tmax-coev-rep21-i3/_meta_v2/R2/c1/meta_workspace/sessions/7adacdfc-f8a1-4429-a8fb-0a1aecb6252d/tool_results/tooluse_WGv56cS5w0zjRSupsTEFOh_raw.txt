@@ -1,0 +1,62 @@
+601	                        tr_event = ToolResultEvent(
+602	                            run_id=state.run_id,
+603	                            step_id=step_id,
+604	                            tool_name=tc_event.tool_name,
+605	                            tool_call_id=tc_event.tool_call_id,
+606	                            result=tc_event.synthetic_result,
+607	                            duration_ms=0.0,
+608	                        )
+609	                        _at_syn_events = await pipe_all(
+610	                            tr_event,
+611	                            get_procs("after_tool"),
+612	                            tracer=tracer,
+613	                            hook="after_tool",
+614	                        )
+615	                        tr_event = next(
+616	                            (e for e in reversed(_at_syn_events) if isinstance(e, ToolResultEvent)),
+617	                            tr_event,
+618	                        )
+619	                        await tracer.on_event(tr_event)
+620	                        state.add_tool_result(tr_event)
+621	                        step_tool_results.append(tr_event)
+622	                        state.add_raw_message(
+623	                            Message(
+624	                                role="tool",
+625	                                content=tr_event.result if not tr_event.error else f"Error: {tr_event.error}",
+626	                                tool_call_id=tc_event.tool_call_id,
+627	                                name=tc_event.tool_name,
+628	                            )
+629	                        )
+630	                    else:
+631	                        state.add_raw_message(
+632	                            Message(
+633	                                role="tool",
+634	                                content="Tool call not approved.",
+635	                                tool_call_id=tc_event.tool_call_id,
+636	                                name=tc_event.tool_name,
+637	                            )
+638	                        )
+639	                finally:
+640	                    # Always reset per-tool-call context vars, even if a processor raises.
+641	                    _mcp_results_ctx.reset(_mcp_ctx_token)
+642	                if _spawn_ctx_token is not None:
+643	                    try:
+644	                        from ..tools.spawn_subagent import _spawn_ctx
+645	
+646	                        _spawn_ctx.reset(_spawn_ctx_token)
+647	                    except Exception:
+648	                        pass
+649	                    _spawn_ctx_token = None
+650	
+651	            # ── 4b. Aggregate turn budget ────────────────────────────────────
+652	            # Spill the largest tool results to disk if the step total exceeds
+653	            # _TURN_BUDGET_CHARS, replacing the already-added raw messages.
+654	            if step_tool_results and not interrupt_triggered:
+655	                _new_tool_msgs = await enforce_turn_budget(
+656	                    state.raw_messages[_pre_tool_raw_idx:],
+657	                    results_dir=_step_mcp_dir,
+658	                )
+659	                state.raw_messages[_pre_tool_raw_idx:] = _new_tool_msgs
+660	                state.messages[_pre_tool_raw_idx:] = _new_tool_msgs
+
+[Showing lines 601–660 of 981 total. Use offset=660 to read the next section.]

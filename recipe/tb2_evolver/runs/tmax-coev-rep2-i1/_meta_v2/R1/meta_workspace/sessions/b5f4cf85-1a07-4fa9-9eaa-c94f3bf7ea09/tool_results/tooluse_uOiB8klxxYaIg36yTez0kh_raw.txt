@@ -1,0 +1,90 @@
+=== task_000028_7fe033ac final_pytest ===
+domain system_administration
+importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+/tmp/test_final_state.py:6: in <module>
+    import requests
+E   ModuleNotFoundError: No module named 'requests'
+=========================== short test summary info ============================
+ERROR ../../tmp/test_final_state.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.08s
+
+==================================== ERRORS ====================================
+_____________________ ERROR collecting test_final_state.py _____________________
+ImportError while importing test module '/tmp/test_final_state.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+/tmp/test_final_state.py:6: in <module>
+    import requests
+E   ModuleNotFoundError: No module named 'requests'
+=========================== short test summary info ============================
+ERROR ../../tmp/test_final_state.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.08s
+
+=== task_000140_01c78b42 final_pytest ===
+domain system_administration
+========= short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_no_lingering_service_processes - A...
+1 failed, 2 passed in 3.17s
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+_____________________ test_no_lingering_service_processes ______________________
+
+    def test_no_lingering_service_processes():
+        # Give the system a brief moment to ensure the process is fully terminated
+        time.sleep(1)
+    
+        # Check if vm_service is running
+        try:
+            output = subprocess.check_output(["pgrep", "-f", "vm_service"], text=True)
+            pids = output.strip().split()
+>           assert not pids, f"Lingering vm_service processes found: {pids}"
+E           AssertionError: Lingering vm_service processes found: ['339', '590', '790']
+E           assert not ['339', '590', '790']
+
+/tmp/test_final_state.py:40: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_no_lingering_service_processes - A...
+1 failed, 2 passed in 3.17s
+
+=== task_001090_c61c71f2 final_pytest ===
+domain system_administration
+____________
+
+    def test_pid_file_and_process():
+        pid_file = "/home/user/admin_tool/pid.txt"
+        assert os.path.isfile(pid_file), f"{pid_file} does not exist."
+    
+        with open(pid_file, 'r') as f:
+            pid_str = f.read().strip()
+    
+        assert pid_str.isdigit(), "pid.txt does not contain a valid integer PID."
+    
+        pid = int(pid_str)
+    
+        # Check if process is running
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            assert False, f"Process with PID {pid} is not running."
+    
+        # Check if process is named monitor
+        try:
+            with open(f"/proc/{pid}/comm", 'r') as f:
+                comm = f.read().strip()
+>           assert comm == "monitor", f"Process name is '{comm}', expected 'monitor'."
+E           AssertionError: Process name is 'bash', expected 'monitor'.
+E           assert 'bash' == 'monitor'
+E             
+E             - monitor
+E             + bash
+
+/tmp/test_final_state.py:99: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_pid_file_and_process - AssertionEr...
+1 failed, 5 passed in 0.03s
+

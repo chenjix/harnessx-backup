@@ -1,0 +1,168 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""VerifierHttpDepReminder — surface the external-HTTP-verifier dependency gap.
+4	
+5	Closes a systemic, structural failure mode observed across the Tmax evolve
+6	set: a whole cluster of tasks ask the agent to stand up a *service* (an HTTP
+7	server behind nginx, a UNIX-socket HTTP backend, a Python/C++/Rust web
+8	microservice) that an **external automated verifier** then exercises by
+9	making HTTP requests against it. In the TB2/Tmax sandbox the verifier runs
+10	in a *separate phase* against the container's final state, using the
+11	container's system Python — and its ``test_final_state.py`` almost always
+12	does ``import requests``.
+13	
+14	The base images in this task family ship without the ``requests`` package,
+15	so the verifier's test module fails to even *collect*::
+16	
+17	    ImportError while importing test module '/tmp/test_final_state.py'.
+18	    E   ModuleNotFoundError: No module named 'requests'
+19	    Interrupted: 1 error during collection
+20	
+21	This is a hard, reward=0 failure *regardless of whether the agent's service
+22	is correct* — e.g. one observed trajectory served ``HTTP/1.1 200 OK`` with
+23	the right body through nginx and still scored 0 purely because the verifier
+24	could not import ``requests``.
+25	
+26	Why the agent never fixes it on its own:
+27	  * the verifier test files do not exist during the agent phase, so the
+28	    agent cannot see that ``import requests`` is required (a structural fact
+29	    of the sandbox topology — see the tb2-playbook);
+30	  * ``requests`` is not needed by the agent's *own* work (it tests its
+31	    service with ``curl`` / ``/dev/tcp``), so it has no local signal to
+32	    install it;
+33	  * outbound ``pip install`` *does* succeed in this environment (observed:
+34	    numpy/scipy/maturin all pulled from PyPI), so the fix is available — the
+35	    agent just doesn't know to apply it.
+36	
+37	This processor injects ONE runtime reminder, on the first step, only when the
+38	task description signals that an external HTTP verifier will probe a service
+39	the agent must build. The reminder tells the agent to ensure the standard
+40	Python HTTP client library is importable in the *system* interpreter before
+41	finishing, so the external verifier's test module can be collected. The
+42	*action* stays agent-authored (the agent runs the install via Bash); the
+43	processor only delivers the missing knowledge at the right moment.
+44	
+45	Generalisation: the trigger keys on generic service/verifier phrasing
+46	("automated verifier", "make HTTP requests", "HTTP server/service/endpoint",
+47	"listen on ... :PORT", nginx/uvicorn/gunicorn/proxy_pass, UNIX-socket
+48	servers), not on any task id, path, or constant. It fires for any
+49	build-a-service-the-verifier-calls task and is a no-op for pure
+50	file/data/query tasks that no external HTTP verifier touches.
+51	"""
+52	
+53	from __future__ import annotations
+54	
+55	import dataclasses
+56	import re
+57	
+58	from harnessx.core.events import (
+59	    Message,
+60	    StepStartEvent,
+61	    TaskEndEvent,
+62	    TaskStartEvent,
+63	)
+64	from harnessx.core.processor import MultiHookProcessor
+65	
+66	# Two independent signal groups. We require (verifier-intent) AND (service-shape)
+67	# so we only fire on "build a service that an external verifier will call over
+68	# HTTP" tasks, never on generic scripting/data tasks.
+69	_VERIFIER_RE = re.compile(
+70	    r"automated\s+verifier|external\s+verifier|\bverifier\s+will\b|"
+71	    r"will\s+(?:make|send|issue)\s+(?:http|get|post|requests?)|"
+72	    r"grader\s+will|test\s+harness\s+will",
+73	    re.IGNORECASE,
+74	)
+75	_SERVICE_RE = re.compile(
+76	    r"\bhttp\s+(?:server|service|endpoint|api)\b|\bweb\s+(?:server|service|api)\b|"
+77	    r"microservice|reverse\s+proxy|proxy_pass|\bnginx\b|\buvicorn\b|\bgunicorn\b|"
+78	    r"\bflask\b|\bfastapi\b|\bunix\s+socket\b|\bsock\b|"
+79	    r"listen(?:ing)?\s+on\b|127\.0\.0\.1:|localhost:\d",
+80	    re.IGNORECASE,
+81	)
+82	
+83	_REMINDER = (
+84	    "[Environment / verifier note] This task asks you to stand up a service "
+85	    "that an EXTERNAL automated verifier will exercise by making HTTP "
+86	    "requests. That verifier runs AFTER you stop, in a separate phase, using "
+87	    "this container's system Python interpreter — and its test module "
+88	    "typically does `import requests`. If the `requests` package is not "
+89	    "importable in the system Python, the verifier's tests fail to even load "
+90	    "(ModuleNotFoundError during collection) and the task scores zero even if "
+91	    "your service is perfectly correct.\n"
+92	    "Before you finish, make the final container state robust for that "
+93	    "verifier:\n"
+94	    "  1. Verify the standard Python HTTP client is importable in the SYSTEM "
+95	    "interpreter, e.g. `python3 -c 'import requests'` (outbound pip installs "
+96	    "do work here — `pip3 install requests` if it is missing). Install it "
+97	    "system-wide, NOT inside a project virtualenv the verifier won't use.\n"
+98	    "  2. Make sure your service is actually listening and reachable at the "
+99	    "exact host:port / socket path stated in the task, and that any "
+100	    "background process you launched stays alive after you exit.\n"
+101	    "This is about environment robustness, not the task's core logic — spend "
+102	    "one command on it, then continue solving the task."
+103	)
+104	
+105	
+106	class VerifierHttpDepReminder(MultiHookProcessor):
+107	    """Inject a one-time reminder about the external HTTP verifier's Python deps.
+108	
+109	    Fires at most once per task, on the first step whose accumulated context
+110	    matches BOTH an external-verifier signal AND a build-a-service signal in
+111	    the task description. Contract-safe: appends exactly one ``user`` message
+112	    to ``event.messages`` / ``event.raw_messages`` on the single step it fires.
+113	
+114	    Parameters
+115	    ----------
+116	    dep_module:
+117	        The client library name surfaced in the reminder (default ``requests``
+118	        — the module the observed verifier test modules import). Kept as a
+119	        knob so future rounds can widen it without editing code.
+120	    """
+121	
+122	    _singleton_group = "verifier_http_dep_reminder"
+123	    _order = 7  # after TaskTimeReminder (6), before compaction/self-verify
+124	
+125	    def __init__(self, dep_module: str = "requests") -> None:
+126	        self.dep_module = str(dep_module)
+127	        self._fired = False
+128	        self._task_text = ""
+129	
+130	    async def on_task_start(self, event: TaskStartEvent):
+131	        self._fired = False
+132	        self._task_text = event.task_description or ""
+133	        yield event
+134	
+135	    def _matches(self, text: str) -> bool:
+136	        return bool(_VERIFIER_RE.search(text) and _SERVICE_RE.search(text))
+137	
+138	    async def on_step_start(self, event: StepStartEvent):
+139	        if self._fired:
+140	            yield event
+141	            return
+142	
+143	        # Prefer the task description captured at task start; fall back to the
+144	        # first user message visible in the current context if it was empty.
+145	        text = self._task_text
+146	        if not text and event.messages:
+147	            for m in event.messages:
+148	                role = getattr(m, "role", None)
+149	                if role == "user":
+150	                    text = getattr(m, "content", "") or ""
+151	                    break
+152	
+153	        if not text or not self._matches(text):
+154	            yield event
+155	            return
+156	
+157	        self._fired = True
+158	        msg = Message(role="user", content=_REMINDER)
+159	        yield dataclasses.replace(
+160	            event,
+161	            messages=event.messages + (msg,),
+162	            raw_messages=event.raw_messages + (msg,),
+163	        )
+164	
+165	    async def on_task_end(self, event: TaskEndEvent):
+166	        self._fired = False
+167	        self._task_text = ""
+168	        yield event

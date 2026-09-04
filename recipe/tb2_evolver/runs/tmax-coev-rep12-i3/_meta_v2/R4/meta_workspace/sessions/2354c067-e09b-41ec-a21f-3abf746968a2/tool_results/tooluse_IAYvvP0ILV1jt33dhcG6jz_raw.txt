@@ -1,0 +1,214 @@
+1	# SPDX-License-Identifier: MIT
+2	"""Budget-aware verifier test-dependency guard for Tmax / TB2-style agents.
+3	
+4	Motivation
+5	----------
+6	On Terminal-Bench 2 the task agent and the external verifier run in the **same
+7	container** but in **separate phases**: the agent works, exits, and only then
+8	the verifier's ``test_final_state.py`` is dropped into ``/tmp`` and executed
+9	against the container's final state using the *same* system Python.
+10	
+11	A recurring, purely-mechanical structural-zero failure mode is that the verifier
+12	module does ``import requests`` (the near-universal way to probe a running HTTP
+13	endpoint) — but ``requests`` (or ``pyyaml``) is not preinstalled in some images.
+14	pytest then aborts at *collection* time:
+15	
+16	    ImportError while importing test module '/tmp/test_final_state.py'
+17	    ModuleNotFoundError: No module named 'requests'
+18	    Interrupted: 1 error during collection
+19	
+20	The agent's work can be entirely correct and the task still scores 0 because
+21	the test file cannot even be *collected*. The agent has no way to infer this
+22	dependency: it is a property of the hidden verifier, not of the task.
+23	
+24	The gap this closes vs. the existing exit-intent guard
+25	------------------------------------------------------
+26	The repository already ships an exit-intent-only ``VerifierDepGuardProcessor``
+27	that installs these deps the first time the model tries to end the turn with no
+28	tool calls. But a large cluster of tasks never reach exit intent — they exhaust
+29	the step budget (``exit_reason=budget_exceeded`` at step==max_steps) while still
+30	mid-work. On those tasks the exit-intent guard **never fires**, the verifier
+31	hits ``ModuleNotFoundError`` at collection, and even a correct-enough final
+32	container state scores a guaranteed structural 0.
+33	
+34	This processor closes that hole: it fires the same dep-ensure Bash call on the
+35	**first turn at or after a budget-approach step threshold** (a configurable
+36	margin below ``task.max_steps``), in addition to exit intent — whichever comes
+37	first. So budget-bound runs still get the verifier's common test-deps installed
+38	before the step budget is exhausted.
+39	
+40	Design / safety
+41	---------------
+42	* Fires **at most once per task**.
+43	* Injects a **real Bash tool call** (the run loop executes it, so it is
+44	  mechanical and cannot be narrated past) that, for each package in a tiny
+45	  allow-list of *test-harness* libraries, checks whether the module already
+46	  imports and, only if missing, attempts a quiet ``pip install``. Everything is
+47	  guarded with ``|| true`` so the call can never fail the run, and it is a no-op
+48	  on any task where the packages are already present (the common case).
+49	* Only injects on a turn where the model produced **no tool calls of its own**,
+50	  so it never clobbers a real action the model was about to take. If the model
+51	  is still issuing commands at the budget-approach step, the guard waits for the
+52	  next no-tool-call turn (or exit intent).
+53	* The allow-list contains only ubiquitous *verification* libraries used by
+54	  external test harnesses (HTTP client, config parser) — no task ids, ports,
+55	  paths, or process names. It closes a *class* of structural-zero failures, not
+56	  one task; installing an already-present package is a no-op so passing tasks
+57	  are unaffected.
+58	
+59	Wiring
+60	------
+61	Uses its own singleton group and a high ``_order`` (96) so it runs *after* the
+62	existing exit-intent dep guard (order 95) and the TB2 self-verify processor
+63	(order 90). Whichever guard fires first marks the shared work done via its own
+64	flag; because they are distinct singletons they each fire at most once, and the
+65	Bash command is idempotent, so even in the unlikely event both fire the second
+66	is a pure no-op (all imports already succeed).
+67	"""
+68	
+69	from __future__ import annotations
+70	
+71	import dataclasses
+72	import uuid
+73	
+74	from harnessx.core.events import (
+75	    BeforeModelEvent,
+76	    Message,
+77	    ModelResponseEvent,
+78	    StepStartEvent,
+79	    TaskEndEvent,
+80	    TaskStartEvent,
+81	    ToolCall,
+82	)
+83	from harnessx.core.processor import MultiHookProcessor
+84	
+85	
+86	# Ubiquitous test-harness libraries an external verifier may import to exercise
+87	# a solution. Kept deliberately tiny and generic — HTTP probing + config
+88	# parsing are the common shapes. (module_name, pip_name) pairs.
+89	_DEFAULT_DEPS = (
+90	    ("requests", "requests"),
+91	    ("yaml", "pyyaml"),
+92	)
+93	
+94	
+95	def _build_ensure_cmd(deps: tuple[tuple[str, str], ...]) -> str:
+96	    parts = [
+97	        "echo '=== VERIFIER DEP CHECK (auto, budget-aware) ==='",
+98	    ]
+99	    for mod, pkg in deps:
+100	        parts.append(
+101	            f"python3 -c 'import {mod}' 2>/dev/null "
+102	            f"&& echo 'ok: {mod}' "
+103	            f"|| (echo 'installing: {pkg}'; "
+104	            f"(pip install -q {pkg} || pip3 install -q {pkg} "
+105	            f"|| python3 -m pip install -q {pkg}) 2>/dev/null; "
+106	            f"python3 -c 'import {mod}' 2>/dev/null "
+107	            f"&& echo 'installed: {mod}' || echo 'unavailable: {mod}')"
+108	        )
+109	    parts.append("echo '=== END DEP CHECK ==='")
+110	    return "; ".join(parts) + " || true"
+111	
+112	
+113	_ACK_MSG = (
+114	    "Above is an automatic environment check that ensured common verification "
+115	    "libraries (HTTP client / config parsers) are importable — an external "
+116	    "test harness may rely on them. This does not change your task; if any "
+117	    "line reports 'unavailable', that library simply could not be installed. "
+118	    "Continue with your final verification and finish when the task is "
+119	    "genuinely complete."
+120	)
+121	
+122	
+123	class BudgetAwareVerifierDepGuardProcessor(MultiHookProcessor):
+124	    """Ensure common verifier test-deps are importable before the step budget
+125	    is exhausted (not only at exit intent).
+126	
+127	    Triggers the dep-ensure Bash call on the first no-tool-call turn once the
+128	    step counter has reached ``max_steps - budget_margin`` (budget approach),
+129	    OR on exit intent — whichever comes first. Fires at most once per task.
+130	    """
+131	
+132	    _singleton_group = "tb2_verifier_dep_guard_budget"
+133	    _order = 96  # after the exit-intent guard (95) and self-verify (90)
+134	
+135	    def __init__(
+136	        self,
+137	        deps: tuple[tuple[str, str], ...] | None = None,
+138	        budget_margin: int = 6,
+139	        fallback_max_steps: int = 80,
+140	    ) -> None:
+141	        self._deps = tuple(tuple(d) for d in deps) if deps else _DEFAULT_DEPS
+142	        self._budget_margin = max(1, int(budget_margin))
+143	        self._fallback_max_steps = max(1, int(fallback_max_steps))
+144	        self._done = False
+145	        self._pending_message = ""
+146	        self._cur_step = 0
+147	        self._max_steps = self._fallback_max_steps
+148	
+149	    async def on_task_start(self, event: TaskStartEvent):
+150	        self._done = False
+151	        self._pending_message = ""
+152	        self._cur_step = 0
+153	        self._max_steps = self._fallback_max_steps
+154	        yield event
+155	
+156	    async def on_step_start(self, event: StepStartEvent):
+157	        # Track the current step index and the task's step budget so the
+158	        # after-model hook can tell how close we are to budget exhaustion.
+159	        self._cur_step = int(getattr(event, "step_id", self._cur_step) or 0)
+160	        task = getattr(event, "task", None)
+161	        ms = getattr(task, "max_steps", None)
+162	        if isinstance(ms, int) and ms > 0:
+163	            self._max_steps = ms
+164	        yield event
+165	
+166	    def _budget_approaching(self) -> bool:
+167	        return self._cur_step >= (self._max_steps - self._budget_margin)
+168	
+169	    async def on_after_model(self, event: ModelResponseEvent):
+170	        if self._done:
+171	            yield event
+172	            return
+173	
+174	        no_tool_call = not event.tool_calls
+175	        exit_intent = event.finish_reason in ("end_turn", "stop") and no_tool_call
+176	
+177	        # Fire on: (a) exit intent (matches the classic guard), or
+178	        #          (b) budget approaching AND this turn has no tool call of its
+179	        #              own (so we never clobber a real action).
+180	        should_fire = exit_intent or (self._budget_approaching() and no_tool_call)
+181	
+182	        if should_fire:
+183	            self._done = True
+184	            self._pending_message = _ACK_MSG
+185	            ensure = ToolCall(
+186	                id=f"vdgb-{uuid.uuid4().hex[:8]}",
+187	                name="Bash",
+188	                input={"command": _build_ensure_cmd(self._deps)},
+189	            )
+190	            yield dataclasses.replace(event, tool_calls=(ensure,))
+191	        else:
+192	            yield event
+193	
+194	    async def on_before_model(self, event: BeforeModelEvent):
+195	        if not self._pending_message:
+196	            yield event
+197	            return
+198	        msg = self._pending_message
+199	        self._pending_message = ""
+200	        # Only append when the last message is not already a user turn, to
+201	        # respect the before_model contract (no +1 when last role is user).
+202	        msgs = event.messages
+203	        if msgs and getattr(msgs[-1], "role", None) == "user":
+204	            yield event
+205	            return
+206	        yield dataclasses.replace(
+207	            event,
+208	            messages=msgs + (Message(role="user", content=msg),),
+209	        )
+210	
+211	    async def on_task_end(self, event: TaskEndEvent):
+212	        self._done = False
+213	        self._pending_message = ""
+214	        yield event

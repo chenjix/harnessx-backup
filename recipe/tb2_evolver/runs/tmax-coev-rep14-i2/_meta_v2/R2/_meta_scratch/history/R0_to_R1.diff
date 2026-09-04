@@ -1,0 +1,20 @@
+--- R0
++++ R1
+@@ -49,2 +49,17 @@
+   _hook_: '*'
++# Break ACTION-level repetition loops (identical Bash calls repeated with no
++# state progress). Complements LengthTruncationRecoveryProcessor, which only
++# catches finish_reason=length narration loops. Strategy 1 (exact name+inputs)
++# warns at 3 identical consecutive calls and raises LoopDetectedError at 5,
++# yielding a clean `loop_detected` exit instead of wasting the whole budget.
++# Strategy 2 (name-only) is disabled here (threshold set very high) because the
++# agent has only the Bash tool, so >=8 consecutive Bash calls is normal and
++# would produce constant false-positive warnings.
++- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
++  window_size: 12
++  warn_threshold: 3
++  threshold: 5
++  name_warn_threshold: 999
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

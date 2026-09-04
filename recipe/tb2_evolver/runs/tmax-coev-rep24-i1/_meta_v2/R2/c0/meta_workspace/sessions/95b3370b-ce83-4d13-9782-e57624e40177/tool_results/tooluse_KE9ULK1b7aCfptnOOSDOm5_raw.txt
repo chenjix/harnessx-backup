@@ -1,0 +1,160 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""UnmetRequirementExitGuard — block a self-sabotaging exit.
+4	
+5	Motivating failure shape (TB2, `no_tool_calls` exits): the agent builds a
+6	working solution, then talks itself into shipping a *knowingly incomplete*
+7	deliverable — most commonly leaving a required output at the wrong path or in
+8	the wrong form because it hit a secondary technical wall (e.g. a filename that
+9	shadows a stdlib module, so the script "can't" be named as required). The
+10	agent verbalises the unmet requirement ("The only issue is that the script
+11	can't be named operator.py ...") and then exits anyway, scoring 0 on a
+12	final-state existence check.
+13	
+14	The existing ``CustomSelfVerifyProcessor`` fires a generic checklist on the
+15	*first* exit regardless of content, so once that one-shot has been spent the
+16	agent is free to exit with an acknowledged blocker. This processor is
+17	orthogonal: it fires (at most once per task) only when the exit turn's text
+18	*admits* an unresolved required-deliverable conflict. In that case it injects
+19	one focused nudge telling the agent that a required deliverable must be
+20	satisfied at its exact specified path/form — the secondary obstacle must be
+21	worked around, not used as a reason to abandon the requirement.
+22	
+23	Design constraints (mirrors CustomSelfVerifyProcessor):
+24	- one-shot per task (never nags a clean exit, never loops);
+25	- keeps the +1-user-message contract (append exactly one user message on the
+26	  next ``on_before_model`` after a tool result);
+27	- content-gated: only fires when acknowledged-blocker phrasing is present, so
+28	  exits that don't admit a problem pass straight through.
+29	"""
+30	
+31	from __future__ import annotations
+32	
+33	import dataclasses
+34	import re
+35	import uuid
+36	
+37	from harnessx.core.events import (
+38	    BeforeModelEvent,
+39	    Message,
+40	    ModelResponseEvent,
+41	    TaskEndEvent,
+42	    TaskStartEvent,
+43	    ToolCall,
+44	    ToolCallEvent,
+45	)
+46	from harnessx.core.processor import MultiHookProcessor
+47	
+48	_GUARD_TOOL = "_tb2_unmet_requirement_guard"
+49	_GUARD_ACK = "Requirement-reconciliation check initiated. See the message above."
+50	
+51	# Phrases that signal the agent is exiting while consciously leaving a required
+52	# deliverable unmet or in the wrong place/form. Kept deliberately general so it
+53	# generalises across task domains, not tuned to any one task's wording.
+54	_ACK_BLOCKER_RE = re.compile(
+55	    r"(?:"
+56	    r"the only (?:issue|problem|remaining)"
+57	    r"|only (?:issue|problem) is"
+58	    r"|however[, ].{0,60}(?:task|require|need|expect|must)"
+59	    r"|but the task (?:require|specif|expect|want|say)"
+60	    r"|task (?:specifically |explicitly )?(?:require|specif|expect|want|say)"
+61	    r"|(?:can'?t|cannot|couldn'?t|could not|unable to|was unable|failed to) "
+62	    r"(?:be named|name|create|produce|write|place|put|generate|run it at|satisfy)"
+63	    r"|(?:should|must|needs? to|has to) be (?:at|named|located|called|placed)"
+64	    r"|(?:instead of|rather than) (?:the )?(?:required|requested|expected|specified)"
+65	    r"|(?:renamed|moved|placed) .{0,40}(?:instead|because|since|as a workaround)"
+66	    r"|does not (?:exist|match|meet)|doesn'?t (?:exist|match|meet)"
+67	    r"|not (?:at|in) the (?:required|requested|expected|specified|exact) (?:path|location|name)"
+68	    r"|left (?:it |the file |the output )?(?:at|as|in)"
+69	    r")",
+70	    re.IGNORECASE,
+71	)
+72	
+73	_NUDGE = """\
+74	Before you exit: your last message acknowledges a requirement you have NOT
+75	fully satisfied (a required output left at the wrong path/name/form, or a
+76	requirement you decided you "couldn't" meet). A secondary obstacle is NOT a
+77	license to ship an incomplete deliverable — the final-state check grades the
+78	EXACT deliverable the task specified, and a correct solution placed at the
+79	wrong path scores zero.
+80	
+81	Do this now, then continue:
+82	
+83	1. Re-read the task and list every required output with its EXACT path/name
+84	   and form. Write it down.
+85	2. For each requirement you deprioritised because of a secondary problem:
+86	   satisfy the requirement AND work around the obstacle. They are almost never
+87	   mutually exclusive. Examples of workarounds instead of abandoning a path:
+88	   - A required script filename that shadows a module only breaks when it is
+89	     *imported/executed from its own directory*; you can still place the file
+90	     at the required path and run/verify it in a way that avoids the shadow
+91	     (run from a different working directory, invoke via an absolute path from
+92	     elsewhere, or run a copy under a safe name while the required file stays
+93	     put).
+94	   - A "file must be here but my tool wrote it there" conflict is solved by
+95	     copying/moving the artifact to the required path, not by changing the
+96	     requirement.
+97	3. Confirm with `ls -lh` (and, where relevant, contents) that the deliverable
+98	   now exists at the EXACT required path/name.
+99	
+100	Fix it, verify, then finish. If — after genuinely attempting the workaround —
+101	a requirement is truly impossible in this environment, state precisely why and
+102	what you tried.\
+103	"""
+104	
+105	
+106	class UnmetRequirementExitGuard(MultiHookProcessor):
+107	    """One-shot: intercept an exit that admits an unmet required deliverable."""
+108	
+109	    _singleton_group = "tb2_unmet_requirement_guard"
+110	    _order = 91  # just after CustomSelfVerifyProcessor (_order=90)
+111	
+112	    def __init__(self) -> None:
+113	        self._fired = False
+114	        self._pending_message: str = ""
+115	
+116	    async def on_task_start(self, event: TaskStartEvent):
+117	        self._fired = False
+118	        self._pending_message = ""
+119	        yield event
+120	
+121	    async def on_before_model(self, event: BeforeModelEvent):
+122	        if not self._pending_message:
+123	            yield event
+124	            return
+125	        msg = self._pending_message
+126	        self._pending_message = ""
+127	        yield dataclasses.replace(
+128	            event,
+129	            messages=event.messages + (Message(role="user", content=msg),),
+130	        )
+131	
+132	    async def on_after_model(self, event: ModelResponseEvent):
+133	        exit_intent = (
+134	            event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+135	        )
+136	        text = event.content or ""
+137	        if exit_intent and not self._fired and _ACK_BLOCKER_RE.search(text):
+138	            self._fired = True
+139	            self._pending_message = _NUDGE
+140	            keepalive = ToolCall(
+141	                id=f"urg-{uuid.uuid4().hex[:8]}",
+142	                name=_GUARD_TOOL,
+143	                input={},
+144	            )
+145	            yield dataclasses.replace(event, tool_calls=(keepalive,))
+146	        else:
+147	            yield event
+148	
+149	    async def on_before_tool(self, event: ToolCallEvent):
+150	        if event.tool_name == _GUARD_TOOL:
+151	            yield dataclasses.replace(
+152	                event, approved=False, synthetic_result=_GUARD_ACK
+153	            )
+154	        else:
+155	            yield event
+156	
+157	    async def on_task_end(self, event: TaskEndEvent):
+158	        self._fired = False
+159	        self._pending_message = ""
+160	        yield event

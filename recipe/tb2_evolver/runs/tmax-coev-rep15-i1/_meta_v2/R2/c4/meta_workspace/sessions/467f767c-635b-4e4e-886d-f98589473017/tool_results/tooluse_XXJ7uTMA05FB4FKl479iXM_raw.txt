@@ -1,0 +1,163 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatedCommandLoopBreaker — break identical-Bash-command repetition loops.
+4	
+5	Closes a systemic ``budget_exceeded`` failure mode observed across multiple
+6	tmax tasks: the model issues the **same non-trivial shell command verbatim**
+7	turn after turn (e.g. a recursive-CTE query that always times out, an mpi4py
+8	snippet that always errors, an extractor invocation that never captures
+9	output). Each repeat returns the same failure, the model re-narrates "let me
+10	try a fundamentally different approach", then re-issues the identical command.
+11	The step / wall-clock budget drains with zero progress.
+12	
+13	The existing ``LengthTruncationRecoveryProcessor`` only fires on
+14	``finish_reason == "length"`` with no tool call, so it never sees these
+15	tool-calling loops. The generic ``LoopDetectionProcessor`` *would* catch them,
+16	but its exact-fingerprint strategy also counts degenerate **empty-argument**
+17	tool calls (``{}``) as identical repeats — and at least one *passing* task
+18	recovers after ~20 consecutive empty calls, so a naive low-threshold raise
+19	would regress it.
+20	
+21	This processor is deliberately narrow:
+22	
+23	* It fingerprints **only substantive Bash commands** — non-empty, above a
+24	  minimum length. Empty-argument calls, verification pings, and trivially
+25	  short commands are treated as neutral interludes: they neither increment the
+26	  loop counter nor reset it. This is what protects the "recovers after many
+27	  empty calls" passing pattern.
+28	* On the ``warn_threshold``-th consecutive identical substantive command it
+29	  appends a single decisive redirect to that command's result, telling the
+30	  model to stop re-issuing the exact command and either change the command
+31	  materially or write the required output / finish.
+32	* On the ``raise_threshold``-th consecutive identical substantive command it
+33	  raises :class:`LoopDetectedError`, which the run loop converts into a clean
+34	  ``exit_reason == "loop_detected"`` (not ``error``) and recovers the best
+35	  available output — reclaiming the remaining step and wall-clock budget
+36	  instead of burning it on a command that will never succeed.
+37	
+38	Content-agnostic: names no task, path, query, or constant.
+39	"""
+40	
+41	from __future__ import annotations
+42	
+43	import dataclasses
+44	import hashlib
+45	
+46	from harnessx.core.events import (
+47	    TaskEndEvent,
+48	    TaskStartEvent,
+49	    ToolCallEvent,
+50	    ToolResultEvent,
+51	)
+52	from harnessx.core.processor import MultiHookProcessor
+53	from harnessx.core.runloop import LoopDetectedError
+54	
+55	
+56	_WARN = (
+57	    "\n\n[RepeatedCommandBreaker] STOP. You have now issued this EXACT command "
+58	    "{count} times in a row and it keeps failing the same way. Re-issuing the "
+59	    "identical command will not help. Do ONE of the following in your next turn, "
+60	    "and change the command materially: (a) run a small diagnostic to inspect the "
+61	    "current state (list files, show sizes, read a few lines) so you can decide a "
+62	    "genuinely different next step; (b) if the required output file(s) already "
+63	    "exist and are correct, stop; (c) write the required output with a "
+64	    "substantively different command. Do not repeat the command above verbatim."
+65	)
+66	
+67	
+68	class RepeatedCommandLoopBreaker(MultiHookProcessor):
+69	    """Detect and break loops of an identical, non-trivial Bash command.
+70	
+71	    Args:
+72	        warn_threshold:  Consecutive-identical count that injects a redirect
+73	                         into the tool result (default 3).
+74	        raise_threshold: Consecutive-identical count that raises
+75	                         :class:`LoopDetectedError` to end the task cleanly
+76	                         (default 5).
+77	        min_command_chars: Commands shorter than this are treated as trivial
+78	                         interludes and never counted (default 12).
+79	        tool_name:       Only commands issued through this tool are fingerprinted
+80	                         (default ``"Bash"``).
+81	    """
+82	
+83	    _singleton_group = "tmax_repeated_command_breaker"
+84	    _order = 21  # after the generic loop detector's slot; before compaction is irrelevant here
+85	
+86	    def __init__(
+87	        self,
+88	        warn_threshold: int = 3,
+89	        raise_threshold: int = 5,
+90	        min_command_chars: int = 12,
+91	        tool_name: str = "Bash",
+92	    ) -> None:
+93	        self.warn_threshold = max(2, int(warn_threshold))
+94	        self.raise_threshold = max(self.warn_threshold + 1, int(raise_threshold))
+95	        self.min_command_chars = max(0, int(min_command_chars))
+96	        self.tool_name = tool_name
+97	        self._last_fp: str = ""
+98	        self._run: int = 0
+99	        # tool_call_id -> fingerprint (or "" for a neutral/skipped call)
+100	        self._pending: dict[str, str] = {}
+101	
+102	    # ------------------------------------------------------------------ helpers
+103	    def _fingerprint(self, event: ToolCallEvent) -> str:
+104	        """Return a fingerprint for a *substantive* command, else "" (neutral)."""
+105	        if event.tool_name != self.tool_name:
+106	            return ""
+107	        cmd = ""
+108	        ti = event.tool_input
+109	        if isinstance(ti, dict):
+110	            raw = ti.get("command", "")
+111	            if isinstance(raw, str):
+112	                cmd = raw
+113	        cmd = cmd.strip()
+114	        if len(cmd) < self.min_command_chars:
+115	            return ""
+116	        return hashlib.sha256(cmd.encode("utf-8", "replace")).hexdigest()[:16]
+117	
+118	    def _reset(self) -> None:
+119	        self._last_fp = ""
+120	        self._run = 0
+121	        self._pending.clear()
+122	
+123	    # -------------------------------------------------------------------- hooks
+124	    async def on_task_start(self, event: TaskStartEvent):
+125	        self._reset()
+126	        yield event
+127	
+128	    async def on_before_tool(self, event: ToolCallEvent):
+129	        self._pending[event.tool_call_id] = self._fingerprint(event)
+130	        yield event
+131	
+132	    async def on_after_tool(self, event: ToolResultEvent):
+133	        fp = self._pending.pop(event.tool_call_id, "")
+134	
+135	        # Neutral / skipped calls (empty args, trivial, non-Bash) are interludes:
+136	        # do not increment, do not reset. This preserves the loop count across
+137	        # verification pings while never firing on degenerate empty-call runs.
+138	        if not fp:
+139	            yield event
+140	            return
+141	
+142	        if fp == self._last_fp:
+143	            self._run += 1
+144	        else:
+145	            self._last_fp = fp
+146	            self._run = 1
+147	
+148	        if self._run >= self.raise_threshold:
+149	            raise LoopDetectedError(
+150	                f"Identical '{self.tool_name}' command repeated {self._run} times "
+151	                "consecutively without progress"
+152	            )
+153	
+154	        if self._run >= self.warn_threshold:
+155	            warn = _WARN.format(count=self._run)
+156	            yield dataclasses.replace(event, result=(event.result or "") + warn)
+157	            return
+158	
+159	        yield event
+160	
+161	    async def on_task_end(self, event: TaskEndEvent):
+162	        self._reset()
+163	        yield event

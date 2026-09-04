@@ -1,0 +1,55 @@
+n messages: 40
+ROLE: user
+You are a site administrator responsible for managing user accounts and provisioning virtual machines. You have inherited a partially written Go service that is supposed to act as an internal network API to provision user VMs using a QEMU mock script. However, the service fails to run correctly due to network routing issues in the Go code, and when it does run, it fails to execute the provisioning script properly because of environment differences (a PATH issue).
+
+Your task is to fix the service, its deployment script, and create a CI/CD test script to verify it.
+
+1. **Fix the Go Service (`/home/user/app/main.go`)**:
+   - The Go application should listen on TCP port `8080`.
+   - It needs an HTTP POST endpoint at `/provision` that accepts a form value named `username`.
+   - Upon receiving a request, the handler must execute the external command `qemu-mock` with the `username` as its single argument.
+   - Wait for the command to complete and return an HTTP 200 status.
+
+2. **Fix the Service Supervisor Script (`/home/user/start_service.sh`)**:
+   - This script acts as our service lifecycle manager (init script).
+   - It currently builds the Go app and runs it in the background, but the Go app fails to find `qemu-mock` when executed.
+   - The `qemu-mock` binary is located in `/home/user/bin/`. You must modify `start_service.sh` to ensure the Go application's environment has `/home/user/bin/` prioritized in its `PATH`.
+   - The script must save the running Go application's process ID (PID) to `/home/user/service.pid`.
+
+3. **Construct a CI/CD Test Pipeline (`/home/user/test_pipeline.sh`)**:
+   - Create a bash script that automates the deployment and testing process.
+   - It must execute `/home/user/start_service.sh`.
+   - It must wait for the service to start listening on port 8080 (e.g., using a short sleep or a loop).
+   - It must use `curl` to send a POST request to `http://localhost:8080/provision` with the form data `username=admin_alice`.
+   - Finally, it must gracefully stop the Go service by reading `/home/user/service.pid` and sending a SIGTERM kill signal to that PID.
+
+**Success Criteria**:
+If everything is configured correctly, running `bash /home/user/test_pipeline.sh` will successfully build the service, start it, trigger the network request, and gracefully shut it down. The `qemu-mock` script (which we have already created for you) will automatically write `PROVISIONED_VM_FOR: admin_alice` to `/home/user/vm_setup.log`. We will verify the contents of
+----
+ROLE: assistant
+Let me analyze the task and understand what needs to be done:
+
+1. Fix the Go Service (`/home/user/app/main.go`):
+   - Listen on TCP port 8080
+   - HTTP POST endpoint at `/provision`
+   - Accept form value `username`
+   - Execute `qemu-mock` with the username as argument
+   - Return HTTP 200
+
+2. Fix the Service Supervisor Script (`/home/user/start_service.sh`):
+   - Build the Go app
+   - Run it in background
+   - Ensure `/home/user/bin/` is in PATH for the Go app
+   - Save PID to `/home/user/service.pid`
+
+3. Create CI/CD Test Pipeline (`/home/user/test_pipeline.sh`):
+   - Execute `/home/user/start_service.sh`
+   - Wait for service to start on port 8080
+   - Send POST request with `username=admin_alice`
+   - Gracefully stop the service using SIGTERM
+
+Let me start by exploring the current state of the files.
+
+
+I'll start by exploring the current state of the files to understand what needs to be fixed.
+----

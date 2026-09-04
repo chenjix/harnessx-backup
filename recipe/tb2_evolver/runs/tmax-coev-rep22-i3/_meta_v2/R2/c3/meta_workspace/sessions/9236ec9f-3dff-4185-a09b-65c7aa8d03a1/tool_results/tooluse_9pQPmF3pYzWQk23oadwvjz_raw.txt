@@ -1,0 +1,96 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""Numeric / interpretation cross-check self-verify processor for TB2.
+4	
+5	Motivation (evolve-set evidence, structural — carries no task-specific
+6	constants):
+7	
+8	A recurring failure shape on quantitative-output tasks is the agent
+9	implementing *one* self-consistent interpretation of an ambiguous spec,
+10	producing a plausible-but-wrong scalar, and calling ``end_turn`` after only
+11	a shallow spec-compliance re-read.  The verifier then rejects the value.
+12	
+13	Examples of the shape (all `exit_reason=done`, no correctness self-doubt):
+14	  - fixed-width column parse that grabbed the wrong byte window
+15	  - a count / boundary read off-by-one (e.g. N vs N-1 frames, grid edges)
+16	  - a computed statistic that differs from the reference by more than the
+17	    tolerance despite textbook-correct code
+18	
+19	The base ``CustomSelfVerifyProcessor`` already injects a one-shot checklist
+20	when the model tries to exit, but that checklist only asks the agent to
+21	re-read the spec and confirm files exist — it gives no *technique* for
+22	catching a wrong numeric result.  This subclass keeps the identical exit
+23	interception mechanism (fire-once, keepalive tool call, +1 user message)
+24	and only swaps in a checklist that adds an explicit
+25	independent-recomputation / interpretation-audit step for tasks whose
+26	output is a computed value.
+27	
+28	The added guidance is a general verification *strategy* — recompute the key
+29	quantity by a second independent method/tool and reconcile any mismatch,
+30	audit data-completeness (were all input rows parsed?), and re-examine
+31	index / boundary / unit interpretation.  It contains no task ids, file
+32	paths, constants, or algorithms lifted from any training task.
+33	"""
+34	
+35	from __future__ import annotations
+36	
+37	from benchmarks.terminal_bench_2.harness import CustomSelfVerifyProcessor
+38	
+39	
+40	_NUMERIC_SELF_VERIFY_MSG = """\
+41	Before finishing, run through this checklist — do not skip any step even if you already verified:
+42	
+43	1. **Re-read the task description now.** Does your solution address every requirement, including edge cases, accuracy thresholds, and exact output format?
+44	
+45	2. **Check every required output file exists at its exact path:**
+46	```bash
+47	ls -lh /path/to/each/required/output/file
+48	```
+49	A script that ran without errors does NOT guarantee the file was written. Run `ls` explicitly for each required file.
+50	
+51	3. **Inspect the actual file contents** — `cat` or `head` each output file and confirm the values are semantically correct, not just that the file exists or is non-empty.
+52	
+53	4. **If any required output is a computed value (a number, count, statistic, coordinate, or metric), do not trust a single implementation.** A program that compiles and runs can still produce a confidently-wrong answer.
+54	   - **Recompute independently.** Reproduce the key quantity with a second, unrelated method or tool (e.g. a short `python3`/`awk`/`numpy` one-liner) and confirm it matches your program's output. If the two disagree, at least one is wrong — reconcile before finishing.
+55	   - **Audit input completeness.** Confirm your program consumed *every* input record — print the count of parsed rows/items and check it equals what the task states (off-by-one and dropped-last-line bugs silently shift results).
+56	   - **Re-examine interpretation.** Re-check any ambiguous choice you made: array/loop bounds and off-by-one indices, inclusive-vs-exclusive ranges, units and scale, which column/field was read, and how ties or edge cases are handled. State the interpretation you chose and confirm it is the one the task describes.
+57	   - **Sanity-check magnitude.** Ask whether the value is physically/plausibly reasonable given the described data; an answer that is obviously off in scale usually signals a parsing or indexing bug, not noise.
+58	
+59	5. **Validate your verification method.** Did your test actually exercise the real behavior? Tests that only check syntax, importability, or exit code 0 on a trivial case are NOT valid — they can pass even on a broken implementation.
+60	
+61	6. **For running services:** confirm they are still alive and reachable right now, not just that they started earlier.
+62	
+63	Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+64	**SUCCESS: task complete. Output files confirmed at [list each required path].**\
+65	"""
+66	
+67	
+68	class NumericSelfVerifyProcessor(CustomSelfVerifyProcessor):
+69	    """CustomSelfVerifyProcessor variant with a numeric cross-check step.
+70	
+71	    Identical exit-interception mechanics as the base class (fires at most
+72	    once per task, injects a keepalive tool call plus one user message on the
+73	    first no-tool-call exit intent).  The only behavioral difference is the
+74	    text of the injected checklist, which adds an explicit
+75	    independent-recomputation / interpretation-audit step for computed-value
+76	    outputs.
+77	    """
+78	
+79	    _singleton_group = "tb2_self_verify"
+80	
+81	    async def on_after_model(self, event):  # type: ignore[override]
+82	        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+83	        if exit_intent and not self._verified:
+84	            # Reuse the base mechanism but with the enriched message. We set
+85	            # the pending message ourselves, then delegate to the base to emit
+86	            # the keepalive tool call; the base only overwrites _pending_message
+87	            # if it *also* sees the exit intent, so we set it after the call.
+88	            async for out in super().on_after_model(event):
+89	                # Base has now set self._verified=True and stashed the default
+90	                # message; replace it with the numeric-aware variant.
+91	                if self._pending_message:
+92	                    self._pending_message = _NUMERIC_SELF_VERIFY_MSG
+93	                yield out
+94	        else:
+95	            async for out in super().on_after_model(event):
+96	                yield out

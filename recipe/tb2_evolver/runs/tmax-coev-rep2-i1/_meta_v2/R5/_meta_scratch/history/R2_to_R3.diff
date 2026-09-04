@@ -1,0 +1,29 @@
+--- R2
++++ R3
+@@ -41,2 +41,26 @@
+   - 0.9
++  _hook_: '*'
++# R3: step-budget pressure signal for the budget_exceeded-at-max_steps cluster.
++# Root cause (R2 trajectories): six tasks (010/118/958/1031/1032/1321) exhaust
++# the full 80-step budget through varied-but-unproductive exploration and are
++# cut off (exit_reason=budget_exceeded) BEFORE writing/verifying the required
++# deliverables. R1's de-prime + R2's breaker already broke the identical-command
++# loops (max consecutive identical calls now 3-5, down from 21-33), so the
++# residual is not a mechanical loop but a lack of any convergence signal. The
++# TaskTimeReminderProcessor above is instantiated WITHOUT timeout_seconds, so it
++# no-ops (fired 0x on all six); and CustomSelfVerifyProcessor only fires on a
++# voluntary exit, which the cut-off cluster never reaches. This processor counts
++# its own steps, reads the hard budget from task.max_steps (no hardcoded 80), and
++# at 0.75/0.90 of the budget appends ONE "stop exploring, write+verify required
++# deliverables now" user message (each band once). Pareto-safe: 29/30 passing
++# tasks finished in 8-37 steps, far below the 0.75 band; only task_001818 (69
++# steps, passing) reaches it and the nudge reinforces convergence rather than
++# redirecting. Warn-only, never raises. Contract-safe: mirrors
++# TaskTimeReminderProcessor — appends at most +1 user message to messages and
++# raw_messages in on_step_start; never touches system prompt / tool results.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R3/processors/step_budget_reminder.py::StepBudgetReminderProcessor
++  warn_at:
++  - 0.75
++  - 0.9
++  default_max_steps: 80
+   _hook_: '*'

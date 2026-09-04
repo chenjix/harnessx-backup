@@ -1,0 +1,75 @@
+1	# Evolve journal — tmax-ev9b50-20260814-203834
+2	
+3	## Round 1 — break max_tokens repetition loop
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-14T21:30:00Z
+8	hypothesis_id: h_length_recovery_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_000015_89886d8d, task_000118_3043e92d, task_000264_ab8c7253, task_001032_1adaccb9, task_001321_658ce4a8, task_001652_86e1d185]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=31/50; +2/-1 gained=task_001264_9f4ca84a,task_001652_86e1d185 lost=task_001818_b251e5ea; score 0.6200 >= incumbent(mean) 0.6000 - tol 0.0400
+14	expected_global_gain: "Flip some of the 7 agent_error tasks (largest homogeneous failing cluster, cross-domain) by breaking the degenerate max_tokens repetition loop"
+15	regression_risk: "None expected on the 30 passing tasks — processor is a no-op on any turn that ends normally or with a tool call; only fires on finish_reason=length with no tool call"
+16	cost_shift: "Strongly negative — eliminates 160K-330K-char runaway output blobs and repeated max_tokens generations on the crashed tasks"
+17	rollback_trigger: "If R2 regresses any of the 30 R0-passing tasks, or the agent_error count does not drop, revert the processor"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 30/50 (60%). Of the 20 failures, 7 share one exact mechanism:
+23	`status=agent_error`, `agent.exit_reason=error`, and very high `elapsed_s`
+24	(352–1160s). Every one of these 7 tasks — and no others — contains the run
+25	loop's user nudge "Your previous response was cut off by the token limit.
+26	Please continue from where you left off." The mechanism: the small model
+27	(Qwen3.5-9B) enters a degenerate repetition loop, emitting the same narration
+28	paragraph hundreds of times in the assistant `content` field with no tool
+29	call until it hits `max_tokens` (`finish_reason=length`). The run loop's
+30	`runloop.py` then appends a *passive* "please continue" nudge, which merely
+31	re-primes the same runaway generation. The cycle repeats until the container
+32	errors out. This cuts across system_administration, data_querying,
+33	software_engineering, security, and data_processing domains — a harness
+34	deficiency, not a domain-knowledge gap.
+35	
+36	The remaining 13 failures are heterogeneous capability gaps (wrong recursive
+37	SQL / index creation in task_000264, wrong output paths, domain logic errors)
+38	with no shared harness lever — no harness fix; skip.
+39	
+40	### Changes
+41	
+42	- `processors/length_recovery.py` — new `LengthTruncationRecoveryProcessor`
+43	  (Control). `on_after_model`: on `finish_reason=length` with no tool call,
+44	  collapse runaway `content` to a head+tail excerpt and arm a corrective
+45	  nudge; reset streak on any normal/tool-calling turn. `on_before_model`:
+46	  append exactly one `user` message redirecting the model to stop narrating
+47	  and issue a single concrete Bash command, escalating on consecutive
+48	  truncations.
+49	- `config.yaml` — register the processor (`_order=5`, early in the
+50	  after-model chain) via absolute `file://` path, between
+51	  `TaskTimeReminderProcessor` and `CompactionProcessor`.
+52	
+53	### Evidence
+54	
+55	- `task_000015_89886d8d` step 25: assistant `content` length = 286,609,
+56	  `tool_calls=0` — the same "Actually, let me try a different approach ..."
+57	  paragraph repeated hundreds of times to the token cap; followed by the
+58	  "cut off by the token limit" nudge then another over-length turn → error.
+59	- `task_000264_ab8c7253` step 37: `content` length = 328,921, `tool_calls=0`;
+60	  two "cut off ... continue" nudges precede `agent.exit_reason=error`.
+61	- `task_001032_1adaccb9` step 45: `content` length = 166,154, `tool_calls=0`;
+62	  nudge-then-relapse → agent_error.
+63	- Perfect correlation: the 7 tasks containing the "cut off by the token limit"
+64	  nudge are exactly the 7 `status=agent_error` failures.
+65	
+66	### Uncertainty
+67	
+68	Breaking the loop resumes productive tool calls, but does not guarantee the
+69	underlying task is then solved correctly (some of the 7 also had upstream
+70	logic gaps, e.g. task_000264's SQL). Expected outcome is partial recovery —
+71	crashes become normal runs, and a subset flip to pass. If R2 shows no drop in
+72	agent_error count, the redirect nudge is not strong enough / fires too late —
+73	revert and reconsider (e.g. hard-terminate the turn on repeat rather than
+74	nudge). Watched signal: agent_error count and pass-rate on the 30 R0-passing
+75	tasks.

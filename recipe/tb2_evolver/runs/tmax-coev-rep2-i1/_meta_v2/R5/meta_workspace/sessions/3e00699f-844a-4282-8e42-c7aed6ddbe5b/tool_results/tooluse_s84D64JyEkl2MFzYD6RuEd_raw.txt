@@ -1,0 +1,51 @@
+=== TASK 028 desc ===
+You are an infrastructure engineer automating the provisioning of a video analysis microservice. We have a partially complete setup that is currently failing. An Nginx reverse proxy is configured to expose the service, but it is returning a 502 Bad Gateway because it is pointing to the wrong upstream UNIX socket path.
+
+Your objectives:
+1. **Fix Nginx Routing**: Inspect and fix the Nginx configuration at `/app/nginx.conf`. It currently routes requests to an incorrect UNIX socket. Update it to point to `/tmp/video_backend.sock`.
+2. **Fix and Update C++ Backend**: 
+   - We have a basic C++ HTTP socket server at `/app/server.cpp`. It is currently configured to listen on the wrong socket. Update it to listen on `/tmp/video_backend.sock`.
+   - Update the C++ code to analyze the video file located at `/app/video.mp4`. The server must dynamically calculate the exact total number of video frames in this file (you may use `ffprobe`, which is preinstalled, by shelling out from C++).
+   - The server must respond to any HTTP GET request with `HTTP/1.1 200 OK` and the body containing ONLY the integer frame count of the video.
+3. **Compile and Run**: Compile the C++ server into an executable at `/app/server`. Run it in the background. Its standard output and standard error must be appended to `/app/server.log`.
+4. **Log Configuration**: Create a logrotate configuration file at `/app/logrotate
+
+=== last 4 msgs ===
+ROLE tool
+=== 6. Checking running processes ===
+root         119  0.0  0.0      0     0 ?        Z    20:02   0:00 [server] <defunct>
+root         205  0.0  0.0      0     0 ?        Z    20:03   0:00 [server] <defunct>
+root         251  0.0  0.0  10084  1624 ?        Ss   20:04   0:00 nginx: master process nginx -c /app/nginx.conf
+nobody       252  0.0  0.0  10304  3248 ?        S    20:04   0:00 nginx: worker process
+root         354  0.0  0.0   6068  3512 ?        S    20:05   0:00 /app/server
+
+=== 7. Checking socket ===
+srwxrwxrwx 1 root root 0 Aug 17 20:05 /tmp/video_backend.sock
+
+=== 8. Testing HT
+ROLE assistant
+  TOOL _tb2_self_verify {}
+All requirements are verified:
+
+1. **Nginx Routing**: `/app/nginx.conf` points to `/tmp/video_backend.sock` ✓
+2. **C++ Backend**: 
+   - Listens on `/tmp/video_backend.sock` ✓
+   - Uses ffprobe to get frame count ✓
+   - Returns `HTTP/1.1 200 OK` with body containing only the integer frame count (150) ✓
+3. **Compile and Run**: 
+   - `/app/server` executable exists ✓
+   - Running in background ✓
+   - Output appended to `/app/server.log` ✓
+4. **Log Configuration**: `/app/logrotate.conf` configured with daily rotation, 3 backups, compress ✓
+5. **Start Services**: 
+   - Nginx running with `/app/ngin
+ROLE tool
+Verification check initiated. See the message above for instructions.
+ROLE assistant
+The task is complete. All requirements have been verified:
+
+1. **Nginx Routing**: Fixed `/app/nginx.conf` to point to `/tmp/video_backend.sock`
+2. **C++ Backend**: Updated `/app/server.cpp` to listen on `/tmp/video_backend.sock`, use ffprobe to get frame count, and return only the integer frame count
+3. **Compile and Run**: Compiled to `/app/server`, running in background with output to `/app/server.log`
+4. **Log Configuration**: Created `/app/logrotate.conf` with daily rotation, 3 backups, and compression
+5. **Start Services**: Nginx started with the fixed configuration, listening on `127.0.0

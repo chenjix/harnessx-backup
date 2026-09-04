@@ -1,0 +1,85 @@
+1	# Candidates — R5
+2	
+3	## Candidate C-005
+4	[lens: failure | lever: configuration | intent: corrective]
+5	
+6	Lower `LengthTruncationRecoveryProcessor.repeat_threshold` from 2 to 1 so
+7	the hard escalation nudge ("STOP … respond with a SINGLE short Bash tool
+8	call that writes the required output file(s) to the path named in the
+9	task") fires on the **first** max_tokens truncation instead of waiting for
+10	a second consecutive one.
+11	
+12	- Tasks affected (corrective, ≥2 distinct, same mechanism):
+13	  - task_000730_265f23f6 — 18 truncation events; final_pytest fails on
+14	    `os.path` / `test_solution_file` = the required solution file was
+15	    never created (agent burned budget on truncated analysis, exited
+16	    empty-handed).
+17	  - task_001028_5bc8bc70 — 7 truncation events; final_pytest fails on
+18	    `test_success_file_exists_and_correct` = required file absent.
+19	  - (secondary, cost-only) task_000032 (16), task_000796 (15),
+20	    task_001016 (8) — same truncation-loop mechanism, capability-bound
+21	    content so cost-savings not flips.
+22	- Signal: run-loop injects "Your previous response was cut off by the
+23	  token limit. Please continue…" once per `finish_reason=length &
+24	  no tool_calls` step. Grep of R4 messages.json:
+25	  - FAILING tasks carry 2–18 of these events each
+26	    (task_000730=18, task_000032=16, task_000796=15, task_001016=8,
+27	    task_001028=7, task_001044=4, task_000908=3, task_000506=2).
+28	  - PASSING tasks carry essentially zero (only task_000267 = 1).
+29	  So truncation-without-tool-call is a near-perfect FAIL discriminator;
+30	  a nudge gated on it cannot meaningfully touch the passing set.
+31	- Verified (Read, R4 transcripts):
+32	  - task_001044 messages.json indices 3/7/14/22 are user turns with the
+33	    raw "cut off by the token limit … continue" text; each is preceded by
+34	    an assistant turn with `tool_calls=False` and a long analysis tail —
+35	    i.e. the exact `finish_reason=length & not tool_calls` condition.
+36	  - task_000730 final_pytest tail: `os.path` AssertionError on
+37	    `test_solution_file` — file never written before the cap.
+38	  - task_001028 final_pytest tail: `test_success_file_exists_and_correct`
+39	    AssertionError — file absent.
+40	  - Current escalation (`repeat_threshold=2`) means truncation #1 gets
+41	    only the SOFT nudge; the hard "write the required output now" nudge is
+42	    delayed to #2. On tasks that reach the step cap empty-handed, pulling
+43	    the file-write directive one turn earlier is the cheapest shot at
+44	    landing a best-effort partial before budget_exceeded.
+45	- Why Configuration not Control/Instruction: the mechanism (detect
+46	  length-truncation, collapse content, inject an escalating file-write
+47	  nudge) already exists in `LengthTruncationRecoveryProcessor`; only its
+48	  firing point is mistuned. A new Control processor would duplicate it; an
+49	  Instruction rule ("write a partial before exiting") already exists in
+50	  the R4 system prompt and did not fire at the decisive step — the gap is
+51	  *when* the existing mechanical nudge escalates, a pure knob.
+52	- Why not touch the command/content-repetition guards instead: full-command
+53	  repeat counts show passing iterative tasks reach 5–6 identical commands
+54	  (task_000197=6, task_000716=5) — indistinguishable from the failing
+55	  loops at any threshold that would fire, so tightening them carries real
+56	  regression risk. The truncation signal has NO such overlap with the
+57	  passing set, making it the safe lever.
+58	- Retroactive check (A-corrective): partial-yes — for task_000730 /
+59	  task_001028 the file was never written; firing the "write the required
+60	  output to its exact path now" directive on truncation #1 (instead of #2)
+61	  gives ~1 extra early action turn aimed squarely at creating the file,
+62	  which is the single failing assertion. Not guaranteed (content may still
+63	  be wrong) but it is the specific missing step. For the capability-bound
+64	  truncation tasks it is cost-savings, not a flip.
+65	- expected_global_gain: recovers the slice of the truncation-loop /
+66	  budget_exceeded cluster whose only failing assertion is
+67	  "required output file does not exist" (≥2 tasks: task_000730,
+68	  task_001028) by pulling the existing file-write escalation one turn
+69	  earlier; hardens every truncation-heavy task toward writing a
+70	  best-effort partial before the step cap.
+71	- regression_risk: the escalated nudge is stronger and now fires one turn
+72	  sooner, but ONLY on `finish_reason=length & no tool_calls` — a condition
+73	  that appears ~0 times on passing tasks (task_000267=1 event, still
+74	  passed). No passing task reaches the step cap. Worst case: one extra
+75	  short, action-forcing user turn on a task that truncated once and would
+76	  have recovered anyway — bounded, non-blocking, +0 message-contract
+77	  insertions (it replaces the run-loop's continue message).
+78	- cost_shift: net negative (cheaper). Forcing a single short Bash call on
+79	  the first truncation removes the runaway re-generation turns that
+80	  currently burn 7–18 steps per truncation-heavy task; pure no-op on the
+81	  non-truncating (all passing) tasks.
+82	- rollback_trigger: R6 pass_rate below R4 (22/50) beyond run-to-run noise,
+83	  OR a previously-passing task regresses with the length-recovery nudge
+84	  visible in-transcript, OR synthetic replay shows exit_reason=error
+85	  attributable to the earlier-firing nudge. Revert `repeat_threshold` to 2.

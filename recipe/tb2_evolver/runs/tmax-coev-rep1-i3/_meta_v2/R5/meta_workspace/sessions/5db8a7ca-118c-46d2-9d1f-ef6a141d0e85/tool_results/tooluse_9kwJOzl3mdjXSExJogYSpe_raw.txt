@@ -1,0 +1,31 @@
+=== keys ===
+['task_id', 'domain', 'reward', 'status', 'elapsed_s', 'api_base', 'model', 'image', 'container', 'initial_pytest', 'agent', 'final_pytest']
+=== full example ===
+{
+  "task_id": "task_001321_658ce4a8",
+  "domain": "data_processing",
+  "reward": 0,
+  "status": "ok",
+  "elapsed_s": 55.7,
+  "api_base": "http://127.0.0.1:8305/v1",
+  "model": "qwen35-9b-tmax-coev-r1",
+  "image": "tmax-eval:task_001321_658ce4a8-bee12cc67a8d",
+  "container": "40959088f21b7728a39ffe9cf7efdf489f666c1e4e68a001236221d644841fdf",
+  "initial_pytest": {
+    "passed": true,
+    "rc": 0,
+    "output_tail": "..                                                                       [100%]\n2 passed in 0.01s\n"
+  },
+  "agent": {
+    "steps": 16,
+    "finished": "no_tool_calls",
+    "error": null,
+    "exit_reason": "done",
+    "backend": "harnessx"
+  },
+  "final_pytest": {
+    "passed": false,
+    "rc": 1,
+    "output_tail": "re_clean_codes ___________________________\n\n    def test_f1_score_clean_codes():\n        \"\"\"Evaluate the F1 score of extracted product codes against the gold standard.\"\"\"\n        gold_path = \"/tmp/gold_codes.txt\"\n        pred_path = \"/home/user/clean_codes.txt\"\n    \n        assert os.path.exists(gold_path), f\"Gold standard file missing: {gold_path}\"\n        assert os.path.exists(pred_path), f\"Output file missing: {pred_path}. Ensure you redirected the pipeline output correctly.\"\n    \n        with open(gold_path, \"r\") as f:\n            gold = set(f.read().split())\n    \n        with open(pred_path, \"r\") as f:\n            pred = set(f.read().split())\n    \n        if not pred and not gold:\n            f1 = 1.0\n        elif not pred or not gold:\n            f1 = 0.0\n        else:\n            tp = len(gold & pred)\n            fp = len(pred - gold)\n            fn = len(gold - pred)\n    \n            precision = tp / (tp + fp) if (tp + fp) > 0 else 0\n            recall = tp / (tp + fn) if (tp + fn) > 0 else 0\n    \n            if precision + recall == 0:\n                f1 = 0.0\n            else:\n                f1 = 2 * (precision * recall) / (precision + recall)\n    \n>       assert f1 >= 0.95, (\n            f\"F1 Score {f1:.4f} is less than the required threshold of 0.95. \"\n            f\"(Precision: {precision:.4f}, Recall: {recall:.4f}, TP: {tp}, FP: {fp}, FN: {fn}). \"\n            \"Extracted codes do not match the expected pattern or validation rules accurately.\"\n        )\nE       AssertionError: F1 Score 0.0003 is less than the required threshold of 0.95. (Precision: 1.0000, Recall: 0.0001, TP: 6, FP: 0, FN: 41046). Extracted codes do not match the expected pattern or validation rules accurately.\nE       assert 0.00029226947245360223 >= 0.95\n\n/tmp/test_final_state.py:45: AssertionError\n=========================== short test summary info ============================\nFAILED ../../tmp/test_final_state.py::test_f1_score_clean_codes - AssertionEr...\n1 failed, 1 passed in 0.03s\n"
+  }
+}

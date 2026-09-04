@@ -1,0 +1,100 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""OcrQualityGuardProcessor for Tmax (and TB2-style) agents.
+4	
+5	Closes a systemic failure mode observed across multiple image-OCR tasks:
+6	the agent runs ``tesseract`` on a PNG whose file carries **no DPI metadata**.
+7	Tesseract emits ``Warning: Invalid resolution 0 dpi. Using 70 instead.`` and
+8	then OCRs the image at a degraded ~70 dpi, producing garbled text
+9	(``0``/``O`` confusion, ``1``/``l``/``I`` confusion, dropped characters,
+10	mangled symbols). The agent, unaware of the standard remediation, thrashes
+11	with contrast/threshold/PSM tweaks — which do not touch the resolution
+12	problem — then gives up and *guesses* the content from context. The guess is
+13	close but wrong on the exact tokens that matter (a schema mapping, an SSH
+14	key, a CRC polynomial constant), so the verifier fails on an exact-match /
+15	accuracy check.
+16	
+17	The fix is a general, benchmark-agnostic mechanism, not task knowledge:
+18	when a tool result shows the low-resolution warning from an OCR engine, the
+19	processor appends a **one-time** hint describing the standard OCR-quality
+20	remediation (rescale the image to a higher DPI before OCR, or pass an
+21	explicit ``--dpi``). The hint contains no task-specific constants, paths, or
+22	answers — it only names a technique that applies to *any* low-DPI OCR input.
+23	
+24	Trigger is purely observable in tool output (the engine's own warning), so
+25	the processor is silent on every task that does not hit this failure shape.
+26	"""
+27	
+28	from __future__ import annotations
+29	
+30	import dataclasses
+31	import re
+32	
+33	from harnessx.core.events import (
+34	    TaskStartEvent,
+35	    TaskEndEvent,
+36	    ToolResultEvent,
+37	)
+38	from harnessx.core.processor import MultiHookProcessor
+39	
+40	# Tesseract (and some other engines) print this when the image file has no
+41	# embedded resolution metadata. It is the canonical signal that OCR quality
+42	# is being silently capped far below what the source pixels support.
+43	_LOW_DPI_RE = re.compile(
+44	    r"invalid\s+resolution\s+\d+\s*dpi|estimating\s+resolution\s+as\s+\d+",
+45	    re.IGNORECASE,
+46	)
+47	
+48	_OCR_QUALITY_HINT = (
+49	    "\n\n[OcrQualityGuard] The OCR engine reported that the source image has "
+50	    "no embedded resolution, so it fell back to a very low DPI. At that DPI "
+51	    "the recognised text is usually garbled on exactly the characters that "
+52	    "matter (0/O, 1/l/I, S/5, punctuation, sub/superscripts), and no amount "
+53	    "of contrast/threshold/PSM tweaking recovers it — the pixels are simply "
+54	    "being read too small. The standard remediation is to RESCALE the image "
+55	    "to a higher effective DPI before OCR (e.g. upsample it ~3-4x with a "
+56	    "high-quality resample filter, or re-save it with an explicit high DPI, "
+57	    "then re-run OCR at ~300 dpi). Do this and re-run OCR before you rely on "
+58	    "the extracted text; if a value looks ambiguous, cross-check it against "
+59	    "any sample/expected data in the task. Do not guess the exact tokens from "
+60	    "garbled output — an exact-match check will fail on a near-miss."
+61	)
+62	
+63	
+64	class OcrQualityGuardProcessor(MultiHookProcessor):
+65	    """Detect low-DPI OCR fallback in tool output and nudge the standard fix.
+66	
+67	    Fires at most ``max_hints`` times per task (default once): the goal is to
+68	    surface the remediation technique the first time the failure shape
+69	    appears, not to spam it on every subsequent OCR call.
+70	    """
+71	
+72	    _singleton_group = "ocr_quality_guard"
+73	    _order = 31  # near CustomEditToolProcessor (30); both append to tool result
+74	
+75	    def __init__(self, max_hints: int = 1) -> None:
+76	        self.max_hints = max(1, int(max_hints))
+77	        self._hints_emitted: int = 0
+78	
+79	    async def on_task_start(self, event: TaskStartEvent):
+80	        self._hints_emitted = 0
+81	        yield event
+82	
+83	    async def on_after_tool(self, event: ToolResultEvent):
+84	        if self._hints_emitted >= self.max_hints:
+85	            yield event
+86	            return
+87	        text = (event.result or "")
+88	        if event.error:
+89	            text = text + "\n" + str(event.error)
+90	        if text and _LOW_DPI_RE.search(text):
+91	            self._hints_emitted += 1
+92	            yield dataclasses.replace(
+93	                event, result=(event.result or "") + _OCR_QUALITY_HINT
+94	            )
+95	            return
+96	        yield event
+97	
+98	    async def on_task_end(self, event: TaskEndEvent):
+99	        self._hints_emitted = 0
+100	        yield event

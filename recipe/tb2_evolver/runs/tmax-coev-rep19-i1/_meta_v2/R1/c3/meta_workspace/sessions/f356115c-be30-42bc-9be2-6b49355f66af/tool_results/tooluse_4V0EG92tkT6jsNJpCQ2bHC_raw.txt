@@ -1,0 +1,72 @@
+56	                (
+57	                    f"_pid=$(cat {_PGID_FILE} 2>/dev/null);"
+58	                    f' [ -n "$_pid" ] || exit 0;'
+59	                    f' kill -15 -"$_pid" 2>/dev/null;'
+60	                    f" sleep 1;"
+61	                    f' kill -9 -"$_pid" 2>/dev/null;'
+62	                    f" rm -f {_PGID_FILE}"
+63	                ),
+64	                timeout=10.0,
+65	                workdir=self._workspace_path,
+66	            )
+67	        except Exception:
+68	            pass
+69	
+70	    async def exec(
+71	        self,
+72	        command: str,
+73	        cwd: str | None = None,
+74	        timeout: float = 30.0,
+75	    ) -> str:
+76	        workdir = cwd or self._workspace_path
+77	        try:
+78	            rc, out = await asyncio.to_thread(
+79	                docker_env.exec_in,
+80	                self._container,
+81	                command,
+82	                timeout=float(timeout),
+83	                workdir=workdir,
+84	            )
+85	        except Exception:
+86	            try:
+87	                await asyncio.shield(self.kill_running())
+88	            except Exception:
+89	                pass
+90	            raise
+91	        text = out or ""
+92	        if rc != 0 and f"(exit {rc})" not in text:
+93	            text = f"{text}\n(exit {rc})" if text else f"(exit {rc}, no output captured)"
+94	        if not text:
+95	            text = f"(exit {rc}, no output captured)"
+96	        return self._trim(text)
+97	
+98	
+99	class TmaxDockerSandboxProvider(SandboxProvider):
+100	    """Provider for an already-running Tmax Docker container."""
+101	
+102	    def __init__(
+103	        self,
+104	        container: str,
+105	        workspace_path: str = "/home/user",
+106	        output_limit: int | None = _OUTPUT_LIMIT,
+107	    ) -> None:
+108	        self._container = container
+109	        self._workspace_path = workspace_path
+110	        self._output_limit = output_limit
+111	
+112	    async def acquire(
+113	        self,
+114	        hint_id: str | None = None,
+115	        workspace: "Workspace | None" = None,
+116	    ) -> TmaxDockerSandbox:
+117	        return TmaxDockerSandbox(
+118	            self._container,
+119	            workspace_path=self._workspace_path,
+120	            output_limit=self._output_limit,
+121	        )
+122	
+123	    async def release(self, sandbox: Sandbox) -> None:
+124	        pass
+125	
+
+[Showing lines 56–125 of 130 total. Use offset=125 to read the next section.]

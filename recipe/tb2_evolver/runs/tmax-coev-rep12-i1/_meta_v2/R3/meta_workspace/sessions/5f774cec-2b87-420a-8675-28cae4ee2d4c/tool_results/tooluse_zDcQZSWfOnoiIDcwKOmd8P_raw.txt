@@ -1,0 +1,62 @@
+471	                    )
+472	                )
+473	
+474	            if not before_event.skip_model:
+475	                state.add_raw_message(
+476	                    Message(
+477	                        role="assistant",
+478	                        content=model_event.content,
+479	                        tool_calls=model_event.tool_calls,
+480	                        thinking=model_event.thinking,
+481	                        thinking_blocks=model_event.thinking_blocks,
+482	                    )
+483	                )
+484	
+485	            if model_event.content:
+486	                final_output = model_event.content
+487	
+488	            # ── 4. Execute tools ─────────────────────────────────────────────
+489	            step_tool_results: list[ToolResultEvent] = []
+490	            interrupt_triggered = False
+491	            # Compute MCP results dir once per step (stable across all tool calls).
+492	            _tracer_session = getattr(tracer, "session_id", "")
+493	            _step_mcp_dir: str | None = None
+494	            if hasattr(tracer, "base_dir") and _tracer_session:
+495	                _step_mcp_dir = os.path.join(tracer.base_dir, _tracer_session, "mcp_results")
+496	            _pre_tool_raw_idx = len(state.raw_messages)
+497	            for tc in model_event.tool_calls:
+498	                interrupt_on = getattr(task, "interrupt_on", []) or []
+499	                if tc.name in interrupt_on:
+500	                    interrupted_at = tc
+501	                    exit_reason = "interrupted"
+502	                    interrupt_triggered = True
+503	                    break
+504	
+505	                tc_event = ToolCallEvent(
+506	                    run_id=state.run_id,
+507	                    step_id=step_id,
+508	                    tool_name=tc.name,
+509	                    tool_input=tc.input,
+510	                    tool_call_id=tc.id,
+511	                    approved=True,
+512	                )
+513	                _bt_events = await pipe_all(
+514	                    tc_event,
+515	                    get_procs("before_tool"),
+516	                    tracer=tracer,
+517	                    hook="before_tool",
+518	                )
+519	                tc_event = next(
+520	                    (e for e in reversed(_bt_events) if isinstance(e, ToolCallEvent)),
+521	                    tc_event,
+522	                )
+523	                await tracer.on_event(tc_event)
+524	
+525	                # Propagate run context for spawn_subagent and similar tools
+526	                try:
+527	                    from ..tools.spawn_subagent import _spawn_ctx
+528	
+529	                    _spawn_ctx_token = _spawn_ctx.set(
+530	                        {
+
+[Showing lines 471–530 of 981 total. Use offset=530 to read the next section.]

@@ -1,0 +1,72 @@
+=== Bash tool def ===
+./.venv/lib/python3.12/site-packages/hydra/_internal/core_plugins/bash_completion.py
+./.venv/lib/python3.12/site-packages/anthropic/types/bash_code_execution_tool_result_error_param.py
+./.venv/lib/python3.12/site-packages/anthropic/types/bash_code_execution_tool_result_block_param.py
+./.venv/lib/python3.12/site-packages/anthropic/types/bash_code_execution_output_block.py
+./.venv/lib/python3.12/site-packages/anthropic/types/tool_bash_20250124_param.py
+./.venv/lib/python3.12/site-packages/anthropic/types/bash_code_execution_result_block.py
+./.venv/lib/python3.12/site-packages/anthropic/types/bash_code_execution_result_block_param.py
+./.venv/lib/python3.12/site-packages/anthropic/types/beta/beta_bash_code_execution_result_block.py
+./.venv/lib/python3.12/site-packages/anthropic/types/beta/beta_bash_code_execution_tool_result_block_param.py
+./.venv/lib/python3.12/site-packages/anthropic/types/beta/beta_bash_code_execution_tool_result_error.py
+=== length_recovery processor (R4 uses it) ===
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""LengthTruncationRecoveryProcessor for Tmax (and TB2-style) agents.
+
+Closes a systemic failure mode: the model enters a *degenerate repetition
+loop* — it keeps emitting the same narration with no tool call until the
+response hits ``max_tokens`` (``finish_reason == "length"``). The run loop
+then appends a passive "please continue" nudge, which re-primes the same
+runaway generation. The cycle can burn an entire evolve round on one task.
+
+This processor:
+* collapses runaway assistant content (head+tail) after a length truncation
+* replaces the passive continue nudge with a corrective "issue one Bash call"
+  instruction (escalating on consecutive truncations)
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+from harnessx.core.events import (
+    BeforeModelEvent,
+    Message,
+    ModelResponseEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+)
+from harnessx.core.processor import MultiHookProcessor
+
+_HEAD_CHARS = 1200
+_TAIL_CHARS = 600
+_TRUNC_MARKER = (
+    "\n\n[response truncated by harness: the model hit the output token limit "
+    "without issuing a tool call; the omitted middle was discarded to prevent a "
+    "repetition loop]\n\n"
+)
+
+_NUDGE_FIRST = (
+    "Your last turn ran into the output token limit without running any command. "
+    "Do NOT re-explain or continue the previous narration. In your next turn write "
+    "at most two sentences of reasoning, then issue exactly ONE concrete Bash "
+    "command that makes progress (inspect a file, run a script, or write output). "
+    "Keep the response short."
+)
+
+_NUDGE_REPEAT = (
+    "STOP. You have now hit the output token limit multiple turns in a row, which "
+    "means you are repeating yourself instead of acting. Abandon the current line "
+    "of narration entirely. Do not write any prose analysis. Respond with a SINGLE "
+    "short Bash tool call that either (a) writes the required output file(s) to the "
+    "path named in the task, or (b) runs a quick command to check the current state "
+    "so you can decide the next concrete step. One command only."
+)
+
+
+class LengthTruncationRecoveryProcessor(MultiHookProcessor):
+    """Break the max_tokens repetition loop and redirect the model to act."""
+
+    _singleton_group = "tmax_length_recovery"
+    _order = 5

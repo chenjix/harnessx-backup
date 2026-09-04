@@ -1,0 +1,164 @@
+1	# SPDX-License-Identifier: MIT
+2	"""IterativeVerifyGate — a bounded, work-aware completion gate.
+3	
+4	Problem class (observable, task-agnostic)
+5	------------------------------------------
+6	The run loop treats an assistant turn with ``finish_reason in {stop,
+7	end_turn}`` and **no tool calls** as "done". A weak model frequently
+8	emits such a turn while *asserting* completion ("task complete", "all
+9	tests passed") without having executed any objective verification of the
+10	deliverable, or while it is stuck repeating text and simply gives up. In
+11	both cases the run exits, the external verifier then finds the end state
+12	wrong, and reward=0.
+13	
+14	The stock one-shot self-verify nudge helps once, but:
+15	  * it fires at most once per task, so a second bare "done" claim (or a
+16	    later text-only turn from a stuck loop) exits unchecked; and
+17	  * it cannot distinguish an agent that *actually ran* verification
+18	    commands after the nudge from one that merely re-asserted success.
+19	
+20	Mechanism
+21	---------
+22	This processor gates the no-tool-call exit up to ``max_nudges`` times.
+23	It only *re-*nudges when the agent tries to exit **without having
+24	executed a real (non-synthetic) tool call since the previous nudge** —
+25	i.e. it re-asserted completion or looped without doing any new
+26	verification work. If the agent responded to a nudge by actually running
+27	commands and then exits, the gate steps aside immediately. This keeps
+28	the added cost bounded and, crucially, does not penalise the fast
+29	passing cluster that genuinely verifies before exiting (they run
+30	commands after the first checklist, so they are not re-nudged).
+31	
+32	The nudge is a general verification checklist keyed off task state only
+33	(required outputs exist, contents are semantically correct, services
+34	still alive, no self-reported "passed" without a real test). It contains
+35	no task-specific literals, paths, or answers.
+36	"""
+37	
+38	from __future__ import annotations
+39	
+40	import dataclasses
+41	import uuid
+42	
+43	from harnessx.core.events import (
+44	    BeforeModelEvent,
+45	    Message,
+46	    ModelResponseEvent,
+47	    TaskEndEvent,
+48	    TaskStartEvent,
+49	    ToolCall,
+50	    ToolCallEvent,
+51	)
+52	from harnessx.core.processor import MultiHookProcessor
+53	
+54	_GATE_TOOL = "_tb2_iter_verify"
+55	_GATE_ACK = "Verification gate: see the instructions in the message above, then continue."
+56	
+57	_CHECKLIST = """\
+58	Before finishing, do NOT just assert completion — actually verify the end state now. Run real commands:
+59	
+60	1. **Re-read the task requirements** and list, concretely, every artifact / behaviour it demands (exact output paths, formats, thresholds, running services).
+61	
+62	2. **Prove each required output exists at its exact path** with `ls -lh`, and **inspect its contents** with `cat`/`head` — confirm the values are semantically correct, not merely that a file is present or a script exited 0.
+63	
+64	3. **Re-run the real end-to-end behaviour**, not a trivial smoke test. A command that exited 0 earlier, or a test that only checks syntax/importability, does NOT prove correctness.
+65	
+66	4. **For long-running services:** confirm they are still alive and reachable *right now*, and that no stale/duplicate instances are lingering and no required port is left bound by a dead run.
+67	
+68	If anything is wrong, fix it and re-verify. Statements like "task complete" or "all tests passed" are not accepted unless the commands above were actually executed and their output confirms success.\
+69	"""
+70	
+71	_STUCK_NOTE = (
+72	    "\n\nNote: you appear to be finishing without having run any new verification "
+73	    "command since the last check. Execute the concrete checks above with real "
+74	    "commands before declaring the task done."
+75	)
+76	
+77	
+78	class IterativeVerifyGate(MultiHookProcessor):
+79	    """Bounded, work-aware no-tool-call exit gate.
+80	
+81	    Parameters
+82	    ----------
+83	    max_nudges:
+84	        Maximum number of times the gate will intercept a no-tool-call
+85	        exit for a single task. Bounds the added cost.
+86	    """
+87	
+88	    _singleton_group = "tb2_iter_verify"
+89	    _order = 90
+90	
+91	    def __init__(self, max_nudges: int = 2) -> None:
+92	        self.max_nudges = int(max_nudges)
+93	        self._nudges_used = 0
+94	        self._ran_tool_since_nudge = False
+95	        self._nudged_at_least_once = False
+96	        self._pending_message = ""
+97	
+98	    async def on_task_start(self, event: TaskStartEvent):
+99	        self._nudges_used = 0
+100	        self._ran_tool_since_nudge = False
+101	        self._nudged_at_least_once = False
+102	        self._pending_message = ""
+103	        yield event
+104	
+105	    async def on_before_model(self, event: BeforeModelEvent):
+106	        if not self._pending_message:
+107	            yield event
+108	            return
+109	        msg = self._pending_message
+110	        self._pending_message = ""
+111	        # Last message is a tool result (the synthetic gate ack) → append
+112	        # exactly +1 user message. Preserves the +1-per-chain contract.
+113	        yield dataclasses.replace(
+114	            event,
+115	            messages=event.messages + (Message(role="user", content=msg),),
+116	        )
+117	
+118	    async def on_after_model(self, event: ModelResponseEvent):
+119	        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+120	        if not exit_intent:
+121	            yield event
+122	            return
+123	
+124	        # First exit attempt is always gated once (mirrors the stock
+125	        # self-verify). Subsequent exits are only re-gated when the agent
+126	        # did NOT run a real tool call since the previous nudge — i.e. it
+127	        # re-asserted completion or looped without doing new verification.
+128	        first_time = not self._nudged_at_least_once
+129	        did_no_work = self._nudged_at_least_once and not self._ran_tool_since_nudge
+130	
+131	        if self._nudges_used < self.max_nudges and (first_time or did_no_work):
+132	            self._nudges_used += 1
+133	            self._nudged_at_least_once = True
+134	            self._ran_tool_since_nudge = False
+135	            note = "" if first_time else _STUCK_NOTE
+136	            self._pending_message = _CHECKLIST + note
+137	            keepalive = ToolCall(
+138	                id=f"ivg-{uuid.uuid4().hex[:8]}",
+139	                name=_GATE_TOOL,
+140	                input={},
+141	            )
+142	            yield dataclasses.replace(event, tool_calls=(keepalive,))
+143	        else:
+144	            yield event
+145	
+146	    async def on_before_tool(self, event: ToolCallEvent):
+147	        if event.tool_name == _GATE_TOOL:
+148	            # Synthetic keepalive — intercept, do not execute, and do NOT
+149	            # count as verification work.
+150	            yield dataclasses.replace(
+151	                event, approved=False, synthetic_result=_GATE_ACK
+152	            )
+153	        else:
+154	            # A real tool call — the agent is doing verification work.
+155	            if self._nudged_at_least_once:
+156	                self._ran_tool_since_nudge = True
+157	            yield event
+158	
+159	    async def on_task_end(self, event: TaskEndEvent):
+160	        self._nudges_used = 0
+161	        self._ran_tool_since_nudge = False
+162	        self._nudged_at_least_once = False
+163	        self._pending_message = ""
+164	        yield event

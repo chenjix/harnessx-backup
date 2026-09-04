@@ -1,0 +1,202 @@
+121	    async def on_before_model(self, event: BeforeModelEvent):
+122	        if not self._pending_message:
+123	            yield event
+124	            return
+125	        msg = self._pending_message
+126	        self._pending_message = ""
+127	        # last message is a tool result (role≠user) → append exactly +1 user
+128	        yield dataclasses.replace(
+129	            event,
+130	            messages=event.messages + (Message(role="user", content=msg),),
+131	        )
+132	
+133	    async def on_after_model(self, event: ModelResponseEvent):
+134	        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+135	        if exit_intent and not self._verified:
+136	            self._verified = True
+137	            self._pending_message = _SELF_VERIFY_MSG
+138	            keepalive = ToolCall(
+139	                id=f"sv-{uuid.uuid4().hex[:8]}",
+140	                name=_SELF_VERIFY_TOOL,
+141	                input={},
+142	            )
+143	            yield dataclasses.replace(event, tool_calls=(keepalive,))
+144	        else:
+145	            yield event
+146	
+147	    async def on_before_tool(self, event: ToolCallEvent):
+148	        if event.tool_name == _SELF_VERIFY_TOOL:
+149	            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+150	        else:
+151	            yield event
+152	
+153	    async def on_task_end(self, event: TaskEndEvent):
+154	        self._verified = False
+155	        self._pending_message = ""
+156	        yield event
+157	
+158	
+159	class CustomEditToolProcessor(MultiHookProcessor):
+160	    """Detect repeated Bash-based file edits and nudge the model to try a different approach.
+161	
+162	    TB2 only exposes Bash, so write operations are detected via command patterns
+163	    (redirects, sed -i, tee).  When the same file is edited more than
+164	    ``threshold`` times, a warning is appended to the tool result and the
+165	    per-file counter is reset.
+166	    """
+167	
+168	    _singleton_group = "bash_edit_detector"
+169	    _order = 30
+170	
+171	    def __init__(self, threshold: int = 7) -> None:
+172	        self.threshold = threshold
+173	        self._edit_counts: dict[str, int] = {}
+174	        self._pending: dict[str, list[str]] = {}
+175	
+176	    async def on_task_start(self, event: TaskStartEvent):
+177	        self._edit_counts.clear()
+178	        self._pending.clear()
+179	        yield event
+180	
+181	    async def on_before_tool(self, event: ToolCallEvent):
+182	        if event.tool_name == "Bash":
+183	            paths = _extract_written_files(event.tool_input.get("command", ""))
+184	            if paths:
+185	                self._pending[event.tool_call_id] = paths
+186	        yield event
+187	
+188	    async def on_after_tool(self, event: ToolResultEvent):
+189	        paths = self._pending.pop(event.tool_call_id, [])
+190	        injections: list[str] = []
+191	        for path in paths:
+192	            count = self._edit_counts.get(path, 0) + 1
+193	            self._edit_counts[path] = count
+194	            if count > self.threshold:
+195	                injections.append(_EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold))
+196	                self._edit_counts[path] = 0
+197	        if injections:
+198	            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+199	        else:
+200	            yield event
+201	
+202	    async def on_task_end(self, event: TaskEndEvent):
+203	        self._edit_counts.clear()
+204	        self._pending.clear()
+205	        yield event
+206	
+207	
+208	# ---------------------------------------------------------------------------
+209	# TaskTimeReminderProcessor
+210	# ---------------------------------------------------------------------------
+211	
+212	_TASK_TIME_WARN_70 = (
+213	    "[TaskTimeReminder] You have used 70% of your time budget ({elapsed:.0f}s / {total:.0f}s). "
+214	    "Stop exploring. Focus exclusively on implementing and writing all required output files. "
+215	    "Run `ls -lh` on each expected output path to confirm they exist."
+216	)
+217	_TASK_TIME_WARN_90 = (
+218	    "[TaskTimeReminder] CRITICAL: You have used 90% of your time budget ({elapsed:.0f}s / {total:.0f}s, "
+219	    "{remaining:.0f}s left). "
+220	    "If you have NOT yet written all required output files, do so IMMEDIATELY — "
+221	    "the task will be terminated soon and any missing output files will cause an automatic score of 0. "
+222	    "Do NOT start any new implementation. Write and verify output files NOW."
+223	)
+224	
+225	
+226	class TaskTimeReminderProcessor(MultiHookProcessor):
+227	    _singleton_group = "task_time_reminder"
+228	    _order = 6
+229	
+230	    def __init__(
+231	        self,
+232	        timeout_seconds: float | None = None,
+233	        warn_at: tuple[float, ...] = (0.70, 0.90),
+234	    ) -> None:
+235	        self._timeout = timeout_seconds
+236	        self._warn_at = sorted(warn_at)
+237	        self._triggered: set[float] = set()
+238	        self._start: float = 0.0
+239	
+240	    async def on_task_start(self, event: TaskStartEvent):
+241	        self._triggered = set()
+242	        self._start = time.monotonic()
+243	        yield event
+244	
+245	    async def on_step_start(self, event: StepStartEvent):
+246	        if not self._timeout or self._timeout <= 0:
+247	            yield event
+248	            return
+249	
+250	        elapsed = time.monotonic() - self._start
+251	        pct = elapsed / self._timeout
+252	        remaining = self._timeout - elapsed
+253	
+254	        warn: str | None = None
+255	        for threshold in reversed(self._warn_at):
+256	            if pct >= threshold and threshold not in self._triggered:
+257	                self._triggered.add(threshold)
+258	                if threshold >= 0.90:
+259	                    warn = _TASK_TIME_WARN_90.format(elapsed=elapsed, total=self._timeout, remaining=remaining)
+260	                else:
+261	                    warn = _TASK_TIME_WARN_70.format(elapsed=elapsed, total=self._timeout)
+262	                break
+263	
+264	        if warn:
+265	            msg = Message(role="user", content=warn)
+266	            yield dataclasses.replace(
+267	                event,
+268	                messages=event.messages + (msg,),
+269	                raw_messages=event.raw_messages + (msg,),
+270	            )
+271	        else:
+272	            yield event
+273	
+274	    async def on_task_end(self, event: TaskEndEvent):
+275	        self._triggered = set()
+276	        yield event
+277	
+278	
+279	# ---------------------------------------------------------------------------
+280	# PostCompactionRefreshProcessor
+281	# ---------------------------------------------------------------------------
+282	
+283	
+284	class PostCompactionRefreshProcessor(MultiHookProcessor):
+285	    """After context compaction, re-inject a fresh workspace snapshot from the
+286	    sandbox so the model knows what files currently exist rather than relying on
+287	    compressed-away history.
+288	
+289	    Detects compaction by a significant drop in message count between steps
+290	    (same heuristic used by LoopDetectionProcessor).
+291	    """
+292	
+293	    _singleton_group = "tb2_post_compaction_refresh"
+294	    _order = 11  # runs after CompactionProcessor (8)
+295	
+296	    def __init__(self, drop_threshold: int = 5) -> None:
+297	        self._drop_threshold = drop_threshold
+298	        self._prev_count: int = 0
+299	
+300	    async def on_task_start(self, event: TaskStartEvent):
+301	        self._prev_count = 0
+302	        yield event
+303	
+304	    async def on_step_start(self, event: StepStartEvent):
+305	        current_count = len(event.messages)
+306	        prev = self._prev_count
+307	        self._prev_count = current_count
+308	
+309	        if not (prev > 0 and (prev - current_count) >= self._drop_threshold):
+310	            yield event
+311	            return
+312	
+313	        from harnessx.sandbox.base import get_current_sandbox
+314	
+315	        sandbox = get_current_sandbox()
+316	        if sandbox is None:
+317	            yield event
+318	            return
+319	
+320	        try:
+
+[Showing lines 121–320 of 466 total. Use offset=320 to read the next section.]

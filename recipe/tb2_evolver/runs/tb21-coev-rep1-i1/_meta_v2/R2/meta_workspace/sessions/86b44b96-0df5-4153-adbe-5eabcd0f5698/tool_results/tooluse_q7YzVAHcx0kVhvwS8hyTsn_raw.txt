@@ -1,0 +1,77 @@
+1	# Evolution Journal — tb21-coev-rep1-i1
+2	
+3	## Round 1 — bound runaway context
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_context_overflow_guard_v1
+9	levers: [control]
+10	predicted_affected: [regex-log, overfull-hbox, configure-git-webserver, large-scale-text-editing, protein-assembly, sam-cell-seg, llm-inference-batching-scheduler]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=3/18; +1/-1 gained=configure-git-webserver lost=headless-terminal; score 0.1667 >= incumbent(mean) 0.1667 - tol 0.0400
+14	expected_global_gain: "Unblocks a 7+ task cluster that dies at step ~0/1 with exit_reason=error from an uncaught provider 400 (context overflow); any non-error continuation is strictly better than the current instant death"
+15	regression_risk: "Very low — char caps (per-msg 120k, total 280k) sit far above every message seen on the 3 passing tasks (<=~5.4k chars); truncation preserves message count/roles/tool_call_id so track invariants hold"
+16	cost_shift: "Neutral-to-down — previously-instant-death tasks now run (more tokens) but runaway 170k-344k-char turns are bounded, shrinking the request that actually leaves the harness"
+17	rollback_trigger: "If R2 shows these 7 tasks still exit_reason=error at step ~0/1, the char budget is still above the server's real limit — lower total_char_budget/per_message_char_cap before abandoning the mechanism"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 3/18 (16.7%). A per-task trace scan (`.jsonl`, biggest-string per
+23	line) found a 1:1 correlation: every `exit_reason=error` task has a single
+24	`raw_assistant` message whose `/message/content` is a runaway 170k–344k-char
+25	string. Model `Qwen/Qwen3.5-9B` rejects inputs over ~65536 tokens with a
+26	400 BadRequest; the run loop does not wrap the provider call in try/except, so
+27	that 400 propagates to `exit_reason=error` and kills the task at step ~0/1 —
+28	before it does any recoverable work. The stock `CompactionProcessor` can't
+29	help: its token counter (`rough_token_count`, cl100k_base) undercounts this
+30	model's real tokenizer, and it summarises OLD messages while leaving the single
+31	oversized recent turn intact. This is a harness deficiency (a missing size-
+32	bounding mechanism), not a model-knowledge gap.
+33	
+34	### Changes
+35	
+36	- `processors/context_overflow_guard.py` — new `ContextOverflowGuard`
+37	  (`MultiHookProcessor`, `on_step_start`, `_order=9` right after compaction).
+38	  Char-based (not token-based, since the token counter undercounts): head/tail-
+39	  truncates any message whose text `content` exceeds `per_message_char_cap`,
+40	  then shrinks the largest older messages until the transcript fits
+41	  `total_char_budget`. Truncation is in place — message count, roles, ordering,
+42	  and `tool_call_id` links preserved.
+43	- `config.yaml` — register `ContextOverflowGuard` via `file://` target
+44	  (`per_message_char_cap=120000`, `total_char_budget=280000`, `keep_recent=4`,
+45	  `min_message_chars=2000`), positioned after `CompactionProcessor`.
+46	
+47	### Evidence
+48	
+49	- regex-log: 6-line trace; line 4 `type=raw_assistant` `/message/content` =
+50	  343,954 chars; trajectory frontmatter `steps: null` (never completed a step),
+51	  `passed: false`.
+52	- overfull-hbox: assistant content 218,307 chars, `exit=error`.
+53	- configure-git-webserver: 249,882, `exit=error`.
+54	- large-scale-text-editing: 207,337, `exit=error`.
+55	- protein-assembly: 205,709, `exit=error`.
+56	- sam-cell-seg: 175,527, `exit=error`.
+57	- llm-inference-batching-scheduler: 172,511, `exit=error`.
+58	- Passing tasks git-leak-recovery / headless-terminal / kv-store-grpc: max
+59	  message content <= ~5.4k chars, `exit=done` — well below the caps, so
+60	  structurally unaffected.
+61	
+62	### Uncertainty
+63	
+64	The char→token ratio is estimated (regex-log's 343,954 chars ≈ 65,536 tokens →
+65	~5.25 chars/token); if the real ratio is lower, 280k chars could still exceed
+66	the limit and the cluster stays red — rollback trigger above covers this by
+67	lowering the budget. Also unresolved this round: write-compressor's malformed-
+68	tool-call loop (`bash_tool() missing ... 'command'`) despite
+69	`ParseRetryProcessor.max_consecutive_errors: 1` — different mechanism, deferred.
+70	
+71	### needs_from_human
+72	
+73	- Ideal fix would also wrap the provider `.complete()` call in the run loop
+74	  with try/except to translate a 400 into a graceful `exit_reason` instead of
+75	  `error`, but `harnessx/**` is read-only from this harness. Noting for a
+76	  human: `runloop.py` ~line 419 provider call is unguarded against
+77	  BadRequestError.

@@ -1,0 +1,69 @@
+    if sibling_prompt.is_file():
+        os.environ["TMAX_SYSTEM_PROMPT_FILE"] = str(sibling_prompt)
+
+    base_config = _prefer_sibling_prompt_builder(
+        HarnessConfig.from_yaml_file(str(cfg_path)), cfg_path
+    )
+    tracer = None
+    if journal_dir is not None:
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        tracer = HarnessJournal(base_dir=str(journal_dir), export_jsonl=True)
+
+    harness_config_rt = base_config.copy(
+        sandbox_provider=TmaxDockerSandboxProvider(
+            container,
+            workspace_path=workspace_path,
+        ),
+        tracer=tracer,
+    )
+
+    provider_kwargs: dict[str, Any] = {
+        "base_url": api_base.rstrip("/"),
+        "api_key": api_key or "EMPTY",
+    }
+    if temperature is not None:
+        provider_kwargs["temperature"] = float(temperature)
+    # Cap per-call generation. Unbounded max_tokens lets a single degenerate
+    # repetition loop emit 100k+ tokens and stall an evolve round for hours.
+    # Override with TMAX_MAX_TOKENS (set 0 / negative to disable the cap).
+    raw_max = (os.environ.get("TMAX_MAX_TOKENS") or "4096").strip()
+    try:
+        max_tokens = int(raw_max)
+    except ValueError:
+        max_tokens = 4096
+    if max_tokens > 0:
+        provider_kwargs["max_tokens"] = max_tokens
+    provider = OpenAIProvider(model=model, **provider_kwargs)
+    harness = ModelConfig(main=provider).agentic(harness_config_rt)
+    task = BaseTask(description=instruction, max_steps=max_steps)
+
+    try:
+        result = await harness.run(task)
+    except Exception as e:
+        return HarnessAgentResult(
+            steps=0,
+            finished="error",
+            messages=[],
+            error=f"{type(e).__name__}: {e}",
+            exit_reason="error",
+            log=[{"traceback": traceback.format_exc()[-3000:]}],
+        )
+
+    state = getattr(result, "resume_state", None)
+    messages = _messages_from_state(state) if state is not None else []
+    finished, exit_reason, err = _finished_from_result(result)
+    steps = 0
+    if state is not None:
+        steps = int(getattr(state, "step", 0) or 0)
+    if steps <= 0:
+        # Fall back to counting assistant turns.
+        steps = sum(1 for m in messages if m.get("role") == "assistant")
+    return HarnessAgentResult(
+        steps=steps,
+        finished=finished,
+        messages=messages,
+        error=err,
+        exit_reason=exit_reason,
+    )
+
+

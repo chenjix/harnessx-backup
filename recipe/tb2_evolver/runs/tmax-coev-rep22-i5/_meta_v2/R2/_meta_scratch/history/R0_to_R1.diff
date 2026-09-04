@@ -1,0 +1,22 @@
+--- R0
++++ R1
+@@ -80,2 +80,19 @@
+   _hook_: '*'
++# Break VERBATIM-REASONING thrash loops that CyclicLoopBreaker cannot see.
++# When the model fixates and re-emits byte-identical assistant reasoning turn
++# after turn while its tool INPUT varies slightly (e.g. rewriting source that
++# produces the same error), no (call+output) triple cycle forms, so the
++# triple detector never escalates; and finish_reason != length so the length
++# recovery processor never fires. This processor keys on the one property that
++# is stable across such loops — identical normalized assistant CONTENT — and
++# injects an escalating redirect, then hard-stops with LoopDetectedError before
++# the run burns to the step cap and dies with exit_reason=error producing zero
++# output. Carries no task-specific constants. Evidence: task_000109 re-emitted
++# one identical reasoning block 8 consecutive times, exit=error, no output files.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep22-i5/_meta_v2/R1/c3/processors/assistant_repeat_breaker.py::AssistantReasoningRepeatBreaker
++  warn_threshold: 3
++  break_threshold: 5
++  min_content_chars: 40
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ - _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor

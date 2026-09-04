@@ -1,0 +1,14 @@
+--- R0
++++ R1
+@@ -68,2 +68,11 @@
+   _hook_: '*'
++# Ensure the common grader HTTP client lib (requests) is present for tasks
++# that stand up a local HTTP service. The verifier phase imports `requests`
++# to exercise the service; agents probe with urllib/curl and never install
++# it, so an otherwise-correct service is graded 0 at test-collection time.
++# Fires at most once, only when a service signature was observed. Idempotent
++# and offline-safe (no-op if already present or network unavailable).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep24-i2/_meta_v2/R1/c4/processors/grader_client_deps.py::GraderClientDepProcessor
++  install_timeout_s: 90
++  _hook_: '*'
+ - _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor

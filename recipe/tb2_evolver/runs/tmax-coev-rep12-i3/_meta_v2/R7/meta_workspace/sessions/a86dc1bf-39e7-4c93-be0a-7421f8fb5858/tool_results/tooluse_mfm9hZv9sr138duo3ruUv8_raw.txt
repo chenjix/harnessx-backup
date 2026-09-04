@@ -1,0 +1,56 @@
+                violation_type=_VT_EMPTY_MESSAGES,
+                step_id=getattr(event, "step_id", -1),
+            )
+
+        events: list[Event] = [event]
+        event_type = type(event)
+        chain_user_additions = 0  # tracks user msg insertions in before_model chain
+
+        for processor in self.processors:
+            prev = events[:]
+            prev_primary = next((e for e in reversed(prev) if isinstance(e, event_type)), None)
+            prev_msgs = _get_event_messages(prev_primary) if _do_validate else None
+
+            next_events: list[Event] = []
+            for ev in events:
+                async for out in processor.process(ev):
+                    next_events.append(out)
+            events = next_events
+            if not events:
+                return
+
+            # Per-processor contract validation
+            if _do_validate and prev_msgs is not None:
+                curr_primary = next((e for e in reversed(events) if isinstance(e, event_type)), None)
+                curr_msgs = _get_event_messages(curr_primary)
+                if curr_msgs is not None:
+                    chain_user_additions = _validate_messages_contract(
+                        hook,
+                        prev_msgs,
+                        curr_msgs,
+                        processor_name=type(processor).__name__,
+                        step_id=getattr(event, "step_id", -1),
+                        chain_user_additions=chain_user_additions,
+                    )
+
+            if tracer is not None:
+                action = _diff_primary(prev, events, event_type)
+                if action:
+                    trigger = ProcessorTriggerEvent(
+                        run_id=event.run_id,
+                        step_id=event.step_id,
+                        processor=type(processor).__name__,
+                        hook=hook,
+                        action=action,
+                        detail={},
+                    )
+                    await tracer.on_event(trigger)  # type: ignore[attr-defined]
+
+        # Chain-level post-hook invariant check
+        if _do_validate and initial_msgs is not None:
+            final_primary = next((e for e in reversed(events) if isinstance(e, event_type)), None)
+=== where check_post_hook_invariants called with raw_msgs ===
+core/contract_check.py:30:    check_post_hook_invariants,
+core/contract_check.py:153:                    check_post_hook_invariants(
+core/processor.py:243:def check_post_hook_invariants(
+core/processor.py:473:                check_post_hook_invariants(

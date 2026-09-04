@@ -1,0 +1,71 @@
+1	# Tmax co-evolution journal — tmax-coev-rep22-i4
+2	
+3	## Round 1 — self-verify re-derivation checklist
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_selfverify_crosscheck_v1
+9	levers: [control]
+10	predicted_affected: [task_000109_09ddd96b, task_000328_80fb4c9f, task_001653_c4cafa73, task_000505_50b5162d]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Catches confident-exit-on-wrong-value failures — the dominant cluster (30/40 failures exit no_tool_calls, many on wrong computed values)"
+15	regression_risk: "A few extra verification Bash calls on tasks that were already correct; no new fire conditions (fires-once contract preserved)"
+16	cost_shift: "+1-3 Bash calls per task on the one-shot exit turn; bounded, fires at most once per task"
+17	rollback_trigger: "If R2 pass_rate is flat/down and cost rises materially, or if the extra checklist steps push previously-passing computation tasks into loop/budget exits, revert to stock CustomSelfVerifyProcessor"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus was task_000109_09ddd96b (data_science): the agent wrote a Go
+23	WAV-ETL pipeline that ran cleanly but produced a numerically wrong answer
+24	(window 4 mean=128 instead of 0.0; anomaly.txt="1" instead of "4") and exited
+25	via `no_tool_calls` fully convinced it was done. Strikingly, its own step-49
+26	narration said "window 4 has all zeros" while the emitted JSON showed a mean of
+27	128 — an internal contradiction it never reconciled. The stock
+28	`CustomSelfVerifyProcessor` checklist fired at exit but only asked the agent to
+29	"inspect the contents"; the agent re-listed files and exited without
+30	re-deriving anything. This confident-exit-on-wrong-computed-value shape is the
+31	dominant failure cluster on this benchmark: 30 of 40 failures exit via
+32	`no_tool_calls`, and the data_science / scientific_computing / security ones
+33	fail on *value* assertions, not missing files.
+34	
+35	The root parsing bug in task_000109 is a model capability gap that no harness
+36	should fix by injecting WAV knowledge. But the *harness deficiency* is real: the
+37	exit-time verification hook is too passive to make the agent notice its own
+38	wrong output. The fix is a general verification discipline.
+39	
+40	### Changes
+41	
+42	- `processors/self_verify_crosscheck.py` — `SelfVerifyCrossCheckProcessor`,
+43	  subclass of `CustomSelfVerifyProcessor` that reuses the parent's fires-once /
+44	  exit-turn / keepalive mechanics and only swaps the injected checklist for one
+45	  that adds (a) independent re-derivation of at least one output value by a
+46	  different method and (b) a contradiction sweep between the agent's own
+47	  reasoning and its emitted output. No task-specific constants.
+48	- `config.yaml` — replaced `CustomSelfVerifyProcessor` with the subclass via
+49	  `file://` absolute path.
+50	
+51	### Evidence
+52	
+53	- `task_000109_09ddd96b` result.json: `finished=no_tool_calls`, initial_pytest
+54	  passed, final_pytest failed on `window_4[0]` expected 0.0 got 128 and
+55	  anomaly.txt expected "4" got "1".
+56	- `task_000109` messages step 48/49: JSON window 4 = `[128, 0, 0]`; narration
+57	  "window 4 has all zeros" — unreconciled contradiction. Steps 56-59: stock
+58	  checklist fired, agent re-listed files only, then exited.
+59	- Cluster confirmation (result.json final_pytest tails): task_000328_80fb4c9f
+60	  "got 300" vs ~10 frames; task_001653_c4cafa73 Centroid/Distance numeric
+61	  mismatch; task_000505_50b5162d "2 of 2 evil bypassed" — all `no_tool_calls`
+62	  confident wrong-value exits.
+63	
+64	### Uncertainty
+65	
+66	This is an attention/verification fix, not a knowledge fix — it will not
+67	conjure a correct WAV parser, so task_000109 only flips if the re-derivation
+68	step makes the agent notice the parser is wrong and fix it. If the model
+69	ignores the stronger checklist the way it ignored the weaker one, no tasks
+70	flip and we revert. Watch the `no_tool_calls` failure count and per-task cost
+71	in R2.

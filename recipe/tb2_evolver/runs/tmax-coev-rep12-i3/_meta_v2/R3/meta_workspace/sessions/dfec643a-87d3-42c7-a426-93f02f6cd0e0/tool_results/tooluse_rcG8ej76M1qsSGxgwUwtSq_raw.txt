@@ -1,0 +1,133 @@
+1	# Evolve journal — tmax-coev-rep12-i3
+2	
+3	## Round 1 — fix compaction threshold for 64k model
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-23T10:00:00Z
+8	hypothesis_id: h_compaction_64k_v1
+9	levers: [configuration]
+10	predicted_affected: [task_001044_45c70cf1, task_000444_250abeda]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=11/50; +2/-2 gained=task_000628_dcc7eb30,task_000903_7604c91e lost=task_000437_8450eef7,task_001267_0acfd3a0; score 0.2200 >= incumbent(mean) 0.2200 - tol 0.0400
+14	expected_global_gain: "Eliminates 2 exit_reason=error crashes (structural 0-rewards) and prevents context-overflow 400s on the long-context cluster (task_001028 climbing toward the ceiling)"
+15	regression_risk: "Near-zero: all 11 passing tasks peak <13k rough tokens, far below the new 40000 threshold, so compaction never fires for them — identical behaviour"
+16	cost_shift: "Flat to slightly down: compaction shrinks the re-sent prompt on long tasks; no effect on short tasks"
+17	rollback_trigger: "If pass_rate drops vs R0, or a previously-passing task regresses to exit_reason!=done with a compaction boundary in its trace, revert to token_threshold=140000"
+18	-->
+19	
+20	### Why
+21	
+22	Baseline R0 = 11/50 (22%). Two tasks (task_001044_45c70cf1,
+23	task_000444_250abeda) came back with `status=agent_error` /
+24	`exit_reason=error`. Their episode traces both end with a hard
+25	`BadRequestError: 400 — This model's maximum context length is 65536 tokens.
+26	However, you requested 4096 output tokens and your prompt contains at least
+27	61441 input tokens`. The eval model (qwen35-9b-tmax-coev-r12) has a real 65536
+28	context window; harness_runner reserves max_tokens=4096 for output, leaving a
+29	~61440-token input ceiling. The pipeline's `CompactionProcessor.token_threshold`
+30	was 140000 — calibrated for a 128k+ model and therefore unreachable here, so
+31	compaction never fired and long histories overflowed the window into an
+32	API-level 400 that crashes the whole task. This is a pure harness
+33	mis-calibration, not a model capability gap.
+34	
+35	### Changes
+36	
+37	- `config.yaml` — `CompactionProcessor.token_threshold` 140000 → 40000.
+38	  `rough_token_count` (cl100k) under-counts the real request by ~9-10k
+39	  (system prompt + Bash tool schema + Qwen/cl100k tokenizer skew), so firing
+40	  at 40000 rough tokens (~50k real) keeps every request safely below the
+41	  61440 ceiling with margin for the 6-message retention window.
+42	- `system_prompt.txt` — copied byte-for-byte from R0 (sibling required by
+43	  `SiblingSystemPromptBuilder`; unchanged).
+44	
+45	### Evidence
+46	
+47	- `task_001044_45c70cf1` trace `task_end` step 43: `exit_reason=error`,
+48	  error = "maximum context length is 65536 tokens ... prompt contains at least
+49	  61441 input tokens". step_start rough `token_count` climbed
+50	  40435 → 43408 → 46381 → 49354 with the compaction threshold at 140000 never
+51	  approached; the next request overflowed.
+52	- `task_000444_250abeda` trace `task_end`: identical
+53	  "maximum context length is 65536 tokens" 400 error; history bloated by a
+54	  degenerate verbatim-repeat loop (assistant repeated the same
+55	  "Let me try a different approach…" paragraph across multiple steps).
+56	- Passing cluster peaked far below 40000 rough tokens (max ~13k), so the new
+57	  threshold leaves them untouched.
+58	
+59	### Uncertainty
+60	
+61	Both target tasks are hard reverse-engineering problems (disassembly / oracle
+62	smoothing) and may still fail on correctness after the crash is removed — the
+63	win here is converting an infrastructure-guaranteed 0 into a fair run, plus
+64	protecting the long-context cluster from the same overflow. If pass_rate does
+65	not hold or a passing task regresses with a compaction boundary in its trace,
+66	revert to 140000.
+67	
+68	## Round 2 — break identical-command loops
+69	
+70	<!-- journal:frontmatter
+71	round: 2
+72	timestamp: 2026-08-23T12:00:00Z
+73	hypothesis_id: h_repeat_command_breaker_v1
+74	levers: [control]
+75	predicted_affected: [task_000796_828a72cf, task_000325_3fbc5745, task_000506_c13429e7, task_000677_1de47eed, task_000730_265f23f6, task_000910_16cc0daf, task_002033_f03df97e, task_001267_0acfd3a0, task_000437_8450eef7, task_000713_b0778d60]
+76	cited_candidates: [C-002]
+77	gating_outcome: accepted
+78	gating_attribution: score=11/50; +3/-3 gained=task_000325_3fbc5745,task_000444_250abeda,task_001214_f44c0aa2 lost=task_000628_dcc7eb30,task_000710_fa628bd4,task_000903_7604c91e; score 0.2200 >= incumbent(mean) 0.2200 - tol 0.0400
+79	expected_global_gain: "Recovers ~25 wasted steps on the 11-task identical-command loop cluster (6 domains) that all die at budget_exceeded=80 steps, giving the model a fair attempt instead of a guaranteed 0"
+80	regression_risk: "Near-zero: processor only appends one redirect user message after 3 byte-identical consecutive Bash calls; never blocks/kills execution, so a slow legitimate retry is nudged at worst. Passing tasks essentially never repeat one command 3x"
+81	cost_shift: "Net down: cuts ~25 redundant model+tool round-trips per looping task; the injected message is tiny"
+82	rollback_trigger: "If pass_rate drops vs R1, or a previously-passing task regresses with a repeat-breaker nudge in its trace disrupting a legitimate retry, revert to R1 config"
+83	-->
+84	
+85	### Why
+86	
+87	R1's compaction fix removed the context-overflow crashes; the dominant
+88	remaining failure mode is now a step-budget loop. 16/39 failures exit
+89	`budget_exceeded` at exactly 80 steps. Command-level analysis of the assistant
+90	`tool_calls` shows the agent issuing the **byte-identical Bash command 20–29
+91	times in a row**, receiving the same (usually empty/failing) result each time,
+92	until the budget is exhausted. `LengthTruncationRecoveryProcessor` cannot catch
+93	this because these turns emit a well-formed tool call (`finish_reason != length`).
+94	The agent often even narrates "I keep repeating the same command" yet cannot
+95	self-break — a mechanical loop-breaker is the reliable fix. The only tool is
+96	`Bash`, so an Action lever is impossible; a prompt rule (Instruction) is what the
+97	model is already failing to self-enforce.
+98	
+99	### Changes
+100	
+101	- `processors/repeat_command_breaker.py` — new `RepeatCommandBreakerProcessor`
+102	  (`_order=6`, right after length_recovery). Tracks the normalized command of
+103	  single-Bash-call turns; after `repeat_threshold=3` consecutive identical
+104	  commands it injects a firm redirect user message (escalating wording on
+105	  persistence), then re-arms. Never blocks execution.
+106	- `config.yaml` — register the processor via absolute `file://` path with
+107	  `repeat_threshold: 3`. All other R1 processors/knobs unchanged.
+108	- `system_prompt.txt` — copied byte-for-byte from R1 (SiblingSystemPromptBuilder
+109	  sibling; unchanged).
+110	
+111	### Evidence
+112	
+113	- `task_000796_828a72cf` steps 4–32: byte-identical command
+114	  `# The video is only 13KB ... od -c /app/traffic_monitor.mp4 ...` emitted **29
+115	  times consecutively**; every tool result `(exit 0, no output captured)`; exits
+116	  `budget_exceeded`.
+117	- `task_000730_265f23f6` (dup=27), `task_000506_c13429e7` (dup=26),
+118	  `task_000677_1de47eed` (dup=26), `task_002033_f03df97e` (dup=26),
+119	  `task_001267_0acfd3a0` (dup=21): same shape, one command repeated ~all
+120	  remaining steps, all `budget_exceeded`.
+121	- `task_000713_b0778d60`: 26 consecutive identical commands then exits `done`
+122	  with reward 0 — the loop displaced the real work.
+123	- Passing looper `task_001537_fbfffb79`: ran an identical `pip3 install
+124	  pocketsphinx` 4x (all returned the same FileNotFoundError), then moved on and
+125	  passed on unrelated later steps — a 3x redirect would have helped, not hurt.
+126	
+127	### Uncertainty
+128	
+129	The redirect gives the model a fair chance but does not itself solve the task;
+130	some of these are genuinely hard (video-frame OCR, disassembly). The win is
+131	converting guaranteed budget-loss into a fair attempt for a large cluster while
+132	cutting cost. If R2 pass_rate does not hold or a passing task regresses with a
+133	repeat-breaker nudge disrupting a legitimate retry, revert to R1.

@@ -1,0 +1,55 @@
+77	## Round 2 — infra flake, no harness fix (no-op)
+78	
+79	<!-- journal:frontmatter
+80	round: 2
+81	timestamp: 2026-06-02T00:00:00Z
+82	hypothesis_id: h_docker_name_collision_infra_v1
+83	levers: []
+84	predicted_affected: []
+85	gating_outcome: noop
+86	gating_attribution: noop
+87	expected_global_gain: "None — no config change. Assigned failure is an infra flake outside the evolvable surface."
+88	regression_risk: "None — config copied byte-for-byte from R1."
+89	cost_shift: "Zero — no pipeline change."
+90	rollback_trigger: "N/A (no-op)."
+91	-->
+92	
+93	### Why
+94	
+95	Assigned focus `task_000028_7fe033ac` failed with `status=error`, `reward=0`,
+96	`elapsed_s=0.1`. The error is a Docker container-name Conflict raised by
+97	`recipe/tmax_eval/docker_env.py::start_container` (line 124) — the container never
+98	started, so the agent run loop never began and there is **no `.messages.json`** for
+99	this task. This is not a model capability gap and not an in-loop harness deficiency;
+100	it is an infrastructure flake in the eval driver. `start_container` names containers
+101	`tmax-{task_id[:20]}-{int(time.time())}` with whole-second resolution; when tasks
+102	launch in the same wall-clock second under parallel batch eval, names collide and the
+103	daemon rejects the second `docker run`. The same flake hit 5 tasks this round
+104	(task_000015, task_000028, task_000140, task_001653, task_001781) — all
+105	`status=error`, `elapsed_s=0.1`, all with no episode log.
+106	
+107	### Changes
+108	
+109	- `config.yaml` — byte-for-byte copy of R1 config (explicit no-op). No processor,
+110	  tool, template, or knob change.
+111	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — documents root cause and requested fix
+112	  (make container name collision-proof, e.g. UUID suffix) in read-only
+113	  `recipe/tmax_eval/docker_env.py`.
+114	
+115	### Evidence
+116	
+117	- `task_000028_7fe033ac.result.json`: `status=error`, `elapsed_s=0.1`,
+118	  `error="docker run failed ... container name ...-1788321907 is already in use"`,
+119	  traceback at `docker_env.py:124 start_container`.
+120	- No `task_000028_7fe033ac.messages.json` exists in the trajectory dir — agent
+121	  loop never executed.
+122	- Sweep of all `*.result.json`: 5 tasks share the identical `docker run failed`
+123	  Conflict error at `elapsed_s=0.1`.
+124	
+125	### Uncertainty
+126	
+127	The evolvable `HarnessConfig` surface runs inside the agent phase; this failure
+128	precedes container start. No config-side mechanism can intercept it. The correct
+129	fix is a one-line change to container-name generation in the (read-only) recipe
+130	driver — escalated in NEEDS_FROM_HUMAN.md. If a future round shows these 5 tasks
+131	still erroring at elapsed_s=0.1, the human fix has not landed yet.

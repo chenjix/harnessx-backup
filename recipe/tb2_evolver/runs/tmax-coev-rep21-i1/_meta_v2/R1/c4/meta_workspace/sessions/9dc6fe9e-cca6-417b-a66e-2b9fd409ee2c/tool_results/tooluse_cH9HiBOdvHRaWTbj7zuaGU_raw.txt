@@ -1,0 +1,82 @@
+260	                else:
+261	                    warn = _TASK_TIME_WARN_70.format(elapsed=elapsed, total=self._timeout)
+262	                break
+263	
+264	        if warn:
+265	            msg = Message(role="user", content=warn)
+266	            yield dataclasses.replace(
+267	                event,
+268	                messages=event.messages + (msg,),
+269	                raw_messages=event.raw_messages + (msg,),
+270	            )
+271	        else:
+272	            yield event
+273	
+274	    async def on_task_end(self, event: TaskEndEvent):
+275	        self._triggered = set()
+276	        yield event
+277	
+278	
+279	# ---------------------------------------------------------------------------
+280	# PostCompactionRefreshProcessor
+281	# ---------------------------------------------------------------------------
+282	
+283	
+284	class PostCompactionRefreshProcessor(MultiHookProcessor):
+285	    """After context compaction, re-inject a fresh workspace snapshot from the
+286	    sandbox so the model knows what files currently exist rather than relying on
+287	    compressed-away history.
+288	
+289	    Detects compaction by a significant drop in message count between steps
+290	    (same heuristic used by LoopDetectionProcessor).
+291	    """
+292	
+293	    _singleton_group = "tb2_post_compaction_refresh"
+294	    _order = 11  # runs after CompactionProcessor (8)
+295	
+296	    def __init__(self, drop_threshold: int = 5) -> None:
+297	        self._drop_threshold = drop_threshold
+298	        self._prev_count: int = 0
+299	
+300	    async def on_task_start(self, event: TaskStartEvent):
+301	        self._prev_count = 0
+302	        yield event
+303	
+304	    async def on_step_start(self, event: StepStartEvent):
+305	        current_count = len(event.messages)
+306	        prev = self._prev_count
+307	        self._prev_count = current_count
+308	
+309	        if not (prev > 0 and (prev - current_count) >= self._drop_threshold):
+310	            yield event
+311	            return
+312	
+313	        from harnessx.sandbox.base import get_current_sandbox
+314	
+315	        sandbox = get_current_sandbox()
+316	        if sandbox is None:
+317	            yield event
+318	            return
+319	
+320	        try:
+321	            ls_out = await sandbox.exec("ls -la /app 2>/dev/null | head -30", timeout=8)
+322	        except Exception:
+323	            yield event
+324	            return
+325	
+326	        procs_out = ""
+327	        try:
+328	            procs_out = await sandbox.exec(
+329	                "ps aux --no-headers 2>/dev/null | grep -v '\\[' "
+330	                "| awk '{print $11}' | sort -u | grep -v '^ps$' | head -8",
+331	                timeout=5,
+332	            )
+333	        except Exception:
+334	            pass
+335	
+336	        snapshot = f"[PostCompaction] Context was compressed. Current workspace state:\n```\n{ls_out.strip()}\n```"
+337	        if procs_out and procs_out.strip():
+338	            snapshot += f"\nRunning processes: {procs_out.strip()}"
+339	
+
+[Showing lines 260–339 of 466 total. Use offset=339 to read the next section.]

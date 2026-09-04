@@ -1,0 +1,34 @@
+12:    async def execute(self, name: str, input: dict) -> ToolResult:
+13:        tool = self._tools.get(name)
+15:            return ToolResult(output="", error=f"Tool '{name}' not found")
+=== how HarnessConfig resolves tool_registry.builtin names ===
+harnessx/core/builder.py:22:        "tool_registry",
+harnessx/core/builder.py:137:        Valid keys: ``tool_registry``, ``tracer``,
+harnessx/core/builder.py:150:        Tools are registered into the ``tool_registry`` slot at :meth:`build`
+harnessx/core/builder.py:151:        time.  If no registry was supplied via ``.slot(tool_registry=...)``, an
+harnessx/core/builder.py:212:        from ..plugins.builtins.shell_hook import build_shell_hook_processor
+harnessx/core/builder.py:228:            from ..plugins.builtins.command_injection import CommandInjectionProcessor
+harnessx/core/builder.py:314:        # ── tool_registry ─────────────────────────────────────────────────────
+harnessx/core/builder.py:317:            registry = slots.get("tool_registry")
+harnessx/core/builder.py:324:            slots["tool_registry"] = registry
+harnessx/core/config_schema.py:13:    ``builtin`` lists tool names to register from the standard builtin set
+harnessx/core/config_schema.py:18:    builtin: list[str] = field(default_factory=list)
+harnessx/core/config_store.py:28:    cs.store(name="default", node=ToolRegistryConfig, group="harness/tool_registry")
+harnessx/core/events.py:98:    tools: tuple["ToolSchema", ...] = ()  # initial tool schemas from tool_registry
+harnessx/core/events.py:122:    tools: tuple["ToolSchema", ...] = ()  # initial schemas from tool_registry
+harnessx/core/harness.py:36:    "tool_registry",
+harnessx/core/harness.py:345:    tool_registry: Any  # InMemoryToolRegistry | MCPToolRegistry
+harnessx/core/harness.py:386:    * ``__hx_target__`` set by :func:`_build_tool_registry_from_config`
+harnessx/core/harness.py:394:      misclassified as ``builtin`` — previously they ended up being
+harnessx/core/harness.py:395:      dropped on the next load, because the default builtin set
+harnessx/core/harness.py:400:    builtin_names: list = []
+harnessx/core/harness.py:404:        from ..tools.builtin import build_default_tools as _bdt
+harnessx/core/harness.py:422:                builtin_names.append(name)
+harnessx/core/harness.py:429:                    "tool_registry: tool %r has no recorded __hx_target__ and "
+harnessx/core/harness.py:431:                    "(module=%r, qualname=%r); serializing as a builtin "
+harnessx/core/harness.py:433:                    "round-trip unless %r is added to the default builtin set.",
+harnessx/core/harness.py:439:                builtin_names.append(name)
+harnessx/core/harness.py:440:    return ToolRegistryConfig(builtin=builtin_names, custom=custom_targets)
+harnessx/core/harness.py:470:def _build_tool_registry_from_config(cfg: ToolRegistryConfig) -> Any:
+harnessx/core/harness.py:487:    if cfg.builtin:
+harnessx/core/harness.py:488:        from ..tools.builtin import build_default_tools

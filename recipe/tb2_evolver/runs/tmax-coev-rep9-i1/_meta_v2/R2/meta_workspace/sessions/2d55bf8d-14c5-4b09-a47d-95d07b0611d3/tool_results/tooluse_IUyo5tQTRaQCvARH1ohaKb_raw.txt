@@ -1,0 +1,158 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""TruncationLoopGuard — break the no-tool-call max-tokens repetition thrash.
+4	
+5	Systemic failure mode observed on TB2/Tmax with a small per-call `max_tokens`
+6	cap (4096): when the model tries to reason its way through a stuck spot it
+7	emits a long block of narration with **no tool call**, hits the output-token
+8	limit, gets truncated, receives the run-loop's passive "continue from where you
+9	left off" nudge, and re-emits near-identical truncated narration — over and
+10	over. Each such turn is truncated at the same length and carries no tool call,
+11	so it makes zero progress and never writes the required output files.
+12	
+13	Why the existing pipeline does not catch this:
+14	
+15	* `LoopDetectionProcessor` fingerprints **tool calls only** (`on_before_tool` /
+16	  `on_after_tool`). A turn with no tool call is invisible to it, so a run of
+17	  10-17 truncated narration turns never trips it.
+18	* `LengthTruncationRecoveryProcessor` keys its corrective nudge off
+19	  `finish_reason == "length"` in `on_after_model`; in this pipeline that
+20	  corrective text never reaches the transcript (only the run-loop's passive
+21	  nudge appears), so the model gets no directive to stop narrating and act.
+22	
+23	This guard is deliberately independent of `finish_reason`. It keys off two
+24	directly observable properties of the assistant turn:
+25	
+26	1. it carried **no tool call**, and
+27	2. its content is **long** (>= ``trunc_char_threshold``) — the signature of a
+28	   response that ran into the output-token cap.
+29	
+30	It counts such turns inside a sliding window of the most recent assistant
+31	turns. A single legitimate reasoning-only turn (or a couple interleaved with
+32	real tool work) never accumulates; a truncation thrash does.
+33	
+34	* At ``warn_threshold`` long-no-tool turns in the window it injects ONE strong
+35	  corrective user message (contract-safe: replaces the trailing user message if
+36	  the run loop already added its passive nudge, otherwise appends exactly one).
+37	  This is the recovery push the dead length-recovery nudge was meant to give.
+38	* At ``raise_threshold`` it raises ``LoopDetectedError`` for a clean
+39	  ``exit_reason=loop_detected`` — containment that stops the run from burning
+40	  its whole step budget on a loop that is provably making no progress.
+41	
+42	Thresholds are tuned wide against this round's trajectories: every passing task
+43	tops out at <= 2 long-no-tool turns in an 8-window, and the one heavy-but-
+44	recovering passing task (task_000740) peaks at 4 — so ``warn=3`` only nudges and
+45	``raise=6`` never fires on it, while the failing thrash cluster (6-7 in-window)
+46	is caught.
+47	"""
+48	
+49	from __future__ import annotations
+50	
+51	import dataclasses
+52	from collections import deque
+53	
+54	from harnessx.core.events import (
+55	    BeforeModelEvent,
+56	    Message,
+57	    ModelResponseEvent,
+58	    TaskEndEvent,
+59	    TaskStartEvent,
+60	)
+61	from harnessx.core.processor import MultiHookProcessor
+62	from harnessx.core.runloop import LoopDetectedError
+63	
+64	
+65	_NUDGE = (
+66	    "STOP narrating. Your last several turns produced long reasoning that was "
+67	    "cut off by the output-token limit WITHOUT running any command — you are "
+68	    "repeating yourself and making no progress. Do not re-explain your analysis. "
+69	    "In your very next turn write at most two short sentences, then issue exactly "
+70	    "ONE concrete Bash command that either (a) writes a required output file to "
+71	    "the exact path named in the task, or (b) runs a single quick command to "
+72	    "inspect the current state so you can pick the next concrete step. One "
+73	    "command only. Keep the whole response short so it is not truncated again."
+74	)
+75	
+76	
+77	class TruncationLoopGuard(MultiHookProcessor):
+78	    """Detect and break a run of long, tool-call-free (truncated) turns."""
+79	
+80	    _singleton_group = "tmax_truncation_loop_guard"
+81	    # After length_recovery (5) / env (5) / time (6); before parse_retry (10).
+82	    _order = 7
+83	
+84	    def __init__(
+85	        self,
+86	        window_size: int = 8,
+87	        warn_threshold: int = 3,
+88	        raise_threshold: int = 6,
+89	        trunc_char_threshold: int = 1500,
+90	    ) -> None:
+91	        self.window_size = max(1, int(window_size))
+92	        self.warn_threshold = max(1, int(warn_threshold))
+93	        self.raise_threshold = max(self.warn_threshold + 1, int(raise_threshold))
+94	        self.trunc_char_threshold = max(1, int(trunc_char_threshold))
+95	        # Sliding window of booleans: was each recent assistant turn a
+96	        # long, tool-call-free (i.e. likely truncated) turn?
+97	        self._window: deque[bool] = deque(maxlen=self.window_size)
+98	        self._pending_nudge: str = ""
+99	        self._warned: bool = False
+100	
+101	    def _reset(self) -> None:
+102	        self._window.clear()
+103	        self._pending_nudge = ""
+104	        self._warned = False
+105	
+106	    async def on_task_start(self, event: TaskStartEvent):
+107	        self._reset()
+108	        yield event
+109	
+110	    async def on_after_model(self, event: ModelResponseEvent):
+111	        content = event.content or ""
+112	        long_no_tool = (not event.tool_calls) and len(content) >= self.trunc_char_threshold
+113	        self._window.append(long_no_tool)
+114	
+115	        if not long_no_tool:
+116	            # A productive turn (tool call, or a short answer) is progress;
+117	            # clear the pending nudge so we don't inject stale corrections.
+118	            self._pending_nudge = ""
+119	            yield event
+120	            return
+121	
+122	        count = sum(1 for v in self._window if v)
+123	
+124	        if count >= self.raise_threshold:
+125	            raise LoopDetectedError(
+126	                "Truncation loop: "
+127	                f"{count} long tool-call-free (token-limit-truncated) turns "
+128	                f"in the last {len(self._window)} turns — no progress being made"
+129	            )
+130	
+131	        if count >= self.warn_threshold and not self._warned:
+132	            self._pending_nudge = _NUDGE
+133	            self._warned = True
+134	
+135	        yield event
+136	
+137	    async def on_before_model(self, event: BeforeModelEvent):
+138	        if not self._pending_nudge:
+139	            yield event
+140	            return
+141	        nudge = self._pending_nudge
+142	        self._pending_nudge = ""
+143	        msgs = list(event.messages)
+144	        # The run loop appends a passive "continue" user message after a
+145	        # length truncation. Replace it (never insert a 2nd trailing user
+146	        # message) to stay within the on_before_model contract.
+147	        if msgs and getattr(msgs[-1], "role", None) == "user":
+148	            msgs[-1] = Message(role="user", content=nudge)
+149	            yield dataclasses.replace(event, messages=tuple(msgs))
+150	        else:
+151	            yield dataclasses.replace(
+152	                event,
+153	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+154	            )
+155	
+156	    async def on_task_end(self, event: TaskEndEvent):
+157	        self._reset()
+158	        yield event

@@ -1,0 +1,132 @@
+56	        self,
+57	        logs_dir: Path,
+58	        model_name: str | None = None,
+59	        api_base: str | None = None,
+60	        api_key: str = API_KEY_DEFAULT,
+61	        extra_headers: str | dict | None = None,
+62	        max_steps: int = MAX_STEPS,
+63	        request_timeout_sec: int = REQUEST_TIMEOUT_SEC,
+64	        max_tokens: int | None = None,
+65	        reasoning_effort: str | None = None,
+66	        temperature: float | None = None,
+67	        extra_body: str | dict | None = None,
+68	        harness_config_yaml: str | None = None,
+69	        **kwargs,
+70	    ):
+71	        super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
+72	        self._api_base = api_base
+73	        self._api_key = api_key
+74	        self._extra_headers = _parse_extra_headers(extra_headers)
+75	        self._max_steps = int(max_steps)
+76	        self._request_timeout_sec = int(request_timeout_sec)
+77	        self._max_tokens = int(max_tokens) if max_tokens is not None else None
+78	        self._reasoning_effort = (
+79	            reasoning_effort.strip() if isinstance(reasoning_effort, str) and reasoning_effort.strip() else None
+80	        )
+81	        self._temperature = float(temperature) if temperature is not None else None
+82	        self._extra_body = _parse_json_obj(extra_body)
+83	        # Optional path to an evolved HarnessConfig YAML.  When set, the
+84	        # processor pipeline is loaded from this file; runtime slots are
+85	        # injected at run time via .copy().
+86	        # Pass via: --ak harness_config_yaml=/path/to/config.yaml
+87	        # Or set env var TB2_HARNESS_CONFIG before launching eval.
+88	        raw_cfg = harness_config_yaml or os.environ.get("TB2_HARNESS_CONFIG")
+89	        self._harness_config_yaml = raw_cfg.strip() if isinstance(raw_cfg, str) and raw_cfg.strip() else None
+90	
+91	    @staticmethod
+92	    def name() -> str:
+93	        return "harnessx"
+94	
+95	    def version(self) -> str | None:
+96	        return "1.0.0"
+97	
+98	    async def setup(self, environment: BaseEnvironment) -> None:  # noqa: ARG002
+99	        pass  # No setup required for HarnessX
+100	
+101	    async def run(
+102	        self,
+103	        instruction: str,
+104	        environment: BaseEnvironment,
+105	        context: AgentContext,
+106	    ) -> None:
+107	        from harnessx import BaseTask
+108	        from harnessx.core.harness import HarnessConfig
+109	        from harnessx.core.model_config import ModelConfig
+110	        from harnessx.tracing.journal import HarnessJournal
+111	        from .harbor_sandbox import HarborSandboxProvider
+112	        from .harness import make_tb2_harness_config
+113	
+114	        # ── Build provider ────────────────────────────────────────────────────
+115	        model = self.model_name or "openai/gpt-4o-mini"
+116	
+117	        if (
+118	            model.startswith("anthropic/")
+119	            or model.startswith("claude-")
+120	            or (self._api_base and "anthropic" in self._api_base)
+121	        ):
+122	            from harnessx.providers.anthropic_provider import AnthropicProvider
+123	
+124	            anthropic_model = model[len("anthropic/") :]
+125	            provider_kwargs: dict = {"timeout": float(self._request_timeout_sec)}
+126	            if self._max_tokens is not None:
+127	                provider_kwargs["max_tokens"] = self._max_tokens
+128	            if self._api_key:
+129	                provider_kwargs["api_key"] = self._api_key
+130	            if self._api_base:
+131	                # Anthropic SDK appends /v1/messages itself; strip trailing /v1
+132	                # to avoid double-v1 (e.g. http://host/v1 → http://host)
+133	                base = self._api_base.rstrip("/")
+134	                provider_kwargs["base_url"] = base[:-3] if base.endswith("/v1") else base
+135	            if self._extra_headers:
+136	                provider_kwargs["default_headers"] = self._extra_headers
+137	            provider = AnthropicProvider(model=anthropic_model, **provider_kwargs)
+138	        else:
+139	            from harnessx.providers.openai_provider import OpenAIProvider
+140	
+141	            provider_kwargs = {}
+142	            if self._max_tokens is not None:
+143	                provider_kwargs["max_tokens"] = self._max_tokens
+144	            if self._api_key:
+145	                provider_kwargs["api_key"] = self._api_key
+146	            if self._api_base:
+147	                provider_kwargs["base_url"] = self._api_base
+148	            if self._extra_headers:
+149	                provider_kwargs["extra_headers"] = self._extra_headers
+150	            # Optional OpenAI-compatible reasoning controls (GPT-5/o-series, etc.).
+151	            reasoning_effort = self._reasoning_effort or (os.environ.get("TB2_REASONING_EFFORT") or "").strip() or None
+152	            if reasoning_effort:
+153	                provider_kwargs["reasoning_effort"] = reasoning_effort
+154	
+155	            temperature = self._temperature
+156	            if temperature is None:
+157	                raw_temp = (os.environ.get("TB2_TEMPERATURE") or "").strip()
+158	                if raw_temp:
+159	                    try:
+160	                        temperature = float(raw_temp)
+161	                    except Exception:
+162	                        temperature = None
+163	            if temperature is not None:
+164	                provider_kwargs["temperature"] = temperature
+165	
+166	            # For vLLM/Qwen/Gemma thinking mode: pass OpenAI extra_body JSON.
+167	            extra_body = self._extra_body or _parse_json_obj(os.environ.get("TB2_EXTRA_BODY_JSON"))
+168	            if extra_body:
+169	                provider_kwargs["extra_body"] = extra_body
+170	            provider = OpenAIProvider(model=model, **provider_kwargs)
+171	
+172	        # ── Resolve task timeout ──────────────────────────────────────────────
+173	        task_timeout = getattr(context, "timeout_sec", None)
+174	        if not task_timeout:
+175	            try:
+176	                task_toml = environment.environment_dir.parent / "task.toml"
+177	                m = re.search(r"timeout_sec\s*=\s*([0-9.]+)", task_toml.read_text())
+178	                if m:
+179	                    task_timeout = float(m.group(1))
+180	            except Exception:
+181	                pass
+182	        task_timeout = task_timeout or 3600
+183	
+184	        # ── Load harness config ───────────────────────────────────────────────
+185	        # Load the processor pipeline from an evolved YAML when available,
+
+[Showing lines 56–185 of 222 total. Use offset=185 to read the next section.]

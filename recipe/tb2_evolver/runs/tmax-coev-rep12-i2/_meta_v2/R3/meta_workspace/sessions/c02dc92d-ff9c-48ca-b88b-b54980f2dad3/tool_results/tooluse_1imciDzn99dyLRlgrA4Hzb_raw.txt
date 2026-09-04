@@ -1,0 +1,168 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""ContentRepetitionRecoveryProcessor for Tmax / TB2-style agents.
+4	
+5	Closes a systemic failure mode distinct from the max-tokens truncation loop
+6	already handled by ``LengthTruncationRecoveryProcessor``:
+7	
+8	The model issues (near-)identical assistant *narration* turn after turn —
+9	often with a tool call that also repeats or accomplishes nothing — while
+10	declaring "I keep getting the same error, let me try a different approach"
+11	and then NOT actually changing approach. The turn finishes normally
+12	(``finish_reason`` in stop/end_turn/tool_calls), so the length-recovery
+13	processor never fires; the edit-loop guard only watches file-write commands,
+14	so diagnostic/compile loops slip past it. The task burns its entire step
+15	budget in a degenerate loop and exits ``budget_exceeded`` / ``max_steps``
+16	with the required output file never written.
+17	
+18	Observed shape (this failure class, generalised — no task-specific literals):
+19	consecutive assistant turns whose normalized content shares the same short
+20	prefix / same overall signature 4–15 times in a row.
+21	
+22	This processor:
+23	* fingerprints each assistant turn's content (whitespace/case-normalized,
+24	  length-bounded prefix hash) at ``on_after_model``;
+25	* counts consecutive turns with a matching fingerprint;
+26	* once the run of look-alike turns reaches ``repeat_threshold``, arms an
+27	  escalating corrective nudge injected at the next ``on_before_model``,
+28	  instructing the model to abandon the repeated line of reasoning and take
+29	  one concrete, *different* action (or, if genuinely stuck, to write the
+30	  best-effort required output to its exact task path before it runs out of
+31	  steps).
+32	
+33	It never blocks a tool call and mutates messages by at most +1 user turn
+34	per chain (replacing a trailing user message if the run loop already
+35	appended one), satisfying the HarnessX message contract.
+36	"""
+37	
+38	from __future__ import annotations
+39	
+40	import dataclasses
+41	import hashlib
+42	import re
+43	
+44	from harnessx.core.events import (
+45	    BeforeModelEvent,
+46	    Message,
+47	    ModelResponseEvent,
+48	    TaskEndEvent,
+49	    TaskStartEvent,
+50	)
+51	from harnessx.core.processor import MultiHookProcessor
+52	
+53	_WS = re.compile(r"\s+")
+54	
+55	_NUDGE_FIRST = (
+56	    "You have now produced several nearly identical turns in a row — you are "
+57	    "restating the same analysis instead of making real progress. Do NOT repeat "
+58	    "that reasoning again. In your next turn, change tactic concretely: run a "
+59	    "command you have not run yet (inspect a different file, dump raw bytes, "
+60	    "print intermediate values, or test a smaller isolated case) so you get NEW "
+61	    "information. One short, different Bash command."
+62	)
+63	
+64	_NUDGE_REPEAT = (
+65	    "STOP — you are stuck in a repetition loop and burning your step budget. The "
+66	    "approach you keep retrying is not working and re-explaining it will not help. "
+67	    "Abandon it entirely. Decide right now between two moves and take exactly one: "
+68	    "(a) if you have a partial but plausible result, WRITE the required output "
+69	    "file(s) to the exact path named in the task and then verify it exists with "
+70	    "`ls`; or (b) gather genuinely new evidence with a single command you have not "
+71	    "tried before. Do not restate prior narration. One Bash command only."
+72	)
+73	
+74	
+75	def _fingerprint(content: str, prefix_chars: int) -> str:
+76	    """Whitespace/case-normalized bounded-prefix hash of assistant content."""
+77	    norm = _WS.sub(" ", (content or "").strip().lower())
+78	    if not norm:
+79	        return ""
+80	    return hashlib.sha1(norm[:prefix_chars].encode("utf-8")).hexdigest()
+81	
+82	
+83	class ContentRepetitionRecoveryProcessor(MultiHookProcessor):
+84	    """Break a near-identical-narration repetition loop and redirect to act."""
+85	
+86	    _singleton_group = "tmax_content_repetition_recovery"
+87	    # Run after length-recovery (_order=5) so a length-truncation loop is
+88	    # handled by its dedicated processor first; this one catches the
+89	    # normal-finish narration loop that length-recovery ignores.
+90	    _order = 6
+91	
+92	    def __init__(
+93	        self,
+94	        repeat_threshold: int = 3,
+95	        escalate_threshold: int = 5,
+96	        prefix_chars: int = 120,
+97	        min_content_chars: int = 40,
+98	    ) -> None:
+99	        # Number of consecutive look-alike turns before the first nudge.
+100	        self.repeat_threshold = max(2, int(repeat_threshold))
+101	        # Consecutive look-alike turns before the hard "stop / write output" nudge.
+102	        self.escalate_threshold = max(self.repeat_threshold, int(escalate_threshold))
+103	        self.prefix_chars = max(20, int(prefix_chars))
+104	        # Ignore trivially short turns (e.g. "Done." / "Now let me run it.") so
+105	        # ordinary terse narration does not trip the guard.
+106	        self.min_content_chars = max(0, int(min_content_chars))
+107	        self._last_fp: str = ""
+108	        self._run: int = 0
+109	        self._pending_nudge: str = ""
+110	
+111	    async def on_task_start(self, event: TaskStartEvent):
+112	        self._last_fp = ""
+113	        self._run = 0
+114	        self._pending_nudge = ""
+115	        yield event
+116	
+117	    async def on_after_model(self, event: ModelResponseEvent):
+118	        content = event.content or ""
+119	        # Only consider substantive narration; blank/very short turns reset
+120	        # nothing and are not counted (they are usually terse action turns).
+121	        norm_len = len(_WS.sub(" ", content.strip()))
+122	        if norm_len < self.min_content_chars:
+123	            yield event
+124	            return
+125	
+126	        fp = _fingerprint(content, self.prefix_chars)
+127	        if fp and fp == self._last_fp:
+128	            self._run += 1
+129	        else:
+130	            self._last_fp = fp
+131	            self._run = 1
+132	
+133	        if self._run >= self.repeat_threshold:
+134	            self._pending_nudge = (
+135	                _NUDGE_REPEAT
+136	                if self._run >= self.escalate_threshold
+137	                else _NUDGE_FIRST
+138	            )
+139	            # Reset the run counter so we nudge once per detected streak
+140	            # start, then re-arm only if the loop genuinely continues past
+141	            # the threshold again (avoids nudging every single turn).
+142	            self._run = 0
+143	            self._last_fp = ""
+144	        yield event
+145	
+146	    async def on_before_model(self, event: BeforeModelEvent):
+147	        if not self._pending_nudge:
+148	            yield event
+149	            return
+150	        nudge = self._pending_nudge
+151	        self._pending_nudge = ""
+152	        msgs = list(event.messages)
+153	        # Preserve the +1 message contract: if the run loop already appended a
+154	        # trailing user message, replace it rather than adding a second one.
+155	        if msgs and getattr(msgs[-1], "role", None) == "user":
+156	            msgs[-1] = Message(role="user", content=nudge)
+157	            yield dataclasses.replace(event, messages=tuple(msgs))
+158	        else:
+159	            yield dataclasses.replace(
+160	                event,
+161	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+162	            )
+163	
+164	    async def on_task_end(self, event: TaskEndEvent):
+165	        self._last_fp = ""
+166	        self._run = 0
+167	        self._pending_nudge = ""
+168	        yield event

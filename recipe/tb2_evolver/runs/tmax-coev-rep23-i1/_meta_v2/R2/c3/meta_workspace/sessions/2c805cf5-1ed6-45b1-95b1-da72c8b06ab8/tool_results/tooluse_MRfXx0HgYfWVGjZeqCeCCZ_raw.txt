@@ -1,0 +1,42 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatCommandBreakerProcessor for Tmax (and TB2-style) agents.
+4	
+5	Closes a systemic no-progress failure mode observed across many Tmax
+6	trajectories: the agent issues the **same** shell command, gets the
+7	**same** result, and then re-issues that identical command again and
+8	again — 15 to 28 consecutive times in the worst cases — making zero
+9	progress until it either exhausts its step budget
+10	(``exit_reason=budget_exceeded``) or gets its context compacted and
+11	loses the plot. Common triggers:
+12	
+13	* trying to ``kill`` / ``pkill`` a process that is a **zombie**
+14	  (``<defunct>``) — a zombie cannot be killed; it is already dead and
+15	  waiting to be reaped by its parent, so the kill is a permanent no-op;
+16	* re-running a build/test command that keeps failing identically and
+17	  expecting a different outcome;
+18	* polling a state that never changes.
+19	
+20	The single tool (``Bash``) makes this purely a control-loop problem:
+21	the model has no self-monitor for "I have run this exact command with
+22	this exact output N times and nothing has changed." This processor is
+23	that monitor. It is benchmark-agnostic: it keys only on the observable
+24	command/result fingerprint, never on task content.
+25	
+26	Mechanism:
+27	* ``on_after_tool`` fingerprints each ``Bash`` call as
+28	  (normalized command, normalized result) and counts consecutive
+29	  identical fingerprints.
+30	* When the run reaches ``repeat_threshold`` identical (command, result)
+31	  pairs in a row, it arms a one-shot corrective nudge.
+32	* ``on_before_model`` injects that nudge as a single user message,
+33	  telling the agent the command is not making progress and to change
+34	  strategy. It fires at most once per
+35	  distinct loop, then re-arms only if the count climbs another
+36	  ``repeat_threshold`` above where it last fired — so a persistent loop
+37	  gets a second, firmer escalation rather than a nudge every step.
+38	"""
+39	
+40	from __future__ import annotations
+
+[Showing lines 1–40 of 186 total. Use offset=40 to read the next section.]

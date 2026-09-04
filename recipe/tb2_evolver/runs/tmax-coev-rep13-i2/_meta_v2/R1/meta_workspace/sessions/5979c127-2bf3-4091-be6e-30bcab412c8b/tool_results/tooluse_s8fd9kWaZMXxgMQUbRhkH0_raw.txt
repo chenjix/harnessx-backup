@@ -1,0 +1,107 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	#
+16	# R4 change (Instruction lever — first attempt on this lever):
+17	#   system_prompt.txt (sibling, read by SiblingSystemPromptBuilder) is
+18	#   upgraded from the bare 5-line default to a general work-discipline
+19	#   prompt: survey -> restate concrete requirements -> implement ->
+20	#   change-the-assumption-not-the-command when stuck -> verify each named
+21	#   requirement with Bash before stopping. This targets the two largest
+22	#   R3 failing shapes that the control lever (R1 advisory, R3 hard-block)
+23	#   could not convert: premature confident commit and thrash-without-
+24	#   replanning. General strategy only, no task-specific literals.
+25	#   The DeadLoopBreaker processor is retained unchanged (additive, harmless
+26	#   in the general case); its module is now vendored under this round's
+27	#   output_dir so the config is self-contained.
+28	
+29	tool_registry:
+30	  builtin:
+31	  - Bash
+32	  custom: []
+33	tracer: null
+34	processors:
+35	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+36	  system_builder:
+37	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+38	  _hook_: '*'
+39	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+40	  working_dir: /home/user
+41	  constraints: {}
+42	  header: Environment
+43	  max_tree_lines: 20
+44	  non_interactive: true
+45	  inject_integrity_rules: true
+46	  show_project_dir: false
+47	  _hook_: '*'
+48	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+49	  tool_schemas: {}
+50	  _hook_: '*'
+51	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+52	  warn_at:
+53	  - 0.7
+54	  - 0.9
+55	  _hook_: '*'
+56	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+57	# Without this, one stuck task can block an entire evolve round.
+58	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+59	  repeat_threshold: 2
+60	  head_chars: 1200
+61	  tail_chars: 600
+62	  _hook_: '*'
+63	# Break GENUINE dead command loops (see processors/dead_loop_breaker.py).
+64	# Successor to R1's RepeatCommandGuard. That guard keyed on the command string
+65	# alone and was advisory-only; on this model the agent ignored the advisory and
+66	# re-ran the exact same command with the exact same output until it burned the
+67	# step budget (one task looped 12x on a read-only diagnostic -> agent_error).
+68	# DeadLoopBreaker keys on (command, output-fingerprint) so healthy
+69	# iterate-and-test loops (output changes each run) are never touched, and it
+70	# escalates from an advisory to a HARD BLOCK: at block_threshold identical
+71	# (command, output) repeats the next identical call is intercepted (approved=
+72	# False + synthetic directive) and does not execute, forcing the agent off the
+73	# dead command. block_threshold=5 sits above the max identical (command,output)
+74	# repeat count reached by any observed PASSING task (<=2), so passers that
+75	# re-run a build/write many times are unaffected. Retained unchanged from R3.
+76	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep13-i2/R0/assets/processors/dead_loop_breaker.py::DeadLoopBreaker
+77	  advisory_threshold: 3
+78	  block_threshold: 5
+79	  _hook_: '*'
+80	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+81	  token_threshold: 140000
+82	  message_threshold: 100
+83	  retention_window: 6
+84	  eviction_fraction: 0.5
+85	  summarize_key: summarize
+86	  preserve_first_message: true
+87	  _hook_: '*'
+88	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+89	  max_consecutive_errors: 1
+90	  _hook_: '*'
+91	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+92	  drop_threshold: 5
+93	  _hook_: '*'
+94	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+95	  _hook_: '*'
+96	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+97	  threshold: 7
+98	  _hook_: '*'
+99	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+100	  _hook_: '*'
+101	workspace: null
+102	workspace_template: default
+103	init_workspace: false
+104	step_snapshots: true
+105	sandbox_provider: null
+106	sandbox_hint_id: null
+107	plugins: []

@@ -1,0 +1,127 @@
+991	### Evidence
+992	
+993	- task_000505_50b5162d result.json: reward=0, exit_reason=done,
+994	  finished=no_tool_calls, steps=14; final_pytest "2 of 2 evil bypassed:
+995	  cat_evil, ls_evil".
+996	- messages.json msg 7 (tool result): tesseract emitted
+997	  "ssh-ed25519 AAAAC3NzaC1IZDIINTESAAAAIOrXQ50Bf4PZU0H9 + |J9tY +X07yG/pA3T2Xb8"
+998	  (garbled). msg 9 hardcoded it into the script. msg 15/17: created
+999	  /tmp/malicious_test.txt by echoing the same garbled string, ran
+1000	  detect_trojan.sh /tmp/malicious_test.txt -> exit 1; msg 19 final-verification
+1001	  ran the script against /tmp/test_binary (also fabricated with the derived key).
+1002	  The real evil corpus was never inspected.
+1003	- Detector dry-run over this trajectory: FIRES on the msg-19 fabricated-input run;
+1004	  a synthetic real-input run (detect_trojan.sh /app/evidence.png) is correctly
+1005	  SILENT (real_data present).
+1006	- False-positive sweep over all 29 R2 passing tasks: fires on exactly 1
+1007	  (task_000760, reproducibility probe with a self-made /tmp/test.csv) - additive
+1008	  note only, cannot break the pass.
+1009	
+1010	### Uncertainty
+1011	
+1012	Partial-yes retroactive check: after the nudge the agent's natural next step is
+1013	running strings on a real evil binary, which surfaces the CORRECT key and lets it
+1014	fix the hardcoded string - closing the false-confidence loop that PREVENTED
+1015	discovery. The residual OCR misread is a model limit; if the model reads the note
+1016	but still declines to inspect the real corpus, task_000505 stays F, but the
+1017	append-only design cannot itself regress anything. If next round is flat with 505
+1018	still F on the same assertion and the note fired, the residual is a pure
+1019	OCR/model-capability limit - revert per rollback_trigger.
+1020	
+1021	## Round 5 — noop: task_000010 residual is a single-task capability gap; cluster saturated
+1022	
+1023	<!-- journal:frontmatter
+1024	round: 5
+1025	timestamp: 2026-08-28T17:00:00Z
+1026	hypothesis_id: h_noop_task010_shadow_capgap_v1
+1027	levers: []
+1028	predicted_affected: []
+1029	gating_outcome: pending
+1030	gating_attribution: pending
+1031	expected_global_gain: "None — explicit no-op. The r4 failure of task_000010 is a single-task Python-stdlib-shadow reasoning trap plus a self-inflicted give-up-on-the-required-path error; there is no 2-or-more-task systemic harness gap to close, and every legitimate lever for this shape is already in-flight (3 pending control processors explicitly list task_000010 as predicted_affected)."
+1032	regression_risk: "None — config is byte-identical to R0."
+1033	cost_shift: "Zero."
+1034	rollback_trigger: "N/A (noop). If none of the pending control processors (R3 h_degenerate_loop_breaker_v1 / R3 h_stuck_truncation_escalator_v1) flip task_000010 next round, the residual is confirmed a pure model-reasoning limit (finding the sys.path/cwd escape) — no harness lever applies; keep skipping."
+1035	-->
+1036	
+1037	### Why
+1038	
+1039	Assigned focus task_000010_644ab1c2 (system_administration, reward=0,
+1040	exit_reason=done, finished=no_tool_calls, 32 steps — a voluntary exit).
+1041	The task hard-requires a script at /home/user/operator.py; grader
+1042	test_operator_script_exists only checks os.path.isfile('/home/user/operator.py')
+1043	and the other two final tests pass. The failure is that at exit the required
+1044	file does not exist — the agent renamed it away and gave up.
+1045	
+1046	Root chain (messages.json): msg 13 the agent wrote /home/user/operator.py; msg
+1047	17-19 running python3 -c "import pexpect" triggered a circular import because
+1048	operator.py in cwd /home/user shadows Python's stdlib operator module (any
+1049	stdlib chain subprocess to threading to operator breaks). The agent correctly
+1050	diagnosed the shadow (msg 19) and renamed to k8s_operator.py, then ran the
+1051	pipeline successfully as k8s_operator.py (msgs 35-44: backup created, both
+1052	manifests applied, socat forward up). The stock CustomSelfVerifyProcessor fired
+1053	(msg 45) and the agent even moved the file back to operator.py (msg 47) — but on
+1054	re-running from cwd /home/user it hit the same shadow traceback (msgs 49-54),
+1055	concluded the exact-path requirement was impossible (msg 51/55/57), and
+1056	re-renamed it away for good (msg 59), exiting with /home/user/operator.py absent.
+1057	
+1058	The escape the agent missed is a real reasoning step, not a missing mechanism:
+1059	run the script from a non-/home/user cwd (cd /tmp then python3 /home/user/operator.py)
+1060	or strip sys.path[0], which sidesteps the shadow while keeping the file at the
+1061	required path. Even leaving the file in place unmodified would have passed
+1062	test_operator_script_exists.
+1063	
+1064	### Decision
+1065	
+1066	Explicit no-op. Two reasons this focus does not support a systemic harness change:
+1067	
+1068	1. Idiosyncratic, not systemic. The Python-stdlib-shadow circular-import shape
+1069	   appears in exactly 1 of 50 r4 trajectories (grep of messages.json for
+1070	   circular import / partially initialized module → only task_000010). The other
+1071	   6 failing tasks with does-not-exist / not-found graders (000015, 000118,
+1072	   000536, 000748, 000933, 001653) are content-correctness or accuracy misses
+1073	   (wrong values, wrong bytes, CSV format), NOT deliverable-removed-from-path — so
+1074	   there is no 2-or-more-task cluster sharing this mechanism. Per analyze's
+1075	   systemic-vs-idiosyncratic filter, a single-task observation is a skip.
+1076	
+1077	2. Cluster saturated plus wrong-lever record. Lever scoreboard: control = 5
+1078	   attempts / 0 accepted / 1 reverted; instruction = 2 / 0 / 1 reverted. task_000010
+1079	   specifically is already predicted_affected by THREE in-flight control processors
+1080	   (R1 h_step_budget_reminder_v1 [reverted], R3 h_degenerate_loop_breaker_v1
+1081	   [pending, targets its 2-cycle], R3 h_stuck_truncation_escalator_v1 [pending,
+1082	   targets its length-truncation loop]). Piling a 4th overlapping control/instruction
+1083	   change on this exact task would confound their attribution and is the textbook
+1084	   tried-repeatedly-without-flipping signal to look elsewhere. The one general
+1085	   discipline that would help (an exact output path is non-negotiable; never
+1086	   delete/relocate a required deliverable to dodge a tooling conflict — change the
+1087	   invocation instead) is real but (a) single-task-grounded here and (b) the R3
+1088	   instruction sidecar carrying exact-path guidance was net-negative and reverted
+1089	   (h_ocr_extraction_discipline_v1), so shipping more prompt path-discipline now
+1090	   carries live regression risk for ~1 speculative flip.
+1091	
+1092	This mirrors the accepted R4 c5 precedent (h_noop_task264_capgap_v1): a single-task
+1093	capability-gap focus with the only valid lever already in flight → ship R0
+1094	byte-for-byte rather than drift onto another proposal's territory.
+1095	
+1096	### Evidence
+1097	
+1098	- task_000010_644ab1c2 result.json: reward=0, exit_reason=done, steps=32;
+1099	  final_pytest AssertionError: Operator script /home/user/operator.py does not
+1100	  exist. You must create it. (other 2 final tests pass).
+1101	- messages.json msg 19 "There's a naming conflict … Python is trying to import it
+1102	  when importing operator"; msg 47 mv k8s_operator.py operator.py; msgs 49-54
+1103	  circular-import traceback on import subprocess; msg 51 "this creates a circular
+1104	  import issue"; msg 59 mv operator.py k8s_operator.py (final — path left empty).
+1105	- Cluster sweep: grep -l "circular import" *.messages.json → only task_000010
+1106	  (1/50). does-not-exist / not-found grader sweep → 000015/000118/000536/000748/
+1107	  000933/001653 all content/accuracy misses, distinct mechanisms.
+1108	
+1109	### Uncertainty
+1110	
+1111	If either pending R3 control processor (loop-breaker / truncation-escalator) breaks
+1112	task_000010's loop next round, the agent may still fail on the same shadow-escape
+1113	reasoning step (a model limit), confirming no harness lever applies. If a future
+1114	round finds a second task with the same stdlib-shadow-then-abandon-path shape,
+1115	revisit as a genuine cluster (candidate lever: an on_after_tool detector for the
+1116	circular-import-via-cwd-shadow traceback that injects a general cwd/sys.path hint).
+1117	Config is byte-identical to R0, so this round cannot itself regress anything.

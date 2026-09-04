@@ -1,0 +1,40 @@
+35:        violation_type: One of the _VT_* constants below.
+45:        violation_type: str = "",
+51:        self.violation_type = violation_type
+60:_VT_EMPTY_MESSAGES = "empty_messages"
+61:_VT_SYSTEM_MUTATED = "system_mutated"
+79:    violation_type: str = "",
+88:            violation_type=violation_type,
+93:        violation_type,
+109:def _validate_messages_contract(
+125:        # system_window must not change
+126:        before_sys = (before_msgs[0],) if before_msgs and before_msgs[0].role == "system" else ()
+127:        after_sys = (after_msgs[0],) if after_msgs and after_msgs[0].role == "system" else ()
+130:                "step_start processor modified system_window",
+133:                violation_type=_VT_SYSTEM_MUTATED,
+148:                violation_type=_VT_LAST_MSG_ONLY,
+155:                "before_model: messages became empty after processor — fail fast",
+158:                violation_type=_VT_EMPTY_MESSAGES,
+170:                violation_type=_VT_LENGTH_EXCEEDED,
+178:                violation_type=_VT_LENGTH_EXCEEDED,
+189:                    violation_type=_VT_LENGTH_EXCEEDED,
+192:            # Cross-processor constraint: only one insertion per chain
+196:                    "(chain already has +1 user insertion)",
+199:                    violation_type=_VT_LENGTH_EXCEEDED,
+208:                    violation_type=_VT_FORBIDDEN_ROLE_MUTATION,
+221:                            violation_type=_VT_WINDOW_OUT_OF_SCOPE,
+232:                            violation_type=_VT_WINDOW_OUT_OF_SCOPE,
+257:    1. system count ≤ 1 and at position 0 when present.
+265:    # Invariant 1: system constraint (only meaningful when final_msgs non-empty)
+266:    sys_count = sum(1 for m in final_msgs if m.role == "system") if final_msgs else 0
+269:            f"post-hook: {sys_count} system messages in final messages (max 1 allowed)",
+271:            violation_type="invariant_system_count",
+274:    if sys_count == 1 and final_msgs and final_msgs[0].role != "system":
+276:            "post-hook: system message exists but is not at position 0",
+278:            violation_type="invariant_system_position",
+288:                violation_type="invariant_track_length",
+297:                        violation_type="invariant_role_mismatch",
+305:                        violation_type="invariant_tool_id_mismatch",
+319:            violation_type=_VT_LENGTH_EXCEEDED,
+329:            violation_type=_VT_LENGTH_EXCEEDED,
+415:        # Fail-fast pre-condition: before_model and step_start must not receive empty messages

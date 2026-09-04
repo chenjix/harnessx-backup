@@ -1,0 +1,42 @@
+34	This subclass keeps the identical fire-once exit-interception mechanism and
+35	the numeric cross-check verbatim, and prepends a **deliverable
+36	path-integrity reconciliation** step. The added guidance is a general
+37	verification *strategy* — enumerate every exact path the task names,
+38	confirm the real deliverable sits at each one, and if any required file was
+39	renamed / relocated / re-extensioned (even to dodge an error) restore it to
+40	the exact path and adapt the workaround instead of the deliverable. It
+41	contains no task ids, file paths, module names, constants, or algorithms
+42	lifted from any training task.
+43	"""
+44	
+45	from __future__ import annotations
+46	
+47	from benchmarks.terminal_bench_2.harness import CustomSelfVerifyProcessor
+48	
+49	
+50	_PATH_INTEGRITY_SELF_VERIFY_MSG = """\
+51	Before finishing, run through this checklist — do not skip any step even if you already verified:
+52	
+53	1. **Re-read the task description now.** List every deliverable the task names by an EXACT path (file or directory), plus every accuracy threshold and exact output-format requirement.
+54	
+55	2. **Verify each required deliverable exists at its EXACT required path — not a nearby one:**
+56	```bash
+57	ls -lh /exact/required/path/for/each/deliverable
+58	```
+59	A script that ran without errors does NOT guarantee the file was written to the right place. Run `ls` explicitly for each required path.
+60	
+61	3. **Path-integrity check — the required path is a hard constraint you may NOT renegotiate.** If, at any point, you renamed, moved, changed the extension of, or wrote to a different location than a required deliverable — even to work around a runtime error, a naming conflict, or an import/shadowing problem — that is a FAILURE state right now, regardless of whether your program ran successfully.
+62	   - **Do not adapt the deliverable to your workaround; adapt the workaround to the deliverable.** Restore the canonical file to the EXACT path the task specifies.
+63	   - If the required name/path itself caused the error (e.g. running a script from a directory that makes its filename shadow something, or a path collision), keep the deliverable at the required path and change *how you execute or use it* instead — e.g. run it from a different working directory, invoke it via an execution-only copy under a different name, or set the interpreter/search path so the collision no longer triggers. The graded artifact must be at the required path when you exit.
+64	   - After restoring, re-run `ls` on the exact required path to confirm it is present.
+65	
+66	4. **Inspect the actual file contents** — `cat` or `head` each output file and confirm the values are semantically correct, not just that the file exists or is non-empty. Watch for trailing whitespace/newlines and format drift that an exact-match verifier will reject.
+67	
+68	5. **If any required output is a computed value (a number, count, statistic, coordinate, or metric), do not trust a single implementation.** A program that compiles and runs can still produce a confidently-wrong answer.
+69	   - **Recompute independently.** Reproduce the key quantity with a second, unrelated method or tool (e.g. a short `python3`/`awk`/`numpy` one-liner) and confirm it matches your program's output. If the two disagree, at least one is wrong — reconcile before finishing.
+70	   - **Audit input completeness.** Confirm your program consumed *every* input record — print the count of parsed rows/items and check it equals what the task states (off-by-one and dropped-last-line bugs silently shift results).
+71	   - **Re-examine interpretation.** Re-check any ambiguous choice you made: array/loop bounds and off-by-one indices, inclusive-vs-exclusive ranges, units and scale, which column/field was read, and how ties or edge cases are handled. State the interpretation you chose and confirm it is the one the task describes.
+72	   - **Sanity-check magnitude.** Ask whether the value is physically/plausibly reasonable given the described data; an answer that is obviously off in scale usually signals a parsing or indexing bug, not noise.
+73	
+
+[Showing lines 34–73 of 117 total. Use offset=73 to read the next section.]

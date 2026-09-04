@@ -1,0 +1,61 @@
+                    interrupted_at = tc
+                    exit_reason = "interrupted"
+                    interrupt_triggered = True
+                    break
+
+                tc_event = ToolCallEvent(
+                    run_id=state.run_id,
+                    step_id=step_id,
+                    tool_name=tc.name,
+                    tool_input=tc.input,
+                    tool_call_id=tc.id,
+                    approved=True,
+                )
+                _bt_events = await pipe_all(
+                    tc_event,
+                    get_procs("before_tool"),
+                    tracer=tracer,
+                    hook="before_tool",
+                )
+                tc_event = next(
+                    (e for e in reversed(_bt_events) if isinstance(e, ToolCallEvent)),
+                    tc_event,
+                )
+                await tracer.on_event(tc_event)
+
+                # Propagate run context for spawn_subagent and similar tools
+                try:
+                    from ..tools.spawn_subagent import _spawn_ctx
+
+                    _spawn_ctx_token = _spawn_ctx.set(
+                        {
+                            "run_id": state.run_id,
+                            "step_id": step_id,
+                            "spawn_depth": state.spawn_depth,
+                            "state": state,
+                            "tracer": tracer,
+                            "model_config": model_config,
+                            "harness_config": harness_config,
+                            "child_harness_config": child_harness_config,
+                        }
+                    )
+                except ImportError:
+                    _spawn_ctx_token = None
+
+                _mcp_ctx_token = _mcp_results_ctx.set(_step_mcp_dir)
+                try:
+                    if tc_event.approved:
+                        t0 = time.monotonic()
+                        try:
+                            result = await tool_registry.execute(tc_event.tool_name, tc_event.tool_input)
+                            tr_event = ToolResultEvent(
+                                run_id=state.run_id,
+                                step_id=step_id,
+                                tool_name=tc_event.tool_name,
+                                tool_call_id=tc_event.tool_call_id,
+                                result=result.output,
+                                error=result.error,
+                                duration_ms=(time.monotonic() - t0) * 1000,
+                                content_blocks=tuple(result.content_blocks) if result.content_blocks else (),
+                            )
+                        except Exception as e:

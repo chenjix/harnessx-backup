@@ -1,0 +1,81 @@
+                step_start_event=None if not step_snapshots else step_start_event,
+            )
+            trajectory.add_step(traj_step)
+
+            # ── 7. Loop termination ──────────────────────────────────────────
+            # Thinking-only response: model emitted a reasoning block but no content
+            # and no tool calls. NOT a done turn — the model is mid-reasoning (e.g.
+            # extended-thinking models that emit <think> before deciding which tool
+            # to call). Append a user continuation so the next step's assembled
+            # context ends with "user" (required by all provider APIs) and give the
+            # model another turn to emit content or a tool call.
+            _thinking_only = (
+                not model_event.content
+                and not model_event.tool_calls
+                and (bool(model_event.thinking) or bool(model_event.thinking_blocks))
+            )
+            if _thinking_only:
+                state.add_raw_message(
+                    Message(
+                        role="user",
+                        content="Please continue. Use a tool or provide your final answer.",
+                    )
+                )
+            # Token-limit truncation: model hit max_tokens mid-generation with no tool
+            # calls.  The assistant message is already in state; inject a user nudge so
+            # the next step's context ends with "user" (required by all provider APIs).
+            _length_truncated = (
+                model_event.finish_reason == "length" and not model_event.tool_calls and not _thinking_only
+            )
+            if _length_truncated:
+                state.add_raw_message(
+                    Message(
+                        role="user",
+                        content=(
+                            "Your previous response was cut off by the token limit. "
+                            "Please continue from where you left off."
+                        ),
+                    )
+                )
+                _logger.warning(
+                    "run_loop: finish_reason=length with no tool calls at step=%d — "
+                    "injecting user continuation (run_id=%s)",
+                    step_id,
+                    state.run_id,
+                )
+            if (
+                not _thinking_only
+                and not _length_truncated
+                and model_event.finish_reason in ("end_turn", "stop")
+                and not model_event.tool_calls
+            ):
+                empty_content = not (model_event.content or "").strip()
+                if step_id == 0 and empty_content and not _empty_end_turn_retried:
+                    _model_empty_end_turn_seen = True
+                    _empty_end_turn_retried = True
+                    state.set_slot("__model_empty_end_turn_seen", "diagnostic", True)
+                    state.add_raw_message(
+                        Message(
+                            role="user",
+                            content=(
+                                "Your previous response was empty. Please provide a concise, non-empty "
+                                "answer for this task now."
+                            ),
+                        )
+                    )
+                    _logger.warning(
+                        "run_loop: recovered empty first-turn end_turn via single retry (run_id=%s)",
+                        state.run_id,
+                    )
+                    continue
+                break
+            if task.is_done(state):
+                break
+            if state.budget_exceeded():
+                exit_reason = "budget_exceeded"
+                break
+
+    except BudgetExceededError:
+        exit_reason = "budget_exceeded"
+        # Try to recover the best output from assistant messages
+        final_output = _recover_best_output(state.raw_messages, final_output)

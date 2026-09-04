@@ -1,0 +1,177 @@
+1	# Evolve journal — tmax-coev-rep1-i3
+2	
+3	## Round 1 — lifecycle ground-truth snapshot
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2025-08-17T09:00:00Z
+8	hypothesis_id: h_lifecycle_snapshot_v1
+9	levers: [control]
+10	predicted_affected: [task_000140_01c78b42, task_001090_c61c71f2]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=29/50; +4/-2 gained=task_000329_a3ac56b0,task_000396_e56917e2,task_000587_9862bb19,task_001090_c61c71f2 lost=task_001031_a8f0eb37,task_001818_b251e5ea; score 0.5800 >= incumbent(mean) 0.5400 - tol 0.0400
+14	expected_global_gain: "Flips the process-lifecycle sub-cluster in system_administration (0/5); generalizes to any background-service/PID-recording task"
+15	regression_risk: "One extra Bash round-trip + one checklist turn on every run reaching exit intent; negligible behavior change on pure-logic tasks"
+16	cost_shift: "+1 Bash tool call and ~1 short model turn per run at exit intent; snapshot output bounded"
+17	rollback_trigger: "If R2 pass_rate is flat/down vs R0 27/50 and system_administration is still 0/5, or if the injected Bash snapshot causes any exit_reason=error in replay/eval, revert"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 27/50 (54%). system_administration was the worst cluster at 0/5.
+23	Two of those failures share one mechanism: the agent leaves background
+24	service processes lingering / mis-records a PID, and the verifier fails on
+25	lifecycle assertions even though the task's logic is correct.
+26	task_000140 failed only `test_no_lingering_service_processes` (lingering
+27	`vm_service` PIDs); task_001090 failed only `test_pid_file_and_process`
+28	(`pid.txt` contained `576\n578\n641`). The R0 config already carried a
+29	`ProcessLifecycleSelfVerifyProcessor` whose checklist explicitly warns about
+30	lingering processes and wrapper PIDs — and both agents *read it and
+31	self-reported compliance* without ever running the check. A text reminder
+32	the model narrates past is not a fix; the model needs raw state it did not
+33	author.
+34	
+35	### Changes
+36	
+37	- `processors/lifecycle_snapshot_verify.py` — new
+38	  `LifecycleSnapshotSelfVerifyProcessor` (subclass of the stock
+39	  `CustomSelfVerifyProcessor`, same singleton group `tb2_self_verify` so it
+40	  replaces the R0 processor). On the first exit-intent turn it injects a
+41	  **real `Bash` diagnostic tool call** dumping the live user-process table
+42	  and the contents of every `*.pid`/`pid.txt` file, then injects a
+43	  reconciliation + stock-checklist user message on the next `on_before_model`.
+44	- `config.yaml` — swapped the R0
+45	  `process_lifecycle_verify.py::ProcessLifecycleSelfVerifyProcessor` entry for
+46	  the new processor (`file://` absolute path).
+47	
+48	### Evidence
+49	
+50	- `task_000140_01c78b42` final_pytest: `AssertionError: Lingering vm_service
+51	  processes found: ['343', '606', '810']`. messages.json msg 23 agent
+52	  narrates "Service stopped"; msg 26 self-reports every checklist item ✓ —
+53	  never ran `pgrep -f vm_service`.
+54	- `task_001090_c61c71f2` final_pytest: `pid.txt does not contain a valid
+55	  integer PID ... '576\n578\n641'`. messages.json msg 52 `ps aux` shows the
+56	  wrapper `bash -lc "... nohup ./monitor ... & echo $! > pid.txt"` (576) plus
+57	  `./monitor` (578); msg 53 concludes "PID 578 is the actual monitor process"
+58	  but never re-reads `pid.txt`, which still held three accumulated PIDs.
+59	
+60	### Uncertainty
+61	
+62	Risk 1: the injected Bash snapshot mis-fires in the run loop (e.g. tool-call
+63	schema mismatch) and causes an error — mitigated by dry_fire/contract passing
+64	and by using the same `Bash` tool the agent already uses. Risk 2: the agent
+65	sees the snapshot but still doesn't act (behavior gap, not context gap) — if
+66	so, R2 should escalate to a mechanical guard that blocks exit while duplicate
+67	PIDs exist. Watch: does system_administration move off 0/5 and do the two
+68	predicted tasks flip?
+69	
+70	### Not harness-fixable this round (skip)
+71	
+72	- task_000028_7fe033ac, task_000958_4bb2b05d: verifier import fails with
+73	  `ModuleNotFoundError: No module named 'requests'` — the verifier depends on
+74	  a package absent at agent phase; internet is blocked by default, so the
+75	  agent cannot reliably stage it. Structural/verifier dependency, not a
+76	  harness lever. Revisit only if env_probe shows pip/localhost mirror works.
+77	- task_000010_644ab1c2: agent never created the required `/home/user/operator.py`
+78	  despite 58 steps — a planning/capability gap, not a recurring harness
+79	  mechanism (single task). Log, skip.
+80	
+81	## Round 2 — force-action on truncation spiral
+82	
+83	<!-- journal:frontmatter
+84	round: 2
+85	timestamp: 2025-08-17T10:00:00Z
+86	hypothesis_id: h_truncation_forceact_v1
+87	levers: [control]
+88	predicted_affected: [task_001032_1adaccb9, task_000740_59416444, task_000010_644ab1c2, task_000028_7fe033ac]
+89	cited_candidates: [C-001]
+90	gating_outcome: accepted
+91	gating_attribution: score=28/50; +1/-2 gained=task_001706_24462a09 lost=task_000396_e56917e2,task_000587_9862bb19; score 0.5600 >= incumbent(mean) 0.5800 - tol 0.0400
+92	expected_global_gain: "Flips the length-truncation reasoning-spiral sub-cluster (whole-budget losses across system_administration / data_processing / data_querying); generalizes to any verbose over-reasoning small-model run that never reaches a tool call"
+93	regression_risk: "One extra Bash round-trip + one user message only on runs already at the 3rd consecutive truncation (a state passing tasks never reach); snapshot cmd is fully generic with guards so it cannot error"
+94	cost_shift: "Near-zero on healthy runs; net cost DECREASE on spiralling runs (bounded snapshot replaces empty 4096-token reasoning turns before they exhaust the budget)"
+95	rollback_trigger: "If R3 pass_rate is flat/down vs R1 29/50 and the four cited tasks still show >2 truncation events each, or the injected snapshot causes any exit_reason=error in replay/eval, revert to the v4 length_recovery processor"
+96	-->
+97	
+98	### Why
+99	
+100	R1 accepted at 29/50. Sweeping R1 failures surfaced a recurring,
+101	harness-visible mechanism the R1 config's v4 LengthTruncationRecovery
+102	Processor detects but cannot break: on four failing tasks
+103	(task_001032 x14, task_000740 x9, task_000010 x4, task_000028 x4) the
+104	model emits length-truncated pure-reasoning turns (tool_calls == 0,
+105	finish_reason == length) turn after turn, never reaching a tool call.
+106	The v4 collapse fires correctly (assistant turns end with its discard
+107	marker) and v4's escalated text nudge ("write NO analysis, emit ONE
+108	command") is present — and the model narrates right past it, exactly the
+109	narrated-past failure the R1 lifecycle work already documented. Tasks
+110	with only a single truncation event (000396, 000578, 001673, 001701)
+111	all passed, so heavy truncation is a discriminating failure signal, and
+112	the spiral consumes the whole step/token budget (001032 ran 1109s and
+113	never fixed the tar parser; 000740 exited loop_detected; 000010 exited
+114	budget_exceeded).
+115	
+116	### Changes
+117	
+118	- processors/length_recovery_forceact.py — new v5
+119	  LengthTruncationRecoveryProcessor (same singleton group
+120	  tb2_length_recovery, so it replaces the R1 v4 processor). Keeps v4
+121	  collapse + escalating text nudge, adds a mechanical force_action_
+122	  threshold (default 3): once that many consecutive truncations
+123	  accumulate, on_after_model injects a real generic Bash workspace-
+124	  snapshot tool call (pwd/ls -lat/find -mmin -30/ps, all guarded) so
+125	  fresh tool output lands in context and breaks the reasoning-only
+126	  momentum — the same injected-real-tool-call mechanism the R1 lifecycle
+127	  processor proved fires in this harness. The injected call clears the
+128	  streak, so it fires at most once per spiral. Also rewrote the repeat
+129	  text nudge to steer toward small-payload edits (sed -i, chunked >>
+130	  appends) instead of a single large heredoc, since a full-file rewrite
+131	  cannot fit under the output cap and re-truncates.
+132	- config.yaml — swapped the R0-asset v4 length_recovery.py entry for the
+133	  new v5 processor (file:// absolute), knobs repeat_threshold=2,
+134	  force_action_threshold=3, head_chars=400, tail_chars=0,
+135	  content_char_threshold=40000. Every other pipeline entry byte-identical
+136	  to R1.
+137	
+138	### Evidence
+139	
+140	- task_001032_1adaccb9 msg 22 assistant content ends exactly with the v4
+141	  marker, tool_calls=0; 14 "cut off by the token limit" events over 76
+142	  msgs; final_pytest missing extraction_log.txt (work never advanced).
+143	- task_000740_59416444 msgs 58-71: LoopDetection "exact same tool call
+144	  5..9 times" interleaved with truncation nudges; preceding assistant
+145	  turns tool_calls=0; exit_reason=loop_detected.
+146	- task_000010_644ab1c2 msgs 62-69: "I've been stuck in a loop" narration,
+147	  tool_calls=0 truncated turns; exit_reason=budget_exceeded, 80 steps.
+148	- task_000028_7fe033ac msgs 26/30/34/54: preceding assistant turns
+149	  tool_calls=0 ending with the v4 marker. (Note: this task ALSO fails the
+150	  verifier on a requests ModuleNotFoundError — the truncation fix is
+151	  necessary but may not be sufficient here; see skip note.)
+152	
+153	### Uncertainty
+154	
+155	The forced snapshot cannot compute a correct answer — it only removes the
+156	mechanical wall (no tool call ever executes) that guaranteed failure. If
+157	the model reaches for the snapshot output but still can't solve the
+158	underlying bug, the task stays failing (behaviour/capability gap, not
+159	harness). Watch whether the four cited tasks drop below 2 truncation
+160	events and whether any flip. If truncation counts drop but tasks still
+161	fail, R3 should treat the remainder as capability gaps and stop investing
+162	the control lever here.
+163	
+164	### Not harness-fixable this round (skip)
+165	
+166	- task_000028_7fe033ac, task_000958_4bb2b05d: verifier imports requests,
+167	  absent at agent phase, internet blocked (confirmed again — agent never
+168	  references requests/pip). Structural verifier dependency; C-001 may
+169	  unblock the truncation half of 000028 but not the requests half. Skip
+170	  the requests dependency until an env probe shows a local pip mirror.
+171	- task_000010_644ab1c2: agent created /home/user/operator.py, which
+172	  shadows the stdlib operator module and breaks every subsequent Python
+173	  invocation from that dir (circular import in collections). C-001 may
+174	  break its spiral, but the naming-collision reasoning error is a
+175	  capability gap, not a recurring harness mechanism. Log, skip.
+176	- task_000118_3043e92d: monitor daemon logic simply never limited log size
+177	  (peak 209MB); correctness gap, not lifecycle/harness. Skip.

@@ -1,0 +1,64 @@
+9:from dataclasses import dataclass, field
+13:@dataclass(frozen=True)
+14:class Message:
+16:    content: str | list  # str for text; list of content blocks for multimodal (Anthropic format)
+19:    tool_calls: tuple = ()  # tuple[ToolCall, ...] — populated for role=assistant with tool calls
+20:    thinking: str = ""  # reasoning/thinking text (for display/trajectory recording)
+27:@dataclass(frozen=True)
+28:class ToolSchema:
+32:    metadata: dict = field(default_factory=dict, hash=False, compare=False)
+44:@dataclass(frozen=True)
+45:class ToolCall:
+51:@dataclass(frozen=True)
+52:class Usage:
+63:@dataclass(frozen=True)
+64:class EvalResult:
+67:    reason: str
+74:@dataclass(frozen=True)
+75:class Event:
+79:    ts: float = field(default_factory=time.time)
+85:@dataclass(frozen=True)
+86:class TaskStartEvent(Event):
+87:    type: str = field(default="task_start", init=False)
+92:    state: Any | None = field(
+97:    workspace: Any | None = field(default=None, hash=False, compare=False)  # workspace passed to run_loop
+101:@dataclass(frozen=True)
+102:class BoundaryHint:
+107:    reason: str = "compaction"
+114:@dataclass(frozen=True)
+115:class StepStartEvent(Event):
+116:    type: str = field(default="step_start", init=False)
+117:    # Input fields — set by runloop, read by context processors
+119:    task: Any = field(default=None, hash=False, compare=False)
+121:    workspace: Any | None = field(default=None, hash=False, compare=False)
+123:    # Output fields — populated/modified by step_start processors
+127:    boundary_hint: "BoundaryHint | None" = field(default=None, hash=False, compare=False)
+130:@dataclass(frozen=True)
+131:class BeforeModelEvent(Event):
+132:    type: str = field(default="before_model", init=False)
+136:    skip_model: bool = field(default=False, hash=False, compare=False)
+137:    synthetic_output: str = field(default="", hash=False, compare=False)
+140:@dataclass(frozen=True)
+141:class ModelResponseEvent(Event):
+142:    type: str = field(default="model_response", init=False)
+143:    content: str = ""
+144:    thinking: str = ""  # extended thinking / reasoning content from the model
+146:    tool_calls: tuple[ToolCall, ...] = ()
+147:    finish_reason: str = "end_turn"
+148:    usage: Usage = field(default_factory=Usage)
+153:@dataclass(frozen=True)
+154:class ToolCallEvent(Event):
+155:    type: str = field(default="tool_call", init=False)
+157:    tool_input: dict = field(default_factory=dict)
+167:@dataclass(frozen=True)
+168:class ToolResultEvent(Event):
+169:    type: str = field(default="tool_result", init=False)
+175:    content_blocks: tuple = field(default=(), hash=False, compare=False)
+176:    # Native multimodal blocks (Anthropic content format) from MCP tools.
+180:@dataclass(frozen=True)
+181:class StepEndEvent(Event):
+182:    type: str = field(default="step_end", init=False)
+188:    state_snapshot: "dict | None" = field(
+197:@dataclass(frozen=True)
+198:class TaskEndEvent(Event):
+199:    type: str = field(default="task_end", init=False)

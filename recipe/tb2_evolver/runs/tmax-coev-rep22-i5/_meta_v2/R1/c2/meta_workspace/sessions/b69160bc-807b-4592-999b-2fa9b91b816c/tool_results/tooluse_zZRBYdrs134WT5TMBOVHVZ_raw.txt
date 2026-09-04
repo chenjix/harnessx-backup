@@ -1,0 +1,40 @@
+11:    BeforeModelEvent,
+19:    ToolCallEvent,
+243:def check_post_hook_invariants(
+359:    event_type: type,
+365:    prev = next((e for e in reversed(prev_events) if isinstance(e, event_type)), None)
+366:    curr = next((e for e in reversed(curr_events) if isinstance(e, event_type)), None)
+425:        event_type = type(event)
+430:            prev_primary = next((e for e in reversed(prev) if isinstance(e, event_type)), None)
+443:                curr_primary = next((e for e in reversed(events) if isinstance(e, event_type)), None)
+456:                action = _diff_primary(prev, events, event_type)
+470:            final_primary = next((e for e in reversed(events) if isinstance(e, event_type)), None)
+473:                check_post_hook_invariants(
+484:def on(event_type: type) -> Callable:
+487:    Marks a method as the handler for *event_type*, auto-registering it in the
+489:    handler methods freely instead of being forced to override ``on_before_model``
+495:            @on(BeforeModelEvent)
+496:            async def check(self, event: BeforeModelEvent):
+506:        fn._on_event_type = event_type
+536:            async def on_step_end(self, event: StepEndEvent):
+540:            async def on_task_end(self, event: TaskEndEvent):
+551:            @on(BeforeModelEvent)
+552:            async def check(self, event: BeforeModelEvent):
+561:        TaskStartEvent: "on_task_start",
+563:        BeforeModelEvent: "on_before_model",
+565:        ToolCallEvent: "on_before_tool",
+568:        TaskEndEvent: "on_task_end",
+576:        like ``on_tool_call`` (should be ``on_before_tool``) at import time
+585:            if callable(method) and hasattr(method, "_on_event_type"):
+586:                dispatch[method._on_event_type] = name
+589:        valid_hook_names = set(dispatch.values())
+595:                and name not in valid_hook_names
+596:                and not hasattr(method, "_on_event_type")
+600:                    f"Valid on_* names: {sorted(valid_hook_names)}. "
+718:    async def on_task_start(self, event: TaskStartEvent) -> AsyncIterator[Event]:
+722:    async def on_step_start(self, event: StepStartEvent) -> AsyncIterator[Event]:
+726:    async def on_before_model(self, event: BeforeModelEvent) -> AsyncIterator[Event]:
+730:    async def on_after_model(self, event: ModelResponseEvent) -> AsyncIterator[Event]:
+734:    async def on_before_tool(self, event: ToolCallEvent) -> AsyncIterator[Event]:
+735:        """Before a tool executes. Allowed: modify ``tool_input``, set ``approved=False``. ``ToolCallEvent`` carries no ``messages`` field — history is structurally inaccessible."""
+738:    async def on_after_tool(self, event: ToolResultEvent) -> AsyncIterator[Event]:

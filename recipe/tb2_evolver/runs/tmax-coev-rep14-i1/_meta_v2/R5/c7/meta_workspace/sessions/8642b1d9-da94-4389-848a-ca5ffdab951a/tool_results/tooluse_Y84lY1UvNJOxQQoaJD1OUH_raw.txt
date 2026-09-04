@@ -1,0 +1,143 @@
+1	# SPDX-License-Identifier: MIT
+2	"""OutputContractVerifyProcessor.
+3	
+4	A drop-in replacement for the TB2 ``CustomSelfVerifyProcessor`` that keeps the
+5	exact same firing mechanism (one-shot keepalive tool-call injected when the
+6	model tries to exit with no tool calls, followed by a single appended user
+7	message) but strengthens the checklist the model receives.
+8	
+9	Motivation
+10	----------
+11	The stock self-verify checklist tells the agent to "inspect contents" and
+12	"confirm values are semantically correct", but on several tasks the agent
+13	finished ``done``/``no_tool_calls`` fully confident and still failed on
+14	*exact output-contract* mismatches that eyeballing does not catch:
+15	
+16	  - an off-by-one in a computed aggregate (a boundary/self-inclusion slip),
+17	  - a delimited file emitted with a slightly different field-quoting or
+18	    separator convention than the spec required.
+19	
+20	Both are format / value-contract errors: the produced file *looks* plausible
+21	but does not match the byte-exact contract stated in the task. The generic
+22	"does it look right" prompt is too weak to surface them.
+23	
+24	This processor adds two general verification disciplines to the checklist:
+25	
+26	  1. **Exact-format audit** — re-read the required output format literally and
+27	     confirm the produced bytes match it token-for-token (delimiters, quoting,
+28	     headers/no-headers, trailing newline, exact string forms).
+29	  2. **Independent re-derivation** — recompute at least one expected value by a
+30	     *different* method (hand-trace a small sub-case, an alternative query,
+31	     a manual count) and cross-check it against the produced output, rather
+32	     than trusting the primary method that generated it.
+33	
+34	Both are task-agnostic strategies: they help any output-producing task, and
+35	carry no task-specific constants, paths, or identifiers.
+36	
+37	Contract
+38	--------
+39	Identical to the class it replaces: at most one appended user message
+40	(role="user") per task run, injected on the turn following the exit attempt;
+41	a synthetic keepalive tool call keeps the loop alive so the message can be
+42	delivered. No system-prompt mutation, no message removal, +1 message max.
+43	"""
+44	
+45	from __future__ import annotations
+46	
+47	import dataclasses
+48	import uuid
+49	
+50	from harnessx.core.events import (
+51	    BeforeModelEvent,
+52	    Message,
+53	    ModelResponseEvent,
+54	    TaskEndEvent,
+55	    TaskStartEvent,
+56	    ToolCall,
+57	    ToolCallEvent,
+58	)
+59	from harnessx.core.processor import MultiHookProcessor
+60	
+61	_VERIFY_TOOL = "_tb2_self_verify"
+62	_VERIFY_ACK = "Verification check initiated. See the message above for instructions."
+63	
+64	_VERIFY_MSG = """\
+65	Before finishing, run through this checklist — do not skip any step even if you already verified:
+66	
+67	1. **Re-read the task description now.** Does your solution address every requirement, including edge cases, accuracy thresholds, and the EXACT output format?
+68	
+69	2. **Check every required output file exists at its exact path:**
+70	```bash
+71	ls -lh /path/to/each/required/output/file
+72	```
+73	A script that ran without errors does NOT guarantee the file was written. Run `ls` explicitly for each required file.
+74	
+75	3. **Audit the output format literally, byte-for-byte.** Re-read the format the task specifies and compare it character-by-character to what you actually produced (`cat`/`head`/`hexdump` the file). Confirm the exact delimiter, quoting/no-quoting of fields, presence or absence of a header row, column order, whitespace, and trailing newline. A file whose values are right but whose format differs (e.g. quoted vs. bare fields, wrong separator, extra header) is a hard failure.
+76	
+77	4. **Independently re-derive at least one expected value.** Do not trust the single method that generated the output. Recompute one result a *different* way — hand-trace a small sub-case, run an alternative query/command, or count manually — and confirm it matches. This is the only reliable way to catch off-by-one and boundary errors (e.g. whether an entity should count itself, inclusive vs. exclusive ranges, `>=` vs. `>`).
+78	
+79	5. **Validate your verification method.** Did your test actually exercise the real behavior? Tests that only check syntax, importability, or exit code 0 on a trivial case are NOT valid — they can pass even on a broken implementation.
+80	
+81	6. **For running services:** confirm they are still alive and reachable right now, not just that they started earlier.
+82	
+83	Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+84	**SUCCESS: task complete. Output files confirmed at [list each required path].**\
+85	"""
+86	
+87	
+88	class OutputContractVerifyProcessor(MultiHookProcessor):
+89	    """Inject a strengthened one-shot verification prompt on voluntary exit.
+90	
+91	    Fires at most once per task run. Mirrors the TB2 self-verify mechanism
+92	    (keepalive synthetic tool call + single appended user message) but with a
+93	    checklist that specifically targets exact-format and value-contract
+94	    verification.
+95	    """
+96	
+97	    _singleton_group = "tb2_self_verify"
+98	    _order = 90
+99	
+100	    def __init__(self) -> None:
+101	        self._verified = False
+102	        self._pending_message: str = ""
+103	
+104	    async def on_task_start(self, event: TaskStartEvent):
+105	        self._verified = False
+106	        self._pending_message = ""
+107	        yield event
+108	
+109	    async def on_before_model(self, event: BeforeModelEvent):
+110	        if not self._pending_message:
+111	            yield event
+112	            return
+113	        msg = self._pending_message
+114	        self._pending_message = ""
+115	        yield dataclasses.replace(
+116	            event,
+117	            messages=event.messages + (Message(role="user", content=msg),),
+118	        )
+119	
+120	    async def on_after_model(self, event: ModelResponseEvent):
+121	        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+122	        if exit_intent and not self._verified:
+123	            self._verified = True
+124	            self._pending_message = _VERIFY_MSG
+125	            keepalive = ToolCall(
+126	                id=f"sv-{uuid.uuid4().hex[:8]}",
+127	                name=_VERIFY_TOOL,
+128	                input={},
+129	            )
+130	            yield dataclasses.replace(event, tool_calls=(keepalive,))
+131	        else:
+132	            yield event
+133	
+134	    async def on_before_tool(self, event: ToolCallEvent):
+135	        if event.tool_name == _VERIFY_TOOL:
+136	            yield dataclasses.replace(event, approved=False, synthetic_result=_VERIFY_ACK)
+137	        else:
+138	            yield event
+139	
+140	    async def on_task_end(self, event: TaskEndEvent):
+141	        self._verified = False
+142	        self._pending_message = ""
+143	        yield event

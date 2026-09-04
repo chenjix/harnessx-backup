@@ -1,0 +1,40 @@
+52:        f"step_start step={step_id}: processor emitted SegmentBoundaryEvent "
+58:            hook="step_start",
+62:    _contract_logger.warning("CONTRACT [spurious_boundary] hook=step_start step=%d: %s", step_id, msg)
+105:    The message is written into the factual track (`raw_messages`) so the
+109:    if state.raw_messages:
+110:        last = state.raw_messages[-1]
+134:    are all handled by processors registered on the step_start / step_end /
+145:    RL training where reward_func never reads step snapshots or step_start_event.
+235:            compacted_raw_messages=tuple(state.raw_messages),
+243:    # inherits this value; on_step_start processors must NOT modify it.
+262:            step_start_ts = time.monotonic()
+300:            # ── 1. step_start: context assembly (delegated to processors) ───
+301:            step_start_event = StepStartEvent(
+304:                raw_messages=tuple(state.raw_messages),
+310:                system_prompt=task_system_prompt,  # frozen by on_task_start; never modified by on_step_start
+314:            _pre_step_msgs = step_start_event.messages or tuple(state.messages)
+319:            step_start_events = await pipe_all(
+320:                step_start_event,
+321:                get_procs("step_start"),
+323:                hook="step_start",
+326:                e for e in step_start_events if isinstance(e, SegmentBoundaryEvent)
+328:            step_start_event = next(
+329:                (e for e in reversed(step_start_events) if isinstance(e, StepStartEvent)),
+330:                step_start_event,
+333:            # Compute history_hash after step_start processors ran (needed for both
+335:            _post_step_msgs = step_start_event.messages or _pre_step_msgs
+346:                _hint = step_start_event.boundary_hint
+354:                    compacted_raw_messages=tuple(step_start_event.raw_messages or _post_step_msgs),
+367:                    state.raw_messages = list(boundary.compacted_messages)
+369:            await tracer.on_event(step_start_event)
+372:            # RunLoop owns a safe default assembly path so step_start processors
+375:            _assembled = step_start_event.messages or tuple(state.messages)
+388:                tools=step_start_event.tools,
+496:            _pre_tool_raw_idx = len(state.raw_messages)
+656:                    state.raw_messages[_pre_tool_raw_idx:],
+659:                state.raw_messages[_pre_tool_raw_idx:] = _new_tool_msgs
+677:                duration_ms=(time.monotonic() - step_start_ts) * 1000,
+698:                # step_snapshots=False: skip step_start_event — it holds assembled messages
+700:                step_start_event=None if not step_snapshots else step_start_event,
+780:        final_output = _recover_best_output(state.raw_messages, final_output)

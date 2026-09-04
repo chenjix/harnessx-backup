@@ -1,0 +1,196 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""CumulativeLengthTruncationRecovery for Tmax / TB2-style agents.
+4	
+5	Supersedes the stock ``LengthTruncationRecoveryProcessor``. It closes the same
+6	systemic failure — the model hits ``max_tokens`` (``finish_reason == "length"``)
+7	without emitting a tool call, the run loop appends a passive "please continue"
+8	nudge, and the model re-primes the same runaway narration — but fixes a blind
+9	spot that let the loop persist for a whole budget:
+10	
+11	* The stock processor escalates only on **consecutive** truncations. The
+12	  pathological shape observed in the wild is *alternating*
+13	  truncate -> nudge -> one-command -> truncate: the model burns a full 4096-token
+14	  turn re-narrating "I'm stuck" before every single command. A tool call resets
+15	  the consecutive counter, so the hard escalation never fires and the collapsed
+16	  narration (head+tail ~2 kB) keeps piling up in context, re-priming the loop
+17	  turn after turn. The task drains its whole step budget without ever recovering.
+18	
+19	This processor tracks **cumulative** length-truncations per task, not just the
+20	consecutive run:
+21	
+22	* On any length truncation it collapses the runaway assistant content (head+tail)
+23	  exactly as before and replaces the passive continue nudge with a corrective
+24	  "issue ONE concrete command" instruction.
+25	* Once cumulative truncations in the task cross ``chronic_threshold`` — i.e. the
+26	  agent is in a chronic re-narration loop, not a one-off overrun — it (a)
+27	  escalates to a terminal "STOP narrating, one minimal command only" directive
+28	  and (b) collapses the offending assistant turn to a short stub instead of
+29	  head+tail, so the accumulated "I'm stuck" narration stops dominating context
+30	  and re-priming the loop.
+31	
+32	It never force-exits and never removes messages, so it cannot regress a task
+33	that truncates a few times early and then recovers on its own (that agent's
+34	productive turns simply proceed; the only effect on it is a slightly shorter
+35	collapsed message on the late truncations, which is harmless). All mutations are
+36	contract-safe: ``on_after_model`` rewrites only the model event's own content and
+37	``on_before_model`` only rewrites the trailing user message (never adds/removes).
+38	"""
+39	
+40	from __future__ import annotations
+41	
+42	import dataclasses
+43	
+44	from harnessx.core.events import (
+45	    BeforeModelEvent,
+46	    Message,
+47	    ModelResponseEvent,
+48	    TaskEndEvent,
+49	    TaskStartEvent,
+50	)
+51	from harnessx.core.processor import MultiHookProcessor
+52	
+53	_HEAD_CHARS = 1200
+54	_TAIL_CHARS = 600
+55	
+56	_TRUNC_MARKER = (
+57	    "\n\n[response truncated by harness: the model hit the output token limit "
+58	    "without issuing a tool call; the omitted middle was discarded to prevent a "
+59	    "repetition loop]\n\n"
+60	)
+61	
+62	# Replaces the whole runaway turn once the agent is in a chronic loop: keeping
+63	# only a short stub stops the repeated narration from re-priming the loop.
+64	_STUB = (
+65	    "[response discarded by harness: the model hit the output token limit with no "
+66	    "tool call for the Nth time in this task — the repeated narration was dropped "
+67	    "to break the loop]"
+68	)
+69	
+70	_NUDGE_FIRST = (
+71	    "Your last turn ran into the output token limit without running any command. "
+72	    "Do NOT re-explain or continue the previous narration. In your next turn write "
+73	    "at most two sentences of reasoning, then issue exactly ONE concrete Bash "
+74	    "command that makes progress (inspect a file, run a script, or write output). "
+75	    "Keep the response short."
+76	)
+77	
+78	_NUDGE_REPEAT = (
+79	    "STOP. You have now hit the output token limit multiple turns in a row, which "
+80	    "means you are repeating yourself instead of acting. Abandon the current line "
+81	    "of narration entirely. Do not write any prose analysis. Respond with a SINGLE "
+82	    "short Bash tool call that either (a) writes the required output file(s) to the "
+83	    "path named in the task, or (b) runs a quick command to check the current state "
+84	    "so you can decide the next concrete step. One command only."
+85	)
+86	
+87	_NUDGE_CHRONIC = (
+88	    "STOP NARRATING. You have now hit the output token limit many times in this "
+89	    "task while making no durable progress — you are stuck in a re-narration loop "
+90	    "and burning your budget. Ignore everything you were just saying. Write NO "
+91	    "analysis and NO explanation. Your entire next response must be exactly ONE "
+92	    "short Bash tool call. Prefer a command that (a) creates or corrects the "
+93	    "REQUIRED OUTPUT FILE at the exact path named in the task (re-read the task for "
+94	    "the exact path — a file at the wrong path scores zero), or (b) makes one small "
+95	    "concrete change and moves on. Do not keep retrying the same failing command; "
+96	    "if it failed twice, do something different. One command, nothing else."
+97	)
+98	
+99	
+100	class CumulativeLengthTruncationRecovery(MultiHookProcessor):
+101	    """Break the max_tokens repetition loop using cumulative-truncation escalation."""
+102	
+103	    # Occupy the same singleton group / order slot as the stock processor so this
+104	    # cleanly replaces it in the pipeline.
+105	    _singleton_group = "tmax_length_recovery"
+106	    _order = 5
+107	
+108	    def __init__(
+109	        self,
+110	        repeat_threshold: int = 2,
+111	        chronic_threshold: int = 4,
+112	        head_chars: int = _HEAD_CHARS,
+113	        tail_chars: int = _TAIL_CHARS,
+114	    ) -> None:
+115	        self.repeat_threshold = max(1, int(repeat_threshold))
+116	        # chronic escalation should never fire before the consecutive escalation
+117	        self.chronic_threshold = max(self.repeat_threshold + 1, int(chronic_threshold))
+118	        self.head_chars = max(0, int(head_chars))
+119	        self.tail_chars = max(0, int(tail_chars))
+120	        self._consecutive: int = 0
+121	        self._cumulative: int = 0
+122	        self._pending_nudge: str = ""
+123	
+124	    def _reset(self) -> None:
+125	        self._consecutive = 0
+126	        self._cumulative = 0
+127	        self._pending_nudge = ""
+128	
+129	    async def on_task_start(self, event: TaskStartEvent):
+130	        self._reset()
+131	        yield event
+132	
+133	    async def on_after_model(self, event: ModelResponseEvent):
+134	        length_truncated = event.finish_reason == "length" and not event.tool_calls
+135	        if not length_truncated:
+136	            # A productive turn (or any non-length stop) resets the *consecutive*
+137	            # run but NOT the cumulative count — chronic loops that alternate
+138	            # truncate/act must still escalate.
+139	            self._consecutive = 0
+140	            self._pending_nudge = ""
+141	            yield event
+142	            return
+143	
+144	        self._consecutive += 1
+145	        self._cumulative += 1
+146	
+147	        chronic = self._cumulative >= self.chronic_threshold
+148	        if chronic:
+149	            self._pending_nudge = _NUDGE_CHRONIC
+150	        elif self._consecutive >= self.repeat_threshold:
+151	            self._pending_nudge = _NUDGE_REPEAT
+152	        else:
+153	            self._pending_nudge = _NUDGE_FIRST
+154	
+155	        content = event.content or ""
+156	        if chronic:
+157	            # Chronic loop: drop the runaway narration entirely so it stops
+158	            # re-priming the loop; keep only a short stub.
+159	            if len(content) > len(_STUB):
+160	                yield dataclasses.replace(event, content=_STUB)
+161	            else:
+162	                yield event
+163	            return
+164	
+165	        if len(content) > (self.head_chars + self.tail_chars + len(_TRUNC_MARKER)):
+166	            collapsed = (
+167	                content[: self.head_chars]
+168	                + _TRUNC_MARKER
+169	                + (content[-self.tail_chars :] if self.tail_chars else "")
+170	            )
+171	            yield dataclasses.replace(event, content=collapsed)
+172	        else:
+173	            yield event
+174	
+175	    async def on_before_model(self, event: BeforeModelEvent):
+176	        if not self._pending_nudge:
+177	            yield event
+178	            return
+179	        nudge = self._pending_nudge
+180	        self._pending_nudge = ""
+181	        msgs = list(event.messages)
+182	        # The run loop appends a passive "continue" user message for
+183	        # finish_reason=length. Replace that trailing user message rather than
+184	        # inserting (keeps the before_model net length change at 0).
+185	        if msgs and getattr(msgs[-1], "role", None) == "user":
+186	            msgs[-1] = Message(role="user", content=nudge)
+187	            yield dataclasses.replace(event, messages=tuple(msgs))
+188	        else:
+189	            yield dataclasses.replace(
+190	                event,
+191	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+192	            )
+193	
+194	    async def on_task_end(self, event: TaskEndEvent):
+195	        self._reset()
+196	        yield event

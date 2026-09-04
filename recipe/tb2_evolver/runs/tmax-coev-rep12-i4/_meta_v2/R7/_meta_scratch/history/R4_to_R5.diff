@@ -1,0 +1,110 @@
+--- R4
++++ R5
+@@ -15,21 +15,28 @@
+ #
+-# R4 (meta): the dominant cross-round failure shape (R0-R3 all flat at 0.20) is
+-# a DEGENERATE ASSISTANT-TURN LOOP — the model emits the byte-identical
+-# assistant turn 4-41 times in a row, sometimes with a useless repeated Bash
+-# call, sometimes with NO tool call at all (a self-verify ack loop). 16 distinct
+-# FAILING tasks in R3 showed a run >= 4; no PASSING task ever exceeded 2. Four of
+-# the 16 ended in exit_reason=error (agent_error crash). The R1 BashLoopBreaker
+-# only fingerprints the Bash tool INPUT, so it is blind to the no-tool-call half
+-# of the loop, and its soft "BLOCKED" redirect is ignored verbatim (transcripts
+-# show 12-38 blocks the model re-emits identically). The R2 system prompt already
+-# tells the model to stop looping; it ignores that too. Instruction + soft
+-# redirect are proven-saturated. R4 adds DegenerateTurnTerminatorProcessor: it
+-# fingerprints the whole last assistant turn, warns at warn_threshold=4, and at
+-# terminate_threshold=6 sets skip_model + synthetic_output so the run loop takes
+-# its own clean-exit path (finish_reason=stop, no tool calls -> exit_reason=done).
+-# This converts the error/budget_exceeded runaways into a clean done that banks
+-# partial work and lets exit-intent processors (verifier-dep guard) fire, and
+-# reclaims 20-70 wasted step-generations per looping task. Thresholds leave the
+-# entire passing set (max identical-assistant run = 2) untouched. Rest of the
+-# pipeline + sibling system_prompt.txt copied byte-for-byte from R3.
++# R5 (meta): R0-R4 are all flat at pass_rate 0.20 (10/50). The R4
++# DegenerateTurnTerminatorProcessor was supposed to convert the dominant
++# degenerate assistant-turn loop into a clean exit, but measurement on the R4
++# trajectories shows it NEVER FIRED on the tasks it targeted: its byte-identical
++# fingerprint requires the repeated turns to match exactly, and the real loops
++# DRIFT (each regenerated "I've been stuck in a loop..." turn differs by a few
++# words / a different 4096-token truncation point). The max byte-identical
++# consecutive run tops out at 4 and never reaches R4's terminate_threshold=6, so
++# the [LoopTerminator] banner appears 0 times in the two exit_reason=error crash
++# tasks (task_000032, task_001201) and in the budget_exceeded loopers.
++#
++# Measured on the R4 run, the max consecutive run of assistant turns whose
++# normalized token-set (Jaccard) similarity >= 0.85:
++#   FAILING loopers : 4, 5, 6, 10, 17  (000032, 001044, 001465, 001201, 001028)
++#   PASSING set      : max = 2 (nine of ten passers = 1)
++# A similarity-based counter separates loopers from the passing set even more
++# sharply than exact match did. R5 REPLACES the R4 exact-match terminator with
++# FuzzyLoopTerminatorProcessor (warn at 3, terminate at 5 near-identical turns;
++# similarity_threshold=0.85) — it subsumes exact matching (identical turns score
++# 1.0) AND catches the drifting loops R4 missed. terminate_threshold=5 sits far
++# above the passing-set ceiling of 2, so regression surface on the passing set is
++# nil. Expected effect: converts the two exit_reason=error crashes into clean
++# exit_reason=done (protects the replay gate, banks partial work), and reclaims
++# 20-50 wasted step-generations / 600-1600s wall-clock per looping task while
++# letting exit-intent processors fire. Rest of the R4 pipeline + sibling
++# system_prompt.txt copied byte-for-byte.
+ 
+@@ -71,9 +78,5 @@
+ # LengthTruncationRecoveryProcessor (which only handles finish_reason=length /
+-# no tool call). Kept from R1 (accepted). NOTE for R3: post-hoc analysis shows
+-# the model frequently IGNORES the BLOCKED redirect and re-emits the identical
+-# command many times; the R2 system prompt reinforces "don't burn budget on a
+-# doomed subgoal" to help the model act on this signal rather than ignore it.
+-# R4: BashLoopBreaker is retained (it still trims the Bash-input half of the
+-# loop early), but the new DegenerateTurnTerminatorProcessor below now provides
+-# the HARD escalation the model needs when it ignores the soft block.
++# no tool call). Kept from R1 (accepted): it still trims the Bash-input half of
++# the loop early (before assistant text even repeats). The soft BLOCKED redirect
++# is often ignored, which is why the terminators below provide the HARD stop.
+ - _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R1/processors/bash_loop_breaker.py::BashLoopBreakerProcessor
+@@ -82,12 +85,18 @@
+   _hook_: '*'
+-# R4 (meta): degenerate assistant-turn terminator. Fingerprints the whole last
+-# assistant turn (not just a Bash input), so it catches Bash loops AND
+-# no-tool-call / self-verify loops that BashLoopBreaker cannot see. Warns at 4
+-# consecutive identical turns; at 6 it force-terminates via skip_model +
+-# synthetic_output so the run loop exits cleanly (exit_reason=done) instead of
+-# crashing to error or burning the whole step budget. Passing set (max identical
+-# run = 2) is untouched; fires only after the loop is provably dead.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R4/processors/degenerate_turn_terminator.py::DegenerateTurnTerminatorProcessor
+-  warn_threshold: 4
+-  terminate_threshold: 6
++# R5 (meta): fuzzy near-identical assistant-turn terminator. REPLACES the R4
++# DegenerateTurnTerminatorProcessor, which required byte-identical turns and so
++# never fired on the drifting real loops (max byte-identical run = 4 < its
++# threshold 6). This version counts consecutive assistant turns whose normalized
++# token-set Jaccard similarity >= 0.85 (byte-identical turns score 1.0, so it
++# subsumes the exact matcher). Warns at 3 near-identical turns (one contract-safe
++# user nudge); at 5 it force-terminates via skip_model + synthetic_output so the
++# run loop exits cleanly (exit_reason=done) instead of crashing to error or
++# burning the whole step budget. terminate_threshold=5 sits far above the
++# passing-set ceiling of 2 (measured on the R4 run), so the passing set is
++# untouched; it fires only after the loop is provably dead.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R5/processors/fuzzy_loop_terminator.py::FuzzyLoopTerminatorProcessor
++  similarity_threshold: 0.85
++  warn_threshold: 3
++  terminate_threshold: 5
++  min_tokens: 5
+   _hook_: '*'
+@@ -116,12 +125,7 @@
+ # (HTTP client / config parser) are importable in the container Python BEFORE
+-# the agent's session ends, regardless of exit reason. The prior exit-intent-
+-# only guard never fired on budget_exceeded HTTP-service tasks (steps=80), so
+-# their verifier aborted at pytest collection time with
+-# `ModuleNotFoundError: No module named 'requests'` and a correct solution
+-# scored 0. This version prepends the dep-ensure onto the first mid-run
+-# tool-call turn at/after proactive_step, and keeps the exit-intent fallback.
+-# Fires at most once per run; a no-op when the module is already present.
+-# R4 note: R3 result confirms this works — the three target tasks (796/910/2108)
+-# no longer hit collection ImportError; they now fail with real ConnectionError
+-# (server capability gap, not a harness gap). Kept unchanged.
++# the agent's session ends, regardless of exit reason. Kept unchanged from R3/R4
++# (R3 result confirms it removes the pytest-collection ModuleNotFoundError on the
++# HTTP-service tasks; they now fail with real ConnectionError, a server-capability
++# gap, not a harness gap). Fires at most once per run; a no-op when the module is
++# already present.
+ - _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R3/processors/verifier_dep_guard_proactive.py::ProactiveVerifierDepGuardProcessor

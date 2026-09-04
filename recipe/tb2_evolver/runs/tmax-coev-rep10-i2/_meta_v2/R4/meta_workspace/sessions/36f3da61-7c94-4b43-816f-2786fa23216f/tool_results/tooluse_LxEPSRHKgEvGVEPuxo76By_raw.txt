@@ -1,0 +1,233 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""WindowedRepeatBreakerProcessor.
+4	
+5	A warn-only Control hook that catches *non-consecutive* no-progress loops
+6	that the existing ``LoopDetectionProcessor`` structurally misses.
+7	
+8	Observed failure mode (R3, budget_exceeded cluster): several tasks burn the
+9	whole 80-step budget oscillating between two or three commands that never
+10	change the underlying state — e.g. a service/daemon restart-and-retest cycle
+11	(``pkill server; ./server &; sleep; curl ...`` re-run 16-19x), or a
+12	"final verification" command interleaved with empty/no-op commands
+13	(``verify`` / ``''`` / ``verify`` / ``''`` ...). Because the repeats are
+14	*interleaved* with other commands (an inspection, an empty command, a
+15	slightly different check), the existing ``LoopDetectionProcessor`` — which
+16	counts only the **strictly consecutive** run length at the tail of its
+17	window — never reaches its warn/raise threshold. The agent keeps re-running
+18	the identical failing cycle instead of reading and fixing the source that
+19	produces the failing result.
+20	
+21	This processor adds two complementary, orthogonal signals, both **warn-only**
+22	(never raises — a raise would convert legitimately-repetitive passing tasks
+23	into ``loop_detected`` failures):
+24	
+25	1. **Windowed exact-repeat** — within a sliding window of the last
+26	   ``window_size`` tool calls, if the *same* non-empty command fingerprint
+27	   has now appeared ``repeat_threshold`` or more times (not necessarily
+28	   consecutively), append an advisory: you have run this identical command
+29	   many times with the same result — the problem is upstream (your code /
+30	   config), so stop re-running it and go inspect/fix the source, or finish
+31	   if the deliverable is already correct.
+32	
+33	2. **Empty / no-op command run** — if the agent issues ``empty_threshold``
+34	   empty-or-whitespace commands in a row, append an advisory: an empty
+35	   command does nothing; either issue a real command or finish. This catches
+36	   the degenerate generation loop where the model emits blank tool calls.
+37	
+38	Class of tasks served: every TB2 task that can fall into an interleaved
+39	no-progress loop (service/daemon build-and-test tasks, multi-stage pipeline
+40	tasks). It carries no task-specific literals — it fingerprints whatever
+41	command the agent runs.
+42	
+43	Design notes
+44	------------
+45	- Warn-only by construction: there is no ``threshold`` that raises. The
+46	  R2 evidence showed that raising on repeat signals risks flipping
+47	  currently-passing tasks that legitimately repeat a command (a passing task
+48	  was observed repeating the same command 8x within an 8-call window). The
+49	  advisory is appended to the tool *result* content, so ``event.messages`` is
+50	  never mutated and the hook contract is trivially satisfied (same mechanism
+51	  as ``LoopDetectionProcessor``).
+52	- Complements, does not duplicate, ``LoopDetectionProcessor``: that processor
+53	  fires on strictly-*consecutive* identical calls; this one fires on
+54	  *windowed* repeats regardless of interleaving. The two can both be present.
+55	- Ignores the ``FunctionalVerifyGateProcessor`` keepalive tool
+56	  (``_tb2_functional_verify``) so the exit-gate handshake is never counted as
+57	  a loop.
+58	- To keep the advisory from spamming every subsequent step once a loop is
+59	  established, each distinct signal fires at most once per
+60	  ``cooldown`` window of steps.
+61	"""
+62	from __future__ import annotations
+63	
+64	import dataclasses
+65	import hashlib
+66	import json
+67	from collections import deque
+68	
+69	from harnessx.core.events import (
+70	    StepStartEvent,
+71	    TaskEndEvent,
+72	    TaskStartEvent,
+73	    ToolCallEvent,
+74	    ToolResultEvent,
+75	)
+76	from harnessx.core.processor import MultiHookProcessor
+77	
+78	# Keepalive tool emitted by FunctionalVerifyGateProcessor — never count it.
+79	_VERIFY_KEEPALIVE = "_tb2_functional_verify"
+80	
+81	_WINDOWED_WARN = (
+82	    "\n\n[RepeatBreaker] ⚠️  You have run this exact command {count} times "
+83	    "within the last {window} steps (not making progress — same command, same "
+84	    "result). Re-running it will not change the outcome: the problem is "
+85	    "upstream. Stop repeating this command. Instead, open and READ the source "
+86	    "file / config / script that produces this result, form a hypothesis about "
+87	    "WHY it is wrong, and change THAT. If the required deliverable is already "
+88	    "correct on disk, finish now."
+89	)
+90	
+91	_EMPTY_WARN = (
+92	    "\n\n[RepeatBreaker] ⚠️  You have issued {count} empty/no-op commands in a "
+93	    "row. An empty command does nothing. Either run a real command that makes "
+94	    "progress on the task, or — if every required deliverable is already on "
+95	    "disk and verified — end now."
+96	)
+97	
+98	
+99	class WindowedRepeatBreakerProcessor(MultiHookProcessor):
+100	    """Warn-only detector for interleaved (non-consecutive) no-progress loops."""
+101	
+102	    # Distinct singleton slot from LoopDetectionProcessor's "loop_detection".
+103	    _singleton_group = "windowed_repeat_breaker"
+104	    _order = 21  # just after LoopDetectionProcessor (order=20)
+105	
+106	    def __init__(
+107	        self,
+108	        window_size: int = 8,
+109	        repeat_threshold: int = 5,
+110	        empty_threshold: int = 3,
+111	        cooldown: int = 4,
+112	        compaction_drop_threshold: int = 5,
+113	    ) -> None:
+114	        self.window_size = max(2, int(window_size))
+115	        self.repeat_threshold = max(2, int(repeat_threshold))
+116	        self.empty_threshold = max(2, int(empty_threshold))
+117	        self.cooldown = max(1, int(cooldown))
+118	        self.compaction_drop_threshold = max(1, int(compaction_drop_threshold))
+119	
+120	        self._fingerprints: deque[str] = deque(maxlen=self.window_size)
+121	        self._empty_run: int = 0
+122	        self._steps_seen: int = 0
+123	        self._last_windowed_warn_step: int = -10_000
+124	        self._last_empty_warn_step: int = -10_000
+125	        self._current_run_id: str = ""
+126	        self._prev_message_count: int = 0
+127	        # tool_call_id -> (fingerprint, is_empty)
+128	        self._pending: dict[str, tuple[str, bool]] = {}
+129	
+130	    # ------------------------------------------------------------------
+131	    def _reset(self) -> None:
+132	        self._fingerprints.clear()
+133	        self._empty_run = 0
+134	        self._steps_seen = 0
+135	        self._last_windowed_warn_step = -10_000
+136	        self._last_empty_warn_step = -10_000
+137	        self._prev_message_count = 0
+138	        self._pending.clear()
+139	
+140	    @staticmethod
+141	    def _fingerprint(tool_name: str, command: str) -> str:
+142	        return hashlib.sha256(f"{tool_name}\x00{command}".encode()).hexdigest()[:16]
+143	
+144	    # ------------------------------------------------------------------
+145	    async def on_task_start(self, event: TaskStartEvent):
+146	        self._reset()
+147	        self._current_run_id = event.run_id
+148	        yield event
+149	
+150	    async def on_step_start(self, event: StepStartEvent):
+151	        if event.run_id != self._current_run_id:
+152	            self._reset()
+153	            self._current_run_id = event.run_id
+154	        # Clear stale fingerprints after a compaction-driven message drop so
+155	        # pre-compaction history doesn't inflate the windowed count.
+156	        current_count = len(event.messages)
+157	        if (
+158	            self._prev_message_count > 0
+159	            and self._prev_message_count - current_count >= self.compaction_drop_threshold
+160	        ):
+161	            self._fingerprints.clear()
+162	            self._empty_run = 0
+163	            self._pending.clear()
+164	        self._prev_message_count = current_count
+165	        yield event
+166	
+167	    async def on_before_tool(self, event: ToolCallEvent):
+168	        if event.tool_name == _VERIFY_KEEPALIVE:
+169	            yield event
+170	            return
+171	        command = ""
+172	        try:
+173	            command = event.tool_input.get("command", "") or ""
+174	        except AttributeError:
+175	            command = ""
+176	        if not isinstance(command, str):
+177	            try:
+178	                command = json.dumps(command, sort_keys=True, ensure_ascii=False)
+179	            except Exception:
+180	                command = repr(command)
+181	        is_empty = not command.strip()
+182	        fp = self._fingerprint(event.tool_name, command.strip())
+183	        self._pending[event.tool_call_id] = (fp, is_empty)
+184	        yield event
+185	
+186	    async def on_after_tool(self, event: ToolResultEvent):
+187	        entry = self._pending.pop(event.tool_call_id, None)
+188	        if entry is None:
+189	            # Not a tracked call (e.g. the verify keepalive) — pass through.
+190	            yield event
+191	            return
+192	
+193	        fp, is_empty = entry
+194	        self._steps_seen += 1
+195	        warning = ""
+196	
+197	        # --- Signal 2: empty / no-op run -------------------------------
+198	        if is_empty:
+199	            self._empty_run += 1
+200	            if (
+201	                self._empty_run >= self.empty_threshold
+202	                and (self._steps_seen - self._last_empty_warn_step) >= self.cooldown
+203	            ):
+204	                warning = _EMPTY_WARN.format(count=self._empty_run)
+205	                self._last_empty_warn_step = self._steps_seen
+206	        else:
+207	            self._empty_run = 0
+208	
+209	        # --- Signal 1: windowed exact repeat ---------------------------
+210	        # Count occurrences of this fp in the current window (before append).
+211	        if not is_empty and not warning:
+212	            count_in_window = sum(1 for x in self._fingerprints if x == fp) + 1
+213	            if (
+214	                count_in_window >= self.repeat_threshold
+215	                and (self._steps_seen - self._last_windowed_warn_step) >= self.cooldown
+216	            ):
+217	                warning = _WINDOWED_WARN.format(
+218	                    count=count_in_window, window=self.window_size
+219	                )
+220	                self._last_windowed_warn_step = self._steps_seen
+221	
+222	        # Record this call in the window (empty commands are recorded too so a
+223	        # single stray blank between repeats doesn't reset the windowed count).
+224	        self._fingerprints.append(fp)
+225	
+226	        if warning:
+227	            yield dataclasses.replace(event, result=(event.result or "") + warning)
+228	        else:
+229	            yield event
+230	
+231	    async def on_task_end(self, event: TaskEndEvent):
+232	        self._reset()
+233	        yield event

@@ -1,0 +1,168 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""DeadLoopBreaker — intercept and *block* genuine dead command loops.
+4	
+5	Successor to the R1 ``RepeatCommandGuard``. That guard keyed on the command
+6	string alone and was *advisory only* — it appended a break-out nudge to the
+7	tool result but never blocked execution. On this model that turned out to be
+8	insufficient: the agent narrates "I've been stuck in a loop" and then re-runs
+9	the *exact same* command with the *exact same* output, ignoring the advisory,
+10	until it burns the step budget (observed: one task re-ran an identical
+11	read-only diagnostic 12x despite ~10 advisories, ending in agent_error).
+12	
+13	Two design changes over the R1 guard, each backed by trajectory evidence:
+14	
+15	1. **Key on (command, output-fingerprint), not command alone.**
+16	   A command that is re-run but produces *different* output each time is a
+17	   healthy iterate-and-test loop (e.g. edit-a-file / run-the-build /
+18	   read-the-error). Those passing high-repeat tasks re-ran a ``cat > file``
+19	   write many times but the interleaved build/run output changed, so the
+20	   *consecutive identical* (command, output) count stayed low (<=2). A
+21	   genuine dead loop is the same command returning byte-identical output over
+22	   and over. Keying on the pair cleanly separates the two: it only counts a
+23	   repeat when nothing changed, so productive loops are never touched.
+24	
+25	2. **Escalate to a hard block, not just an advisory.**
+26	   Below ``block_threshold`` the guard behaves like the R1 guard (appends an
+27	   escalating advisory to the result). At ``block_threshold`` identical
+28	   (command, output) repeats it stops appending and instead *intercepts* the
+29	   next identical call in ``on_before_tool``: it sets ``approved=False`` and
+30	   returns a synthetic directive, so the dead command never actually runs.
+31	   The agent is forced to change the command or the approach to make any
+32	   progress at all — which is the only thing that ever helps in these loops.
+33	
+34	Guarding against false positives:
+35	- Only real Bash commands are tracked (calls with a non-empty ``command``
+36	  field). Malformed empty-argument tool calls (``{}``) — which some passing
+37	  tasks emit many times — carry no command and are ignored entirely.
+38	- The counter resets the moment the output changes, so a single differing
+39	  result immediately un-arms the block for that command.
+40	- ``block_threshold`` is set well above the count any observed *passing* task
+41	  reached on an identical (command, output) pair.
+42	
+43	Purely mechanical: below the block threshold it only appends text to the tool
+44	result; at/above it, it uses the framework's documented interception path
+45	(``approved=False`` + ``synthetic_result`` on the ``ToolCallEvent``). It never
+46	mutates message history, so it cannot violate the message contract.
+47	"""
+48	
+49	from __future__ import annotations
+50	
+51	import dataclasses
+52	import hashlib
+53	
+54	from harnessx.core.events import (
+55	    TaskEndEvent,
+56	    TaskStartEvent,
+57	    ToolCallEvent,
+58	    ToolResultEvent,
+59	)
+60	from harnessx.core.processor import MultiHookProcessor
+61	
+62	_REDIRECT = (
+63	    "\n\n[DeadLoopBreaker] You have now run this EXACT command {count} times and "
+64	    "it produced the EXACT same output every time. Repeating it will not change "
+65	    "anything. Do NOT run it again unchanged. Instead either (a) change the "
+66	    "command itself (different flags, a smaller diagnostic step, inspect the "
+67	    "inputs it depends on), or (b) change your approach to the task. State in one "
+68	    "sentence what specifically was wrong with the previous attempts before your "
+69	    "next tool call."
+70	)
+71	
+72	_BLOCK = (
+73	    "[DeadLoopBreaker] BLOCKED — this identical command has already been executed "
+74	    "{count} times with byte-identical output, so it has NOT been run again. You "
+75	    "are in a dead loop that is wasting your step budget and will end the task "
+76	    "with a score of 0 if it continues. Running the same command again is "
+77	    "pointless. Take ONE genuinely different action now: (a) if the required "
+78	    "output file(s) can be produced from what you already know, write them to the "
+79	    "exact path named in the task; or (b) run a DIFFERENT, concrete command that "
+80	    "tests a NEW hypothesis about why the previous attempts failed. The exact "
+81	    "command you just tried will remain blocked until you change it."
+82	)
+83	
+84	
+85	def _normalise(cmd: str) -> str:
+86	    """Collapse whitespace so trivially-reformatted repeats still match."""
+87	    return " ".join(cmd.split())
+88	
+89	
+90	def _fingerprint(text: str) -> str:
+91	    return hashlib.sha1((text or "").encode("utf-8", "replace")).hexdigest()
+92	
+93	
+94	class DeadLoopBreaker(MultiHookProcessor):
+95	    """Detect a genuine (command, identical-output) dead loop and block it."""
+96	
+97	    _singleton_group = "tb2_dead_loop_breaker"
+98	    _order = 31  # same slot the R1 guard occupied (after CustomEditToolProcessor)
+99	
+100	    def __init__(
+101	        self,
+102	        advisory_threshold: int = 3,
+103	        block_threshold: int = 5,
+104	    ) -> None:
+105	        # advisory_threshold: first advisory fires on the Nth identical
+106	        # (command, output) repeat.
+107	        self.advisory_threshold = max(2, int(advisory_threshold))
+108	        # block_threshold: at/above this many identical (command, output)
+109	        # repeats, the next identical call is intercepted and not executed.
+110	        self.block_threshold = max(self.advisory_threshold + 1, int(block_threshold))
+111	        # cmd_key -> {"fp": last-output-fingerprint, "count": consecutive identical}
+112	        self._state: dict[str, dict] = {}
+113	        # tool_call_id -> cmd_key (set in on_before_tool, consumed in on_after_tool)
+114	        self._pending: dict[str, str] = {}
+115	
+116	    async def on_task_start(self, event: TaskStartEvent):
+117	        self._state.clear()
+118	        self._pending.clear()
+119	        yield event
+120	
+121	    async def on_before_tool(self, event: ToolCallEvent):
+122	        if event.tool_name != "Bash":
+123	            yield event
+124	            return
+125	        cmd = _normalise(str((event.tool_input or {}).get("command", "")))
+126	        if not cmd:
+127	            # Malformed / empty tool call — not a real command; ignore.
+128	            yield event
+129	            return
+130	        st = self._state.get(cmd)
+131	        # If this exact command has already looped with identical output at or
+132	        # past the block threshold, intercept it: do not execute.
+133	        if st is not None and st["count"] >= self.block_threshold:
+134	            yield dataclasses.replace(
+135	                event,
+136	                approved=False,
+137	                synthetic_result=_BLOCK.format(count=st["count"]),
+138	            )
+139	            return
+140	        self._pending[event.tool_call_id] = cmd
+141	        yield event
+142	
+143	    async def on_after_tool(self, event: ToolResultEvent):
+144	        cmd = self._pending.pop(event.tool_call_id, None)
+145	        if cmd is None:
+146	            yield event
+147	            return
+148	        out_fp = _fingerprint(event.result or "")
+149	        st = self._state.get(cmd)
+150	        if st is not None and st["fp"] == out_fp:
+151	            st["count"] += 1
+152	        else:
+153	            # First run, or output changed -> reset the dead-loop counter.
+154	            st = {"fp": out_fp, "count": 1}
+155	            self._state[cmd] = st
+156	
+157	        count = st["count"]
+158	        if count >= self.advisory_threshold and count < self.block_threshold:
+159	            yield dataclasses.replace(
+160	                event, result=(event.result or "") + _REDIRECT.format(count=count)
+161	            )
+162	            return
+163	        yield event
+164	
+165	    async def on_task_end(self, event: TaskEndEvent):
+166	        self._state.clear()
+167	        self._pending.clear()
+168	        yield event

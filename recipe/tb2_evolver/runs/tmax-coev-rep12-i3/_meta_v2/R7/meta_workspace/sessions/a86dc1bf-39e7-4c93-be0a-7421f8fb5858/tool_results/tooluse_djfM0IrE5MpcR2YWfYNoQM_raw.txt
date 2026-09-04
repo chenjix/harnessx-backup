@@ -1,0 +1,86 @@
+                        )
+                        tr_event = next(
+                            (e for e in reversed(_at_events) if isinstance(e, ToolResultEvent)),
+                            tr_event,
+                        )
+                        await tracer.on_event(tr_event)
+                        state.add_tool_result(tr_event)
+                        step_tool_results.append(tr_event)
+
+                        result_text = tr_event.result if not tr_event.error else f"Error: {tr_event.error}"
+                        if tr_event.content_blocks:
+                            result_content: str | list = [
+                                {"type": "text", "text": result_text},
+                                *tr_event.content_blocks,
+                            ]
+                        else:
+                            result_content = result_text
+                        state.add_raw_message(
+                            Message(
+                                role="tool",
+                                content=result_content,
+                                tool_call_id=tc_event.tool_call_id,
+                                name=tc_event.tool_name,
+                            )
+                        )
+                    elif tc_event.synthetic_result is not None:
+                        tr_event = ToolResultEvent(
+                            run_id=state.run_id,
+                            step_id=step_id,
+                            tool_name=tc_event.tool_name,
+                            tool_call_id=tc_event.tool_call_id,
+                            result=tc_event.synthetic_result,
+                            duration_ms=0.0,
+                        )
+                        _at_syn_events = await pipe_all(
+                            tr_event,
+                            get_procs("after_tool"),
+                            tracer=tracer,
+                            hook="after_tool",
+                        )
+                        tr_event = next(
+                            (e for e in reversed(_at_syn_events) if isinstance(e, ToolResultEvent)),
+                            tr_event,
+                        )
+                        await tracer.on_event(tr_event)
+                        state.add_tool_result(tr_event)
+                        step_tool_results.append(tr_event)
+                        state.add_raw_message(
+                            Message(
+                                role="tool",
+                                content=tr_event.result if not tr_event.error else f"Error: {tr_event.error}",
+                                tool_call_id=tc_event.tool_call_id,
+                                name=tc_event.tool_name,
+                            )
+                        )
+                    else:
+                        state.add_raw_message(
+                            Message(
+                                role="tool",
+                                content="Tool call not approved.",
+                                tool_call_id=tc_event.tool_call_id,
+                                name=tc_event.tool_name,
+                            )
+                        )
+                finally:
+                    # Always reset per-tool-call context vars, even if a processor raises.
+                    _mcp_results_ctx.reset(_mcp_ctx_token)
+                if _spawn_ctx_token is not None:
+                    try:
+                        from ..tools.spawn_subagent import _spawn_ctx
+
+                        _spawn_ctx.reset(_spawn_ctx_token)
+                    except Exception:
+                        pass
+                    _spawn_ctx_token = None
+
+            # ── 4b. Aggregate turn budget ────────────────────────────────────
+            # Spill the largest tool results to disk if the step total exceeds
+            # _TURN_BUDGET_CHARS, replacing the already-added raw messages.
+            if step_tool_results and not interrupt_triggered:
+                _new_tool_msgs = await enforce_turn_budget(
+                    state.raw_messages[_pre_tool_raw_idx:],
+                    results_dir=_step_mcp_dir,
+                )
+                state.raw_messages[_pre_tool_raw_idx:] = _new_tool_msgs
+                state.messages[_pre_tool_raw_idx:] = _new_tool_msgs

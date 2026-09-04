@@ -1,0 +1,82 @@
+241	    ap.add_argument("--envs-jsonl", type=Path, default=DEFAULT_ENVS)
+242	    ap.add_argument("--job-name", required=True)
+243	    ap.add_argument("--jobs-dir", type=Path, default=ROOT / ".benchmarks/tmax")
+244	    ap.add_argument("--work-root", type=Path, default=ROOT / ".tmax_eval_work")
+245	    ap.add_argument("--api-base", default=None)
+246	    ap.add_argument("--endpoints-file", default=None)
+247	    ap.add_argument("--model", default=None)
+248	    ap.add_argument("--max-steps", type=int, default=int(os.environ.get("TMAX_MAX_STEPS", "80")))
+249	    ap.add_argument("--temperature", type=float, default=float(os.environ.get("TB2_TEMPERATURE", "0")))
+250	    ap.add_argument("--concurrent", type=int, default=int(os.environ.get("TMAX_CONCURRENT", "1")))
+251	    ap.add_argument("--limit", type=int, default=0, help="only first N tasks (debug)")
+252	    ap.add_argument("--task-id", action="append", default=[], help="run only these task ids")
+253	    ap.add_argument("--rebuild-images", action="store_true")
+254	    ap.add_argument("--skip-initial", action="store_true")
+255	    ap.add_argument("--keep-container", action="store_true")
+256	    ap.add_argument("--network", default=os.environ.get("TMAX_DOCKER_NETWORK", "bridge"))
+257	    ap.add_argument("--resume", action="store_true", help="skip tasks with existing result.json")
+258	    ap.add_argument(
+259	        "--harness-config",
+260	        type=Path,
+261	        default=None,
+262	        help="Optional HarnessConfig YAML; Tmax agent uses sibling system_prompt.txt if present",
+263	    )
+264	    ap.add_argument(
+265	        "--system-prompt-file",
+266	        type=Path,
+267	        default=None,
+268	        help="Override system prompt text file for the Tmax Bash agent",
+269	    )
+270	    args = ap.parse_args(argv)
+271	
+272	    model = _model_name(args)
+273	    if not model:
+274	        raise SystemExit("model name required (--model or TB2_MODEL)")
+275	    endpoints = _endpoints(args)
+276	    task_ids = _load_task_ids(args.tasks_json)
+277	    if args.task_id:
+278	        want = set(args.task_id)
+279	        task_ids = [t for t in task_ids if t in want]
+280	    if args.limit and args.limit > 0:
+281	        task_ids = task_ids[: args.limit]
+282	
+283	    envs = _load_envs(args.envs_jsonl)
+284	    missing = [t for t in task_ids if t not in envs]
+285	    if missing:
+286	        raise SystemExit(
+287	            f"{len(missing)} task ids missing from {args.envs_jsonl}: {missing[:5]}"
+288	        )
+289	
+290	    system_prompt = _resolve_system_prompt(args.harness_config, args.system_prompt_file)
+291	
+292	    out_dir = args.jobs_dir / args.job_name
+293	    out_dir.mkdir(parents=True, exist_ok=True)
+294	    args.work_root.mkdir(parents=True, exist_ok=True)
+295	
+296	    # Claim queue with round-robin endpoints.
+297	    lock = threading.Lock()
+298	    results: list[dict[str, Any]] = []
+299	    pending = []
+300	    for i, tid in enumerate(task_ids):
+301	        rpath = out_dir / f"{tid}.result.json"
+302	        if args.resume and rpath.is_file():
+303	            try:
+304	                prev = json.loads(rpath.read_text())
+305	                if prev.get("status") in ("ok", "agent_error") and "reward" in prev:
+306	                    results.append(prev)
+307	                    print(f"[skip] {tid} (resume reward={prev.get('reward')})")
+308	                    continue
+309	            except Exception:
+310	                pass
+311	        pending.append((tid, endpoints[i % len(endpoints)]))
+312	
+313	    print(
+314	        f"[tmax_eval] job={args.job_name} model={model} tasks={len(pending)} "
+315	        f"(resume_kept={len(results)}) endpoints={len(endpoints)} "
+316	        f"concurrent={args.concurrent}"
+317	    )
+318	
+319	    def _worker(item: tuple[str, str]) -> dict[str, Any]:
+320	        tid, api_base = item
+
+[Showing lines 241–320 of 412 total. Use offset=320 to read the next section.]

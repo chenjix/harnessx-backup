@@ -1,0 +1,28 @@
+--- R6
++++ R7
+@@ -95,2 +95,25 @@
+   _hook_: '*'
++# R7 (C-007): break the max_tokens self-reinforcing verbosity loop. Distinct from
++# the R2 RepeatCommandBreaker (which targets identical *tool calls*) and the
++# reverted R5 tool-block. The eval model runs under a hard max_tokens=4096 output
++# cap it cannot self-limit; on hard tasks it emits ~4096 tokens of prose with NO
++# tool call (finish_reason=length), the run loop appends a passive "cut off by the
++# token limit, please continue" nudge, and the model — now staring at a growing
++# wall of its own near-identical truncated narration — reproduces that wall 8-23x
++# until budget_exceeded. LengthTruncationRecovery already fires but its
++# on_before_model edit is ephemeral (never lands in state.raw_messages), so the
++# duplicate wall keeps growing. This processor runs at on_step_start (after
++# compaction, order 20): when it sees >=3 consecutive near-identical *truncated*
++# assistant turns (>=200 chars, no tool_calls) plus their passive nudges, it
++# collapses them to one trimmed turn + one "emit ONE short Bash command" directive.
++# The run loop persists step_start structural edits, so the wall is durably removed
++# and the model gets a clean context. Never blocks/drops/fabricates a tool call;
++# fires on ZERO of the passing tasks (all have passive-nudge count 0). Structural
++# trigger only — no task ids, paths, or domain literals. See
++# processors/truncation_loop_compactor.py.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R7/processors/truncation_loop_compactor.py::TruncationLoopCompactor
++  min_run: 3
++  prefix_chars: 80
++  max_content_chars: 4000
++  _hook_: '*'
+ - _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard

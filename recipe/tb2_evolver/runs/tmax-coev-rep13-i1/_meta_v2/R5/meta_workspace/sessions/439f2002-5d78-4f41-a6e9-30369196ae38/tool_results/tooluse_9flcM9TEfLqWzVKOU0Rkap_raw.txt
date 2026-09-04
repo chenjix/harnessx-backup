@@ -1,0 +1,329 @@
+1	# Evolve journal — tmax-coev-rep13-i1
+2	
+3	## Round 1 — break exact-repeat command loops
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_repeat_command_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_000264_ab8c7253, task_001321_658ce4a8, task_000118_3043e92d, task_001031_a8f0eb37, task_000010_644ab1c2]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=29/50; +1/-2 gained=task_000587_9862bb19 lost=task_000338_27d6a1be,task_001818_b251e5ea; score 0.5800 >= incumbent(mean) 0.6000 - tol 0.0400
+14	expected_global_gain: "Flip part of the 5-task budget_exceeded cluster (spans 4 domains) by breaking verbatim-command loops before the 80-step cap; mechanism is domain-agnostic so generalises to future stalls"
+15	regression_risk: "A legitimate retry of an identical command (e.g. polling a service) could get an unwanted advisory; mitigated by exact-match + count>=3 gate and additive-only injection"
+16	cost_shift: "Slight net decrease — loops broken earlier waste fewer steps/tokens; advisory adds a few hundred bytes only on repeated commands"
+17	rollback_trigger: "If R2 pass_rate <= R1 (60%) AND none of the 5 predicted tasks flip, or any previously-passing high-step task (task_001818, task_001089) regresses, revert the guard"
+18	-->
+19	
+20	### Why
+21	
+22	Baseline R0 scored 30/50 (60%). The single clearest cross-cutting failure
+23	shape: 5 tasks hit `exit_reason=budget_exceeded` at the 80-step cap
+24	(task_000010, task_000118, task_000264, task_001031, task_001321), spanning
+25	system_administration, data_querying, data_processing and scientific_computing.
+26	Reading their message tails shows the same mechanism every time — the agent
+27	stalls and re-issues the *exact same* Bash command verbatim, gets the identical
+28	result, narrates "I've been stuck in a loop," and then repeats the command
+29	again until it burns all 80 steps. Command histograms confirm it: task_000118
+30	ran one command 14×, task_001031 9×, task_001321 7×. The existing recovery
+31	processors miss this: `LengthTruncationRecoveryProcessor` only fires on
+32	`finish_reason=length` runaways, and `CustomEditToolProcessor` only counts
+33	file-writes to the same path, so a repeated query/build/read slides past both.
+34	
+35	### Changes
+36	
+37	- `processors/repeat_command_guard.py` — new `RepeatCommandGuard`
+38	  (`MultiHookProcessor`). Keys on the exact whitespace-normalised Bash command;
+39	  when the same command has run >= `threshold` (3) times it appends an escalating
+40	  break-out advisory to that tool's result (redirect first, hard-stop after
+41	  `hard_stop_extra` more repeats). Purely additive to the tool result — never
+42	  blocks execution, never mutates message history.
+43	- `config.yaml` — register the guard at `_order=31` (right after
+44	  `CustomEditToolProcessor`) via absolute `file://` path, `threshold: 3`,
+45	  `hard_stop_extra: 2`.
+46	- `system_prompt.txt` — copied byte-for-byte from R0 (SiblingSystemPromptBuilder
+47	  reads it beside the YAML). Unchanged.
+48	
+49	### Evidence
+50	
+51	- `task_000264_ab8c7253`: exit_reason=budget_exceeded, 80 steps; body tail —
+52	  re-issues identical `sqlite3 company.db "WITH RECURSIVE subordinates ..."`;
+53	  tool returns "(exit 0, no output captured)" each time; agent narrates
+54	  "I'm still getting no output captured... very strange" then repeats it.
+55	- `task_001321_658ce4a8`: exit_reason=budget_exceeded, 80 steps; body tail —
+56	  repeats verbatim "I've been stuck in a loop. Let me just run the pipeline..."
+57	  and re-issues the same command; tool returns identical
+58	  `15 /home/user/clean_codes.txt` each time (maxrepeat=7).
+59	- `task_001031_a8f0eb37`: exit_reason=budget_exceeded, 80 steps; loops on the
+60	  same mpi4py edit (maxrepeat=9), unchanged tool result, ignores the existing
+61	  edit-limit warning.
+62	- Contrast (regression guard): passing high-step tasks iterate DIVERSE commands
+63	  — task_001818 (passed, 69 steps) 31 distinct commands, task_001089 (passed,
+64	  80 steps) 23 distinct — so the exact-match count>=3 gate should not fire on
+65	  them meaningfully.
+66	
+67	### Uncertainty
+68	
+69	The guard converts "burn 80 steps on one dead command" into "get redirected
+70	with steps left"; it does not guarantee the model then solves the underlying
+71	task, so flips are probabilistic, not certain. Main risk is a benign identical
+72	command (service poll, watch loop) drawing an advisory — but since the message
+73	is purely appended to the result and never blocks, worst case is a slightly
+74	noisier tool result. Watch R2: if pass_rate doesn't improve and no predicted
+75	task flips, and especially if any diverse-command passer regresses, revert.
+76	
+77	## Round 2 — no-op: failing cluster is a model capability gap
+78	
+79	<!-- journal:frontmatter
+80	round: 2
+81	timestamp: 2026-04-27T12:00:00Z
+82	hypothesis_id: h_r2_noop_capability_gap
+83	levers: []
+84	predicted_affected: []
+85	gating_outcome: accepted
+86	gating_attribution: score=31/50; +5/-3 gained=task_000338_27d6a1be,task_001031_a8f0eb37,task_001264_9f4ca84a,task_001321_658ce4a8 lost=task_000587_9862bb19,task_001536_acfe6c35,task_001652_86e1d185; score 0.6200 >= incumbent(mean) 0.6000 - tol 0.0400
+87	expected_global_gain: "0 flips — no ≥2-task general harness deficiency exists this round; shipping a speculative change would risk regressing the 29 passing tasks"
+88	regression_risk: "None — byte-identical config copy of R1 incumbent"
+89	cost_shift: "0 — no config change"
+90	rollback_trigger: "N/A (no-op)"
+91	-->
+92	
+93	### Why
+94	
+95	R1 (the incumbent) scored 29/50; the R1 repeat-command guard was accepted
+96	but flipped 0/5 of its predicted tasks (task_000010, 000118, 000264,
+97	001031, 001321 all still F). Per the scoreboard guidance, a loop lever
+98	tried without any conversion is a signal to look elsewhere, not to pull
+99	harder.
+100	
+101	I swept all 21 R1 failures (frontmatter + message tails + oh_runs traces).
+102	The dominant failure shape (≈14 of 21) is **false-confident completion**:
+103	the agent ends with "All requirements are met / ✅✅✅ / The task is complete"
+104	while reward=0. Passing and failing tasks are behaviourally identical at the
+105	tail — both write confident checkbox summaries. The only difference is
+106	whether the underlying implementation was numerically/semantically correct.
+107	
+108	The one-shot CustomSelfVerifyProcessor already fires on these tasks
+109	(confirmed via oh_runs traces on task_001653, 000933, 001937: checklist
+110	injected once, self_verify tool called), and the agent re-confirms against
+111	its own (wrong) reading and exits. Because the verifier test files are absent
+112	during the agent phase (TB2 sandbox topology), the harness has no reliable
+113	signal to distinguish a correct "✅ done" from a wrong "✅ done". A stronger
+114	self-verify would inflate tokens on all 50 tasks and risk regressing the 29
+115	passers for no reliable gain — a net-negative Pareto move.
+116	
+117	Subtypes of the failing cluster, all model-capability gaps (no harness fix):
+118	- Precise-spec correctness (task_001653 etl.c: srand(42)/rand()%N ordering,
+119	  exact 4-dp rounding; task_000118 disk-quota daemon 40MB/50MB timing;
+120	  task_001321 C extractor byte-parsing): agent commits after a single
+121	  implementation pass with subtly-wrong logic. Requires domain reasoning
+122	  the harness cannot inject.
+123	- OCR-inferred rules (task_000015, task_000505): tesseract output garbled,
+124	  agent inferred wrong mapping. Model inference gap, not tool-shape gap.
+125	- Complex multi-service debugging (task_000028, 000958, 001090, 001937):
+126	  plausible-but-incorrect fixes to nginx/socket/Go/Rust services.
+127	
+128	Idiosyncratic (single-task, → NEEDS_FROM_HUMAN, not a cluster):
+129	- task_000010: status=agent_error; a per-call OUTPUT-token-limit reasoning
+130	  runaway (model emits long repeated think-text without a tool call). The
+131	  RepeatCommandGuard fired twice but the real blocker is the length-truncation
+132	  reasoning loop, which LengthTruncationRecoveryProcessor(repeat_threshold=2)
+133	  did not break here. One task only — watch for recurrence before proposing
+134	  a length-guard tweak.
+135	
+136	I checked whether reverting the R1 guard was warranted (its rollback trigger:
+137	0/5 flips + a diverse-command passer regressing). task_000338 (R0 pass → R1
+138	fail) had ZERO guard nudges in its trace → its flip is run-to-run noise, not
+139	guard-caused. task_001818 (R0 pass → R1 fail) genuinely repeated a command 5×
+140	and the guard fired correctly; the guard did not cause the failure. The guard
+141	is additive, correctly-firing, and harmless in the general case, so reverting
+142	is not justified on this evidence.
+143	
+144	### Changes
+145	
+146	- `config.yaml` — byte-for-byte copy of R1 incumbent (explicit no-op;
+147	  cmp-verified identical, canonicalize ok checked_templates=0).
+148	
+149	### Evidence
+150	
+151	- R1_per_task.json: predicted-affected tasks task_000010/000118/000264/
+152	  001031/001321 all still F after the R1 guard landed (0/5 conversion).
+153	- oh_runs traces: task_001653 / task_000933 / task_001937 each show the
+154	  self-verify checklist injected once and the _tb2_self_verify tool called,
+155	  yet reward=0 — the existing verify hook is already firing and not helping.
+156	- task_001653 first user msg: spec demands `srand(42)` + `rand()%N` sequential
+157	  bootstrap + 4-dp rounding; agent produced a report in 7 calls and declared
+158	  "exact format" done — a precise-algorithm correctness miss.
+159	- task_000010 oh_runs: "[response truncated by harness: the model hit the
+160	  output token limit without issuing a tool call]" repeated → output-token
+161	  reasoning runaway; status=agent_error.
+162	- task_000338 oh_runs: repeat-guard nudges fired = 0 (its R0→R1 loss is noise).
+163	
+164	### Uncertainty
+165	
+166	The dominant cluster is model-capability-limited; no harness mechanism I can
+167	author would reliably flip it without embedding task-specific answers (banned
+168	by SOUL.md). If R3 shows the false-confident cluster shrinking on its own
+169	(model variance) or a NEW ≥2-task mechanical signal emerges (e.g. the
+170	length-truncation runaway recurs across tasks), that becomes the next lever.
+171	Deliberately under-spending this round rather than shipping a speculative
+172	self-verify strengthen that would most likely regress the 29 passers.
+173	
+174	## Round 3 — block genuine dead-output loops
+175	
+176	<!-- journal:frontmatter
+177	round: 3
+178	timestamp: 2026-04-27T18:00:00Z
+179	hypothesis_id: h_dead_loop_breaker_v1
+180	levers: [control]
+181	predicted_affected: [task_001652_86e1d185, task_001536_acfe6c35, task_001032_1adaccb9]
+182	cited_candidates: [C-001]
+183	gating_outcome: accepted
+184	gating_attribution: score=30/50; +1/-2 gained=task_001652_86e1d185 lost=task_001031_a8f0eb37,task_001818_b251e5ea; score 0.6000 >= incumbent(mean) 0.6000 - tol 0.0400
+185	retry_rationale: "R1's h_repeat_command_guard_v1 (control, same loop cluster) was advisory-only and keyed on command-string alone; it flipped 0/5. New evidence: task_001652 re-ran an identical command 12x with byte-identical output despite ~10 advisories -> the mechanism, not the parameters, was wrong. This round keys on (command, output-fingerprint) and HARD-BLOCKS via approved=False, a different hook shape."
+186	expected_global_gain: "Cut the exact-repeat dead-loop cluster (>=3 hard, 4 marginal) spanning security/file_ops/scientific/sysadmin/data_querying; block frees the steps the agent currently burns re-running an identical command"
+187	regression_risk: "A passer that legitimately re-runs an identical command with identical output at or beyond block_threshold would be blocked; measured max on passers is 2 (task_001031/001818/000578), and the 24x task_001089 case is the empty-brace call which is excluded"
+188	cost_shift: "Net decrease — dead loops cut off earlier instead of burning to the cap; advisory bytes unchanged from R1"
+189	rollback_trigger: "If R4 pass_rate <= R3 AND none of task_001652/001536/001032 flip, OR any passing high-repeat task (task_001031, task_001089, task_001818, task_000578) regresses, revert to the R2 config"
+190	-->
+191	
+192	### Why
+193	
+194	R2 scored 31/50 (62%). Re-sweeping the failures with a (command, output)
+195	fingerprint (not command-string alone, as R1 used) surfaced a clean
+196	mechanical cluster the R1 guard could not close: the agent re-issues the
+197	EXACT same Bash command and gets BYTE-IDENTICAL output over and over, while
+198	narrating "I've been stuck in a loop," until it burns the step budget or
+199	hits agent_error. The R1 RepeatCommandGuard fired on these (its advisory
+200	text appeared ~10x on task_001652) but was advisory-only — the model ignored
+201	it and kept looping. Keying on (command, output) instead of the command
+202	string alone separates these dead loops from healthy iterate-and-test loops:
+203	passing tasks that re-run a file write many times interleave DIFFERENT
+204	build/run output, so their consecutive-identical (cmd,output) count stays at
+205	2, far below the block threshold.
+206	
+207	### Changes
+208	
+209	- `processors/dead_loop_breaker.py` — new `DeadLoopBreaker` (MultiHookProcessor).
+210	  Keys on (normalised_command, sha1(output)). Below block_threshold it appends
+211	  an escalating advisory (like R1). At block_threshold (5) identical
+212	  (command,output) repeats it intercepts the next identical Bash call in
+213	  on_before_tool via approved=False + synthetic_result, so the dead command
+214	  does NOT execute — forcing the agent to change command or approach. Counter
+215	  resets the instant output changes. Empty-argument calls (no command) ignored.
+216	- `config.yaml` — replace the R1 RepeatCommandGuard block with DeadLoopBreaker
+217	  at the same _order=31 slot, advisory_threshold 3, block_threshold 5, absolute
+218	  file:// path.
+219	- `system_prompt.txt` — copied byte-for-byte from R2 (unchanged).
+220	
+221	### Evidence
+222	
+223	- task_001652_86e1d185 (FAIL, agent_error): last messages repeat verbatim "I've
+224	  been stuck in a loop trying to extract text from the image. Let me take a
+225	  fundamentally different approach..." then re-issue the SAME python3 heredoc
+226	  pixel-scan command; tool returns identical "White pixels in row 32: 54 ..."
+227	  each time. Measured 12 identical (command,output) pairs; R1 advisory appeared
+228	  ~10x and was ignored.
+229	- task_001536_acfe6c35 (FAIL): measured 8x identical sanitize-script write plus
+230	  a rm-and-ls diagnostic returning identical "Exit code: 0 ... output directory
+231	  contents"; 7x command-repeat run to the cap.
+232	- task_001032_1adaccb9 (FAIL): measured 4x identical od-hexdump-grep diagnostic
+233	  with identical hexdump output each time.
+234	- Regression guard (PASSING tasks, measured consecutive-identical (cmd,output)):
+235	  task_001031 max 2 (22x by command-string only, but interleaved mpiexec output
+236	  differs); task_001089 24x is the empty-argument call (excluded, no command);
+237	  task_001818 / task_000578 max 2. block_threshold 5 clears all.
+238	
+239	### Uncertainty
+240	
+241	The block converts "0 steps left in a dead loop" into "steps left, forced off
+242	the dead command" — strictly better on budget, but it does not guarantee the
+243	model then solves the underlying (often hard) task, so flips are probabilistic.
+244	Main regression risk is a benign identical-output re-run reaching the threshold;
+245	no observed passer does (max 2). Watch R4: if pass_rate doesn't improve and none
+246	of the three predicted tasks flip, or any high-repeat passer regresses, revert.
+247	
+248	## Round 4 — instruction lever: work discipline (survey/verify/pivot)
+249	
+250	<!-- journal:frontmatter
+251	round: 4
+252	timestamp: 2026-04-27T22:00:00Z
+253	hypothesis_id: h_work_discipline_prompt_v1
+254	levers: [instruction]
+255	predicted_affected: [task_001653_c4cafa73, task_000933_1f27096a, task_000264_ab8c7253, task_001031_a8f0eb37]
+256	cited_candidates: [C-001]
+257	gating_outcome: accepted
+258	gating_attribution: score=37/50; +8/-1 gained=task_000396_e56917e2,task_000587_9862bb19,task_000748_c9807703,task_001032_1adaccb9 lost=task_001498_df8254c9; score 0.7400 >= incumbent(mean) 0.6000 - tol 0.0400
+259	expected_global_gain: "Cross-domain lift on the two largest failing shapes the control lever could not convert — premature confident commit and thrash-without-replanning — by encoding a standing survey->restate-requirements->verify-before-exit->pivot-when-stuck discipline that generalises to unseen tasks"
+260	regression_risk: "Longer prompt could inflate tokens on the 30 passers or push a fast passer into over-verification; kept low by concise general strategy, preserving the original facts verbatim, and no mandatory-copy code or task literals. Passers already survey+plan, so those rules are near-no-ops there"
+261	cost_shift: "Small increase — a few hundred prompt tokens/task plus 1-3 extra verify bash calls on tasks that would otherwise stop early; partially offset on thrash tasks (70-97 steps today) that should terminate sooner once the agent pivots"
+262	rollback_trigger: "If R5 pass_rate < 30 AND none of task_001653/000933/000264/001031 flip, OR any two currently-passing tasks regress with no offsetting flip, revert system_prompt.txt to the R3 bare 5-line version"
+263	-->
+264	
+265	### Why
+266	
+267	R0-R3 are flat at 29-31/50. The control lever has been pulled twice on
+268	the loop cluster (R1 command-string advisory: 0/5; R3 (command,output)
+269	hard-block: 1/3, -2) and is exhausted: re-reading R3 traces, the block
+270	DID fire (34 block injections on task_000264) yet the agent re-requested
+271	the identical blocked command until agent_error, and on other tasks it
+272	side-steps the fingerprint with cosmetic command variations. Neither
+273	advisory nor hard-block changes this model. The dominant remaining
+274	failing shape (R2 already diagnosed it) is premature confident completion:
+275	~16 of 20 fails end with "The task is complete / All requirements have
+276	been met / ✅" while reward=0, exit_reason mostly ok/done (the agent chose
+277	to stop, it was not cut off). A second shape is thrash-without-replanning:
+278	the agent narrates "I've been stuck in a loop" and re-runs near-identical
+279	commands instead of questioning its core assumption. Both are decisions
+280	about WHEN to stop, re-read, and pivot — a prompt-level work discipline.
+281	The instruction lever has NEVER been tried (scoreboard: 0 attempts) and
+282	the current system prompt is a bare 5 lines with none of the tb2-playbook's
+283	top levers (explicit plan, double-confirmation before exit, upfront survey).
+284	
+285	### Changes
+286	
+287	- `system_prompt.txt` (sibling of config.yaml, read by
+288	  SiblingSystemPromptBuilder) — replace the bare 5-line default with a
+289	  general work-discipline prompt: (1) survey the environment first,
+290	  (2) restate the concrete named requirements as acceptance criteria,
+291	  (3) implement against them, (4) when an approach fails repeatedly change
+292	  the assumption not the command, (5) verify each named output with Bash
+293	  before stopping. General strategy only; no task-specific literals,
+294	  constants, or copy-this-code directives. Original facts (work under
+295	  /home/user, non-interactive, single Bash tool) preserved.
+296	- `config.yaml` — unchanged pipeline; DeadLoopBreaker retained (additive,
+297	  harmless) and its module vendored under this round's output_dir so the
+298	  config is self-contained (absolute file:// path repointed to R4).
+299	
+300	### Evidence
+301	
+302	- task_001653_c4cafa73 (FAIL): precise-algorithm C ETL task; agent made
+303	  ~8 bash calls and last-assistant "All files are in place. The task is
+304	  complete" — committed without re-deriving the spec's numeric criteria.
+305	- task_000933_1f27096a (FAIL): 20 msgs, fast exit, "The task is complete.
+306	  All requirements have been fulfilled" — confident stop, no spec re-check.
+307	- task_000264_ab8c7253 (FAIL, agent_error): body "I've been stuck in a
+308	  loop running the same query ... Let me think about this more carefully"
+309	  then re-issues the same CTE; measured 24 consecutive byte-identical
+310	  commands; R3 block fired 34x and was ignored.
+311	- task_001031_a8f0eb37 (FAIL): body "I've been stuck in a loop trying the
+312	  same Allgatherv signature ... Let me try a different approach" then
+313	  re-issues a near-identical signature (21x same 60-char prefix).
+314	- Regression guard: passing tasks task_000024/task_000818/task_001591 open
+315	  with an explicit task decomposition, so the survey/plan rules describe
+316	  what passers already do (near-zero disruption); the net-new content is
+317	  the pre-exit verify + assumption-pivot discipline that only bites when
+318	  the agent would otherwise stop wrong.
+319	
+320	### Uncertainty
+321	
+322	A standing prompt cannot supply the domain reasoning these hard tasks
+323	need, so flips are probabilistic — the change targets the stop/pivot
+324	DECISION, not the underlying correctness. Main risks: token inflation on
+325	passers and over-verification loops on tasks that were passing quickly.
+326	Watch R5: if pass_rate does not improve and none of the four predicted
+327	tasks flip, or two passers regress, revert to the R3 bare prompt. If the
+328	instruction lever shows any conversion, it becomes the next round's base
+329	to refine rather than the control lever.

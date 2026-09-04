@@ -1,0 +1,40 @@
+57:_VT_FORBIDDEN_ROLE_MUTATION = "forbidden_role_mutation"
+61:_VT_SYSTEM_MUTATED = "system_mutated"
+109:def _validate_messages_contract(
+121:    ``before_model``; callers should pass the returned value into the next call
+125:        # system_window must not change
+126:        before_sys = (before_msgs[0],) if before_msgs and before_msgs[0].role == "system" else ()
+127:        after_sys = (after_msgs[0],) if after_msgs and after_msgs[0].role == "system" else ()
+130:                "step_start processor modified system_window",
+152:    elif hook == "before_model":
+155:                "before_model: messages became empty after processor — fail fast",
+163:        len_delta = len(after_msgs) - len(before_msgs)
+165:        if len_delta < 0:
+167:                f"before_model: processor removed {-len_delta} message(s)",
+173:        elif len_delta > 1:
+175:                f"before_model: processor added {len_delta} messages in a single step (max +1)",
+181:        elif len_delta == 1:
+182:            # Adding a message is only allowed when the original last role is NOT user
+183:            if before_msgs and before_msgs[-1].role == "user":
+185:                    "before_model: processor added a message when last role is already 'user' "
+195:                    "before_model: second processor attempted to add user message "
+203:            if new_msg.role != "user":
+205:                    f"before_model: new tail message has role={new_msg.role!r} (must be 'user')",
+212:        else:  # len_delta == 0
+214:                if before_msgs[-1].role == "user":
+218:                            "before_model: processor modified messages other than the last user",
+228:                            "before_model: processor modified messages when last role is not "
+257:    1. system count ≤ 1 and at position 0 when present.
+259:    3. Same-index role match between raw and effective tracks.
+260:    4. Same-index ``tool_call_id`` for ``role=tool`` messages.
+261:    5. ``before_model`` net length change only 0 or +1.
+265:    # Invariant 1: system constraint (only meaningful when final_msgs non-empty)
+266:    sys_count = sum(1 for m in final_msgs if m.role == "system") if final_msgs else 0
+269:            f"post-hook: {sys_count} system messages in final messages (max 1 allowed)",
+271:            violation_type="invariant_system_count",
+274:    if sys_count == 1 and final_msgs and final_msgs[0].role != "system":
+276:            "post-hook: system message exists but is not at position 0",
+278:            violation_type="invariant_system_position",
+293:                if r.role != e.role:
+295:                        f"post-hook: role mismatch at index {i}: raw={r.role!r} eff={e.role!r}",
+297:                        violation_type="invariant_role_mismatch",

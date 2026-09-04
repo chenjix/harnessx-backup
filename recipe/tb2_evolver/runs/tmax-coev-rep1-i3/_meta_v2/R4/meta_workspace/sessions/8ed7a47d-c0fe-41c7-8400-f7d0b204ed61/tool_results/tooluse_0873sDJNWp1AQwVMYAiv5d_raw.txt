@@ -1,0 +1,43 @@
+N messages: 68
+--- user ---
+You are an infrastructure engineer automating the provisioning of a video analysis microservice. We have a partially complete setup that is currently failing. An Nginx reverse proxy is configured to expose the service, but it is returning a 502 Bad Gateway because it is pointing to the wrong upstream UNIX socket path.
+
+Your objectives:
+1. **Fix Nginx Routing**: Inspect and fix the Nginx configuration at `/app/nginx.conf`. It currently routes requests to an incorrect UNIX socket. Update it to point to `/tmp/video_backend.sock`.
+2. **Fix and Update C++ Backend**: 
+   - We have a basic C++ HTTP socket server at `/app/server.cpp`. It is currently configured to listen on the wrong socket. Update it to listen on `/tmp/video_backend.sock`.
+   - Update the C++ code to analyze the video file located at `/app/video.mp4`. The server must dynamically calculate the exact total number of video frames in this file (you may use `ffprobe`, which is preinstalled, by shelling out from C++).
+   - The server must respond to any HTTP GET request with `HTTP/1.1 200 OK` and the body containing ONLY the integer frame count of the video.
+3. **Compile and Run**: Compile the C++ server into an executable at `/app/server`. Run it in the background. Its standard output and standard error must be appended to `/app/server.log`.
+4. **Log Configuration**: Create a logrotate configuration file at `/app/logrotate.conf` to manage `/app/server.log`. It should be configured to rotate daily, keep exactly 3 backups, and compress old logs.
+5. **Start Services**: Start Nginx using your fixed `/app/nginx.conf`. Nginx is configured to listen on `127.0.0.1:8080`.
+
+Ensure the final setup is robust. An automated verifier will make HTTP requests to `http://127.0.0.1:8080/` to check your Nginx proxy and C++ server integration, and will inspect your log rotation configuration.
+--- assistant ---
+Let me break down the task:
+
+1. Fix Nginx configuration at `/app/nginx.conf` to point to `/tmp/video_backend.sock`
+2. Fix C++ backend at `/app/server.cpp`:
+   - Update socket path to `/tmp/video_backend.sock`
+   - Add code to analyze video file at `/app/video.mp4` using `ffprobe` to get frame count
+   - Respond with HTTP 200 and just the frame count as integer
+3. Compile the C++ server to `/app/server`
+4. Run it in background with output to `/app/server.log`
+5. Create logrotate config at `/app/logrotate.conf` for daily rotation, 3 backups, compression
+6. Start Nginx with the fixed config
+
+Let me start by inspecting the current files.
+
+
+I'll start by inspecting the current state of the files to understand what needs to be fixed.
+--- tool ---
+events {}
+http {
+    server {
+        listen 127.0.0.1:8080;
+        location / {
+            proxy_pass http://unix:/tmp/wrong.sock;
+        }
+    }
+}
+

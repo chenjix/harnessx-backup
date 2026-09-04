@@ -1,0 +1,82 @@
+844	
+845	## Round 2 (c4) — compute cross-check at self-verify
+846	
+847	<!-- journal:frontmatter
+848	round: 2
+849	timestamp: 2026-08-29T00:00:00Z
+850	hypothesis_id: h_compute_crosscheck_selfverify_v1
+851	levers: [control]
+852	predicted_affected: [task_000111_cbada64a, task_001653_c4cafa73, task_001937_ac874115, task_001035_26564093, task_001330_f5aff1f5]
+853	cited_candidates: [C-001]
+854	gating_outcome: pending
+855	gating_attribution: pending
+856	expected_global_gain: "Flips the recurring done-but-numerically-wrong compute cluster (2 strong tasks 000111/001653; up to 5 in the scientific_computing+data_science family) by encoding an independent-recompute discipline at the exact exit moment."
+857	regression_risk: "Low: appends one string to the self-verify ACK, fires once per task, only on armed compute tasks; on already-passing compute tasks the recompute agrees (confirmatory no-op). Only real risk is a few extra tool calls pushing a near-budget compute task over the limit - the 8 passing compute tasks span 8-67 steps with headroom."
+858	cost_shift: "Plus one to four short tool calls on compute tasks that reach exit; negligible on non-compute tasks (not armed). Net positive if it recovers even one pass."
+859	rollback_trigger: "Next-round compute-cluster pass_rate flat/down, OR a previously-passing compute task (task_000602/task_000710/task_001832) regresses to budget_exceeded/max_steps from added recompute steps, OR the nudge fires on non-compute tasks."
+860	-->
+861	
+862	### Why
+863	
+864	Assigned focus task_000111_cbada64a (C++ OLS + bootstrap CI) exited done at 7
+865	steps, reward=0: committed slope m=2.5056 vs oracle 2.5997. OLS is
+866	deterministic, so a second correct computation on the same CSV necessarily
+867	disagrees and the bug was discoverable; but the agent verification (step 7, and
+868	again at step 11 after the _tb2_self_verify ACK) was a format/requirements
+869	checklist plus "the values make sense". Sweeping all 50 result.json surfaced the
+870	same mechanism across the compute family: agents exit done at very low step
+871	counts (7,7,8,13,20) on scientific_computing / data_science tasks and fail a
+872	single numeric assertion - task_001653 (centroid 36.37 vs 42.01), task_001937
+873	(Optimal Grid 60 vs 50), task_001035 (DP matrix 3.0 vs 4.0), task_001330
+874	(Monte-Carlo 0.048 vs 0.050). initial_pytest passes on all (infra fine); the gap
+875	is verification discipline, not capability (Bash to Python/numpy/C++ available).
+876	A sibling R1 bet the Instruction lever (h_numeric_crosscheck_v1, pending) with a
+877	task-start system prompt section; task_000111 shows that guidance decays by
+878	exit. This round targets the SAME cluster at the Control lever, injected at the
+879	self-verify exit moment - a materially different, temporally-targeted shape.
+880	
+881	### Changes
+882	
+883	- processors/compute_crosscheck_reminder.py - new ComputeCrossCheckReminder
+884	  MultiHookProcessor. on_task_start arms iff the task description carries a
+885	  generic numeric-computation term (regression/ols/bootstrap/percentile/
+886	  centroid/cluster/matrix/optimi/gradient/monte-carlo/etc) AND at least one
+887	  result term (round/decimal/result/value/mean/etc). on_after_tool, when the
+888	  _tb2_self_verify synthetic ACK result flows through on an armed task, APPENDS
+889	  one cross-validation directive (re-derive the key value with an INDEPENDENT
+890	  method; a rerun of the same code is not independent; on disagreement probe
+891	  off-by-one/parsing/seed-draw-order/precision/search-boundaries; sanity-check
+892	  record counts) and disarms. Mutates only the tool-result string (contract-
+893	  clean, same shape as CustomEditToolProcessor), inserts no messages, no system
+894	  prompt edit, fires once per task. No task-specific literals.
+895	- config.yaml - register ComputeCrossCheckReminder via absolute file:// path at
+896	  _order=95, immediately after CustomSelfVerifyProcessor (_order=90) so the ACK
+897	  result exists to append to.
+898	
+899	### Evidence
+900	
+901	- task_000111 result.json: reward 0, exit done, 7 steps; final_pytest
+902	  "Expected m to be approx 2.5997, got 2.5056". Body step 7: "the values make
+903	  sense ... This is in the format ... as required"; step 11 (post self-verify
+904	  ACK) re-checks the same requirement checkboxes, never recomputes the slope.
+905	- task_001653 final_pytest: Centroid 36.3687 / Distance 18.6199 vs expected
+906	  42.0095 / 11.3444.
+907	- task_001937 final_pytest: Expected Optimal Grid to be 50, but got 60.
+908	- task_001035 final_pytest: Mismatch at 0,0: expected 4.0, got 3.0.
+909	- task_001330 final_pytest: Expected m=0.050, but found m=0.048.
+910	- Passing compute tasks (regression probe): task_000602 (9 steps),
+911	  task_000710 (8), task_001832 (67) - all with budget headroom; a confirmatory
+912	  recompute agrees and they still exit.
+913	
+914	### Uncertainty
+915	
+916	Honest split within the cluster: the retroactive check is a strong yes for the
+917	deterministic cases (task_000111 OLS, task_001653 centroid) where an
+918	independent method necessarily disagrees with the buggy value. It is weaker for
+919	same-mental-model bugs (task_001330 seed draw-order, task_001035 DP recurrence)
+920	where re-deriving with the same wrong notion reproduces the wrong number - the
+921	nudge explicitly says "a rerun of the SAME code is not independent" and names
+922	draw-order/indexing to counter that, but there it is a nudge, not a guarantee.
+923	Two ways to know the bet is wrong next round: (1) the strong pair (000111/
+
+[Showing lines 844–923 of 1013 total. Use offset=923 to read the next section.]

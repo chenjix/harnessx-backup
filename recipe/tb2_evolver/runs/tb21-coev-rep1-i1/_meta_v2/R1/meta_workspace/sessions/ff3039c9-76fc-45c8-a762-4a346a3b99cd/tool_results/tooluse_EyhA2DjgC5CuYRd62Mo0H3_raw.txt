@@ -1,0 +1,94 @@
+244	    hook: str,
+245	    initial_msgs: "tuple",
+246	    final_msgs: "tuple",
+247	    *,
+248	    step_id: int = -1,
+249	    raw_msgs: "tuple | None" = None,
+250	) -> None:
+251	    """Check all post-hook-chain invariants (草案 §Post-hook 不变量).
+252	
+253	    Called once after the **entire** hook-chain completes.  Enforces structural
+254	    guarantees that must hold regardless of how many processors ran.
+255	
+256	    Invariants checked:
+257	    1. system count ≤ 1 and at position 0 when present.
+258	    2. ``len(raw_track) == len(effective_track)`` (when ``raw_msgs`` provided).
+259	    3. Same-index role match between raw and effective tracks.
+260	    4. Same-index ``tool_call_id`` for ``role=tool`` messages.
+261	    5. ``before_model`` net length change only 0 or +1.
+262	    6. Non-authorized hooks must have net length change == 0.
+263	    7. boundary consistency is handled by RunLoop (hash-based); not rechecked here.
+264	    """
+265	    # Invariant 1: system constraint (only meaningful when final_msgs non-empty)
+266	    sys_count = sum(1 for m in final_msgs if m.role == "system") if final_msgs else 0
+267	    if sys_count > 1:
+268	        _handle_violation(
+269	            f"post-hook: {sys_count} system messages in final messages (max 1 allowed)",
+270	            hook=hook,
+271	            violation_type="invariant_system_count",
+272	            step_id=step_id,
+273	        )
+274	    if sys_count == 1 and final_msgs and final_msgs[0].role != "system":
+275	        _handle_violation(
+276	            "post-hook: system message exists but is not at position 0",
+277	            hook=hook,
+278	            violation_type="invariant_system_position",
+279	            step_id=step_id,
+280	        )
+281	
+282	    # Invariants 2-4: raw/effective track alignment (when raw provided)
+283	    if raw_msgs is not None:
+284	        if len(raw_msgs) != len(final_msgs):
+285	            _handle_violation(
+286	                f"post-hook: raw_track len={len(raw_msgs)} != effective_track len={len(final_msgs)}",
+287	                hook=hook,
+288	                violation_type="invariant_track_length",
+289	                step_id=step_id,
+290	            )
+291	        else:
+292	            for i, (r, e) in enumerate(zip(raw_msgs, final_msgs)):
+293	                if r.role != e.role:
+294	                    _handle_violation(
+295	                        f"post-hook: role mismatch at index {i}: raw={r.role!r} eff={e.role!r}",
+296	                        hook=hook,
+297	                        violation_type="invariant_role_mismatch",
+298	                        step_id=step_id,
+299	                    )
+300	                    break
+301	                if r.role == "tool" and r.tool_call_id != e.tool_call_id:
+302	                    _handle_violation(
+303	                        f"post-hook: tool_call_id mismatch at index {i}: raw={r.tool_call_id!r} eff={e.tool_call_id!r}",
+304	                        hook=hook,
+305	                        violation_type="invariant_tool_id_mismatch",
+306	                        step_id=step_id,
+307	                    )
+308	                    break
+309	
+310	    if initial_msgs is None:
+311	        return
+312	    net = len(final_msgs) - len(initial_msgs)
+313	
+314	    # Invariant 5: before_model net length 0 or +1
+315	    if hook == "before_model" and net not in (0, 1):
+316	        _handle_violation(
+317	            f"post-hook: before_model chain net length change is {net:+d} (must be 0 or +1)",
+318	            hook=hook,
+319	            violation_type=_VT_LENGTH_EXCEEDED,
+320	            step_id=step_id,
+321	        )
+322	
+323	    # Invariant 6: non-authorized hooks must not change messages length
+324	    _NO_LEN_CHANGE = {"after_model", "before_tool", "after_tool", "step_end", "task_end", "task_start"}
+325	    if hook in _NO_LEN_CHANGE and net != 0:
+326	        _handle_violation(
+327	            f"post-hook: {hook} chain changed messages length by {net:+d} (must be 0)",
+328	            hook=hook,
+329	            violation_type=_VT_LENGTH_EXCEEDED,
+330	            step_id=step_id,
+331	        )
+332	
+333	
+334	# Named ordering phases for MultiHookProcessor._order.
+335	# Use these instead of magic integers; fine-grained values are still accepted
+
+[Showing lines 244–335 of 844 total. Use offset=335 to read the next section.]

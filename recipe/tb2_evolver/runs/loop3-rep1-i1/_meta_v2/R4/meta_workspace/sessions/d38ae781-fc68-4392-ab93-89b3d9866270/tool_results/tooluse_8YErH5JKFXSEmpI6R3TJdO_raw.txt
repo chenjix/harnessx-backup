@@ -1,0 +1,46 @@
+                hook="before_model",
+            )
+            before_event = next(
+                (e for e in reversed(_bm_events) if isinstance(e, BeforeModelEvent)),
+                before_event,
+            )
+            await tracer.on_event(before_event)
+
+            # ── 3. Call model ────────────────────────────────────────────────
+            if before_event.skip_model:
+                model_event = ModelResponseEvent(
+                    run_id=state.run_id,
+                    step_id=step_id,
+                    content=before_event.synthetic_output,
+                    finish_reason="stop",
+                    usage=Usage(),
+                )
+                spawn_events: list[SpawnSubAgentEvent] = []
+            else:
+                # Validate message sequence before sending to API:
+                # - Ensure tool_use/tool_result pairs are complete
+                # - Ensure messages don't end with assistant role (would be interpreted as prefill)
+                _before_msg_list = list(before_event.messages)
+                final_messages = _validate_messages(_before_msg_list)
+                model_response = await active_model_provider.complete(
+                    messages=final_messages,
+                    tools=list(before_event.tools),
+                    stream_callback=stream_callback,
+                )
+                model_event = ModelResponseEvent(
+                    run_id=state.run_id,
+                    step_id=step_id,
+                    content=model_response.content,
+                    thinking=model_response.thinking,
+                    thinking_blocks=model_response.thinking_blocks,
+                    tool_calls=model_response.tool_calls,
+                    finish_reason=model_response.finish_reason,
+                    usage=model_response.usage,
+                    model=model_response.model,
+                )
+                # after_model uses pipe_all: processors may yield SpawnSubAgentEvents
+                after_events = await pipe_all(model_event, get_procs("after_model"), tracer=tracer, hook="after_model")
+                spawn_events = [e for e in after_events if isinstance(e, SpawnSubAgentEvent)]
+                model_event = next(
+                    (e for e in reversed(after_events) if isinstance(e, ModelResponseEvent)),
+                    model_event,

@@ -1,0 +1,122 @@
+1	# Routed evidence for this round
+2	
+3	Every failure in this round was attributed to a responsible side before you were shown it. **Only the defects listed under "Editable defects" are yours to fix.** The rest are listed as counts so you know what the score contains, but editing the harness cannot address them — do not write prompt text aimed at them.
+4	
+5	- trajectories: **28**  (7 failed, 21 passed)
+6	- attributed to the harness/tool layer (yours): **0**
+7	- attributed to the model (goes to SFT, not to you): **5**
+8	- environment / benchmark / unattributable (nobody's to fix here): **2**
+9	
+10	## Editable defects
+11	
+12	Grouped across trajectories: `count` is how many trials exhibited the same defect, so a count of 20 is one bug, not twenty.
+13	
+14	### 1. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && .<path> <n>>&<n>`  (count=1, tasks=1)  ⟳ SEEN IN 1 EARLIER ROUND(S)
+15	- interaction edge: `Model-Tool`
+16	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+17	- affected tasks: custom-memory-heap-crash
+18	- evidence:
+19	  - `custom-memory-heap-crash` step 2: action `cd /app && ./debug 2>&1`
+20	    observation: `=== Monte Carlo π Estimation Application ===  === Running Monte Carlo Simulation ===  Estimating π using Monte Carlo method... Samples: 1000000 Estimated π: 3.142428 Actual π: 3.141593 Error: 0.000835 Accuracy: 99.97%  =`
+21	    trial: `custom-memory-heap-crash__5DT286e`
+22	
+23	### 2. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && sqlite3 -header -csv oewn.sqlite < my-sql-query`  (count=1, tasks=1)
+24	- interaction edge: `Model-Tool`
+25	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+26	- affected tasks: query-optimize
+27	- evidence:
+28	  - `query-optimize` step 4: action `cd /app && sqlite3 -header -csv oewn.sqlite < my-sql-query.sql > /tmp/original_output.csv 2>&1`
+29	    observation: `Error: Command timed out after 120 seconds`
+30	    trial: `query-optimize__bbHtapE`
+31	
+32	## Not actionable by a harness edit
+33	
+34	- `missing_dependency_or_broken_env`: 2
+35	
+36	These are excluded from the editable list on purpose. If the score looks low, some of it is these — that is not a signal about your config.
+37	
+38	## Affordance gaps (harness-actionable, derived by contrast)
+39	
+40	Each entry pairs an error **our** model failed to recover from with recoveries a stronger model achieved on the **same error class** (mined from the Tmax success corpus — a different model on a different harness). The Tmax half is **not evidence of a defect here**; it is a demonstration that a recovery exists. Your question for each: *given the current config, is that recovery reachable?* Concretely — is the error surfaced in full rather than truncated, does any tool description or prompt line make the probe an obvious next move, is there a step budget left to attempt it?
+41	
+42	### A1. `generic_error` — our model failed to recover 2x
+43	- our failure modes: `ignored_visible_error_repeated_action`x1, `visible_error_no_effective_recovery`x1
+44	- affected tasks: cancel-async-tasks, custom-memory-heap-crash
+45	- what our model did:
+46	  - `cancel-async-tasks`: ran `cat /app/run.py`
+47	    got: `import asyncio from typing import Callable, Awaitable   async def run_tasks(tasks: list[Callable[[], Awaitable[None]]], max_concurrent: int) -> None:     """Run async tasks with a concurrency limit.      Handles KeyboardInterrupt gracefully`
+48	  - `custom-memory-heap-crash`: ran `cd /app && ./debug 2>&1`
+49	    got: `=== Monte Carlo π Estimation Application ===  === Running Monte Carlo Simulation ===  Estimating π using Monte Carlo method... Samples: 1000000 Estimated π: 3.142428 Actual π: 3.141593 Error: 0.000835 Accuracy: 99.97%  === Computation compl`
+50	- what a successful recovery looks like on this error class:
+51	  - after `echo "=== hardened_daemon.cpp ==="
+52	cat /home/user/hardened_daemon.cpp
+53	echo ""
+54	echo "=== start_daemon.exp ==="
+55	` failed, recovered with **`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`** (1 turns to success)
+56	  - after `cd /home/user/sim && go build -o sim main.go && ./sim` failed, recovered with **`sed -n '38,45p' /home/user/sim/main.go`** (5 turns to success)
+57	  - after `cd /home/user/sim && go build -o sim main.go && echo "Build successful"` failed, recovered with **`cd /home/user/sim && nl -ba main.go | sed -n '65,85p'`** (6 turns to success)
+58	
+59	### A2. `python_traceback` — our model failed to recover 1x
+60	- our failure modes: `ignored_visible_error_repeated_action`x1
+61	- affected tasks: headless-terminal
+62	- what our model did:
+63	  - `headless-terminal`: ran `cd /app && python3 -c "
+64	from headless_terminal import HeadlessTerminal
+65	import time
+66	
+67	# Test 1: Basic instantiation
+68	term = HeadlessTerminal()
+69	print('Test 1 PASS: Terminal created successfully')
+70	
+71	# Test `
+72	    got: `Traceback (most recent call last):   File "<string>", line 2, in <module>     from headless_terminal import HeadlessTerminal   File "/app/headless_terminal.py", line 6, in <module>     class HeadlessTerminal(BaseTerminal):                  `
+73	- what a successful recovery looks like on this error class:
+74	  - after `sed -i "s/print(f\"Sample rate: {sample_rate}, Samples: {len(audio_data_raw), dtype: {audio_data_raw.dtype}\")` failed, recovered with **`source /home/user/venv/bin/activate && python3 -c "import pocketsphinx; print(dir(pocketsphinx))" 2>&1`** (5 turns to success)
+75	  - after `python3 << 'PYEOF'
+76	import numpy as np
+77	from PIL import Image
+78	
+79	# Generate 60 frames of a 1D cross-section video
+80	` failed, recovered with **`python3 << 'PYEOF'
+81	import numpy as np
+82	from PIL import Image
+83	import subprocess
+84	import os
+85	
+86	# Generate 60 frames of a 1D cross-section video
+87	width = 200
+88	`** (7 turns to success)
+89	  - after `python3 << 'PYEOF'
+90	import numpy as np
+91	from PIL import Image
+92	
+93	# Generate 60 frames of a 1D cross-section video
+94	` failed, recovered with **`python3 << 'PYEOF'
+95	import numpy as np
+96	from PIL import Image
+97	
+98	# Generate 60 frames of a 1D cross-section video
+99	width = 200
+100	height = 100
+101	
+102	frames = []
+103	fo`** (8 turns to success)
+104	
+105	### A3. `timeout` — our model failed to recover 1x
+106	- our failure modes: `visible_error_no_effective_recovery`x1
+107	- affected tasks: query-optimize
+108	- what our model did:
+109	  - `query-optimize`: ran `cd /app && sqlite3 -header -csv oewn.sqlite < my-sql-query.sql > /tmp/original_output.csv 2>&1`
+110	    got: `Error: Command timed out after 120 seconds`
+111	- what a successful recovery looks like on this error class:
+112	  - after `find /home/user/archive_mount -type f && echo "---" && cat /home/user/archive_mount/system.jsonl && echo "---"` failed, recovered with **`cat /home/user/done.txt && echo "" && find /home/user/archive_mount -name "*.tmp" -type f`** (2 turns to success)
+113	  - after `echo "=== system.jsonl ===" && cat /home/user/archive_mount/system.jsonl && echo "=== app/db.jsonl ===" && cat` failed, recovered with **`echo "=== Original files still exist ===" && ls -la /home/user/live_logs/app/db.log /home/user/live_logs/system.log /home/user/live_logs/web_ui/fronte`** (3 turns to success)
+114	  - after `cat /home/user/live_logs/app/db.log` failed, recovered with **`cat /home/user/live_logs/system.log && echo "---" && cat /home/user/live_logs/web_ui/frontend.log`** (8 turns to success)
+115	
+116	## Model-side failures (routed to SFT, not to you)
+117	
+118	- `ignored_visible_error_repeated_action`: 2
+119	- `visible_error_no_effective_recovery`: 2
+120	- `premature_stop_or_wrong_solution`: 1
+121	
+122	The model saw the error and did not recover. A harness edit can sometimes help here (by making recovery easier to reach — see the affordance gaps above), but the primary fix is training data, which is already being collected.

@@ -1,0 +1,162 @@
+302	# non-test caller and keeping them together makes the evolve loop easier to
+303	# follow.
+304	# ---------------------------------------------------------------------------
+305	
+306	
+307	def _tool_label_from_custom_target(target: str) -> str:
+308	    """Extract the tool *symbol name* from a ToolRegistryConfig.custom entry.
+309	
+310	    Supported forms (mirrors ``_build_tool_registry_from_config``):
+311	
+312	    * ``file:///abs/path.py::symbol`` → ``symbol``
+313	    * ``module.path.symbol``          → ``symbol``
+314	
+315	    The tool's *registered* name can differ from its symbol name (via
+316	    ``@tool(name=...)``), but at changeset-diff time we only know the
+317	    import target, so we use the symbol. Different symbols ⇒ different
+318	    labels ⇒ still detected as added/removed. Same symbol re-pointed at
+319	    a different path is rare and would require loading the module to
+320	    disambiguate, which is out of scope for a best-effort diff.
+321	    """
+322	    if not isinstance(target, str) or not target:
+323	        return ""
+324	    if target.startswith("file://"):
+325	        # file:///abs/path.py::symbol → symbol
+326	        _, sep, sym = target.rpartition("::")
+327	        return sym.strip() if sep else ""
+328	    # dotted path: module.path.symbol → symbol
+329	    return target.rsplit(".", 1)[-1]
+330	
+331	
+332	def _tool_names(cfg: "HarnessConfig") -> set[str]:
+333	    """Extract the set of tool names present in a HarnessConfig.
+334	
+335	    Handles three shapes the ``tool_registry`` slot can take:
+336	
+337	    * live registry (``InMemoryToolRegistry``) — uses ``list_names()``.
+338	    * :class:`~harnessx.core.config_schema.ToolRegistryConfig` dataclass —
+339	      yields ``set(builtin) | {symbol for each custom target}``. This is
+340	      the shape produced by :meth:`HarnessConfig.from_yaml`, which is
+341	      what :func:`compute_changeset` sees in practice when diffing two
+342	      YAML-round-tripped configs.
+343	    * ``None`` or anything else — empty set.
+344	
+345	    Previously this function only handled the live-registry shape, so
+346	    YAML-loaded configs appeared to carry *zero* tools and tool
+347	    additions/removals silently disappeared from the changeset diff.
+348	    """
+349	    reg = getattr(cfg, "tool_registry", None)
+350	    if reg is None:
+351	        return set()
+352	
+353	    # Live registry path (InMemoryToolRegistry and friends).
+354	    if hasattr(reg, "list_names"):
+355	        try:
+356	            return set(reg.list_names())
+357	        except Exception:  # noqa: BLE001 — diff is best-effort
+358	            return set()
+359	
+360	    # Declarative path (ToolRegistryConfig). Import lazily so this
+361	    # module stays importable without harnessx.core initialised.
+362	    try:
+363	        from harnessx.core.config_schema import ToolRegistryConfig
+364	    except Exception:  # noqa: BLE001
+365	        return set()
+366	
+367	    if isinstance(reg, ToolRegistryConfig):
+368	        names: set[str] = set()
+369	        for name in getattr(reg, "builtin", []) or []:
+370	            if isinstance(name, str) and name:
+371	                names.add(name)
+372	        for target in getattr(reg, "custom", []) or []:
+373	            label = _tool_label_from_custom_target(target)
+374	            if label:
+375	                names.add(label)
+376	        return names
+377	
+378	    return set()
+379	
+380	
+381	def _iter_processor_entries(cfg: "HarnessConfig"):
+382	    for entry in getattr(cfg, "processors", None) or []:
+383	        if isinstance(entry, dict):
+384	            target = entry.get("_target_", "") or ""
+385	            yield _label_from_target(target), entry
+386	    for p in getattr(cfg, "_rt_procs", None) or []:
+387	        label = getattr(p, "_singleton_group", "") or type(p).__name__
+388	        entry = {"_target_": type(p).__module__ + "." + type(p).__name__}
+389	        yield label, entry
+390	
+391	
+392	def _label_from_target(target: str) -> str:
+393	    if "::" in target:
+394	        return target.rsplit("::", 1)[-1]
+395	    return target.rsplit(".", 1)[-1] if target else ""
+396	
+397	
+398	def _processor_labels(cfg: "HarnessConfig") -> set[str]:
+399	    return {label for label, _ in _iter_processor_entries(cfg) if label}
+400	
+401	
+402	def _processor_kwargs_fingerprint(entry: dict) -> str:
+403	    kwargs = {k: v for k, v in entry.items() if k not in ("_target_", "_code_hash")}
+404	    try:
+405	        return json.dumps(kwargs, sort_keys=True, default=str, ensure_ascii=False)
+406	    except Exception:  # noqa: BLE001
+407	        return repr(sorted(kwargs.items()))
+408	
+409	
+410	def _processor_kwargs_by_label(cfg: "HarnessConfig") -> dict[str, str]:
+411	    out: dict[str, str] = {}
+412	    for label, entry in _iter_processor_entries(cfg):
+413	        if not label:
+414	            continue
+415	        out[label] = _processor_kwargs_fingerprint(entry)
+416	    return out
+417	
+418	
+419	def _collect_template_paths(cfg: "HarnessConfig") -> set[str]:
+420	    paths: set[str] = set()
+421	
+422	    def _visit(node: Any) -> None:
+423	        if isinstance(node, dict):
+424	            v = node.get("template_path")
+425	            if isinstance(v, str) and v:
+426	                paths.add(v)
+427	            for sub in node.values():
+428	                _visit(sub)
+429	        elif isinstance(node, list):
+430	            for sub in node:
+431	                _visit(sub)
+432	
+433	    processors = getattr(cfg, "processors", None)
+434	    if processors is not None:
+435	        _visit(processors)
+436	    for p in getattr(cfg, "_rt_procs", None) or []:
+437	        builder = getattr(p, "system_builder", None) or getattr(p, "builder", None) or p
+438	        tpath = getattr(builder, "template_path", None)
+439	        if isinstance(tpath, str) and tpath:
+440	            paths.add(tpath)
+441	    return paths
+442	
+443	
+444	def _template_fingerprints(cfg: "HarnessConfig") -> dict[str, str]:
+445	    fps: dict[str, str] = {}
+446	    for tpath in _collect_template_paths(cfg):
+447	        tp = Path(tpath)
+448	        if not tp.is_file():
+449	            fps[str(tp)] = "<missing>"
+450	            continue
+451	        try:
+452	            data = tp.read_bytes()
+453	        except OSError:
+454	            fps[str(tp)] = "<unreadable>"
+455	            continue
+456	        fps[str(tp)] = hashlib.sha256(data).hexdigest()[:16]
+457	    return fps
+458	
+459	
+460	def compute_changeset(
+461	    before: "HarnessConfig",
+
+[Showing lines 302–461 of 949 total. Use offset=461 to read the next section.]

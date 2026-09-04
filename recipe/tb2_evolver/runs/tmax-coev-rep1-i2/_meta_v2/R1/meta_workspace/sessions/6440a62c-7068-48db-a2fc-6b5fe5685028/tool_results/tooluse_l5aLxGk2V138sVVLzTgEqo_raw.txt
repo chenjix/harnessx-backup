@@ -1,0 +1,40 @@
+16:    BeforeModelEvent,
+105:    The message is written into the factual track (`raw_messages`) so the
+109:    if state.raw_messages:
+110:        last = state.raw_messages[-1]
+113:    state.add_raw_message(Message(role="assistant", content=_USER_INTERRUPTED_MESSAGE))
+234:            compacted_messages=tuple(state.messages),
+235:            compacted_raw_messages=tuple(state.raw_messages),
+304:                raw_messages=tuple(state.raw_messages),
+305:                messages=tuple(state.messages),
+311:                token_count=rough_token_count(list(state.messages)),
+314:            _pre_step_msgs = step_start_event.messages or tuple(state.messages)
+354:                    compacted_raw_messages=tuple(step_start_event.raw_messages or _post_step_msgs),
+367:                    state.raw_messages = list(boundary.compacted_messages)
+368:                    state.messages = list(boundary.compacted_messages)
+375:            _assembled = step_start_event.messages or tuple(state.messages)
+376:            _assembled_list = list(_assembled)
+379:                # On resume, state.messages may retain a system from a prior session;
+382:                _assembled_list = [m for m in _assembled_list if m.role != "system"]
+383:                _assembled_list.insert(0, Message(role="system", content=task_system_prompt))
+384:            before_event = BeforeModelEvent(
+387:                messages=tuple(_assembled_list),
+393:                get_procs("before_model"),
+395:                hook="before_model",
+398:                (e for e in reversed(_bm_events) if isinstance(e, BeforeModelEvent)),
+462:                state.add_raw_message(
+475:                state.add_raw_message(
+496:            _pre_tool_raw_idx = len(state.raw_messages)
+592:                        state.add_raw_message(
+622:                        state.add_raw_message(
+631:                        state.add_raw_message(
+656:                    state.raw_messages[_pre_tool_raw_idx:],
+659:                state.raw_messages[_pre_tool_raw_idx:] = _new_tool_msgs
+660:                state.messages[_pre_tool_raw_idx:] = _new_tool_msgs
+698:                # step_snapshots=False: skip step_start_event — it holds assembled messages
+708:            # to call). Append a user continuation so the next step's assembled
+717:                state.add_raw_message(
+730:                state.add_raw_message(
+756:                    state.add_raw_message(
+780:        final_output = _recover_best_output(state.raw_messages, final_output)
+783:        final_output = _recover_best_output(state.raw_messages, final_output)

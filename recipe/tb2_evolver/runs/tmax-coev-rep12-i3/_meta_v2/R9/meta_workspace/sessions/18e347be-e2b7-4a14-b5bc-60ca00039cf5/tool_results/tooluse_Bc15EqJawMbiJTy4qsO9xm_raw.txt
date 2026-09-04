@@ -1,0 +1,42 @@
+341	
+342	            # Auto-detect structural history changes not already covered by a
+343	            # processor-emitted SegmentBoundaryEvent.  If history_window changed
+344	            # but no processor signalled a boundary, RunLoop generates one now.
+345	            if not boundary_events and _history_hash_before != _history_hash_after:
+346	                _hint = step_start_event.boundary_hint
+347	                _auto_boundary = SegmentBoundaryEvent(
+348	                    run_id=state.run_id,
+349	                    step_id=step_id,
+350	                    reason=_hint.reason if _hint else "auto_history_mutation",
+351	                    new_run_id=make_run_id(),
+352	                    state_snapshot=None,
+353	                    compacted_messages=tuple(_post_step_msgs),
+354	                    compacted_raw_messages=tuple(step_start_event.raw_messages or _post_step_msgs),
+355	                    before_msgs=_hint.before_msgs if _hint else 0,
+356	                    after_msgs=_hint.after_msgs if _hint else 0,
+357	                    before_tokens=_hint.before_tokens if _hint else 0,
+358	                    after_tokens=_hint.after_tokens if _hint else 0,
+359	                )
+360	                boundary_events = [_auto_boundary]
+361	
+362	            # Handle segment boundary: update state.run_id and notify tracer
+363	            for boundary in boundary_events:
+364	                await tracer.on_event(boundary)
+365	                state.run_id = boundary.new_run_id
+366	                if boundary.compacted_messages:
+367	                    state.raw_messages = list(boundary.compacted_messages)
+368	                    state.messages = list(boundary.compacted_messages)
+369	            await tracer.on_event(step_start_event)
+370	
+371	            # ── 2. Before model ─────────────────────────────────────────────
+372	            # RunLoop owns a safe default assembly path so step_start processors
+373	            # are optional: if no processor produced messages, start from the
+374	            # current effective context. Always ensure system prompt is present.
+375	            _assembled = step_start_event.messages or tuple(state.messages)
+376	            _assembled_list = list(_assembled)
+377	            if task_system_prompt:
+378	                # Strip any stale system message and inject the current task prompt.
+379	                # On resume, state.messages may retain a system from a prior session;
+380	                # always replace it so the model sees a fresh prompt rather than
+
+[Showing lines 341–380 of 981 total. Use offset=380 to read the next section.]

@@ -1,0 +1,91 @@
+                    messages=final_messages,
+                    tools=list(before_event.tools),
+                    stream_callback=stream_callback,
+                )
+                model_event = ModelResponseEvent(
+                    run_id=state.run_id,
+                    step_id=step_id,
+                    content=model_response.content,
+                    thinking=model_response.thinking,
+                    thinking_blocks=model_response.thinking_blocks,
+                    tool_calls=model_response.tool_calls,
+                    finish_reason=model_response.finish_reason,
+                    usage=model_response.usage,
+                    model=model_response.model,
+                )
+                # after_model uses pipe_all: processors may yield SpawnSubAgentEvents
+                after_events = await pipe_all(model_event, get_procs("after_model"), tracer=tracer, hook="after_model")
+                spawn_events = [e for e in after_events if isinstance(e, SpawnSubAgentEvent)]
+                model_event = next(
+                    (e for e in reversed(after_events) if isinstance(e, ModelResponseEvent)),
+                    model_event,
+                )
+            await tracer.on_event(model_event)
+            for se in spawn_events:
+                await tracer.on_event(se)
+
+            # Update token/cost tracking
+            state.cumulative_tokens += model_event.usage.total_tokens
+            state.cumulative_input_tokens += model_event.usage.input_tokens
+            state.cumulative_output_tokens += model_event.usage.output_tokens
+            last_model_input_tokens = model_event.usage.input_tokens
+            last_model_output_tokens = model_event.usage.output_tokens
+            cost = _estimate_cost(model_event.usage)
+            state.cumulative_cost_usd += cost
+
+            if (
+                not _cost_warned
+                and state.max_cost_usd is not None
+                and state.cumulative_cost_usd >= state.max_cost_usd * 0.7
+            ):
+                _cost_warned = True
+                remaining_pct = 100 * (1 - state.cumulative_cost_usd / state.max_cost_usd)
+                state.add_raw_message(
+                    Message(
+                        role="user",
+                        content=(
+                            f"[COST WARNING: You have used {state.cumulative_cost_usd:.2f} of "
+                            f"${state.max_cost_usd:.2f} budget ({remaining_pct:.0f}% remaining). "
+                            "Start wrapping up — provide your FINAL ANSWER soon. "
+                            "A best-effort answer is better than running out of budget.]"
+                        ),
+                    )
+                )
+
+            if not before_event.skip_model:
+                state.add_raw_message(
+                    Message(
+                        role="assistant",
+                        content=model_event.content,
+                        tool_calls=model_event.tool_calls,
+                        thinking=model_event.thinking,
+                        thinking_blocks=model_event.thinking_blocks,
+                    )
+                )
+
+            if model_event.content:
+                final_output = model_event.content
+
+            # ── 4. Execute tools ─────────────────────────────────────────────
+            step_tool_results: list[ToolResultEvent] = []
+            interrupt_triggered = False
+            # Compute MCP results dir once per step (stable across all tool calls).
+            _tracer_session = getattr(tracer, "session_id", "")
+            _step_mcp_dir: str | None = None
+            if hasattr(tracer, "base_dir") and _tracer_session:
+                _step_mcp_dir = os.path.join(tracer.base_dir, _tracer_session, "mcp_results")
+            _pre_tool_raw_idx = len(state.raw_messages)
+            for tc in model_event.tool_calls:
+                interrupt_on = getattr(task, "interrupt_on", []) or []
+                if tc.name in interrupt_on:
+                    interrupted_at = tc
+                    exit_reason = "interrupted"
+                    interrupt_triggered = True
+                    break
+
+                tc_event = ToolCallEvent(
+                    run_id=state.run_id,
+                    step_id=step_id,
+                    tool_name=tc.name,
+                    tool_input=tc.input,
+                    tool_call_id=tc.id,

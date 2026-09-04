@@ -1,0 +1,82 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	from __future__ import annotations
+4	
+5	import hashlib
+6	import json
+7	import time
+8	import uuid
+9	from dataclasses import dataclass, field
+10	from typing import Any
+11	
+12	
+13	@dataclass(frozen=True)
+14	class Message:
+15	    role: str  # "user" | "assistant" | "tool"
+16	    content: str | list  # str for text; list of content blocks for multimodal (Anthropic format)
+17	    tool_call_id: str | None = None
+18	    name: str | None = None
+19	    tool_calls: tuple = ()  # tuple[ToolCall, ...] — populated for role=assistant with tool calls
+20	    thinking: str = ""  # reasoning/thinking text (for display/trajectory recording)
+21	    thinking_blocks: tuple = ()  # tuple[dict, ...] — raw provider thinking blocks with signatures
+22	    # Required for Anthropic multi-turn: blocks must be replayed verbatim
+23	    # (including "signature") so the API can verify they weren't tampered with.
+24	    msg_id: str | None = None  # stable per-message identity; set on raw-track records by journal
+25	
+26	
+27	@dataclass(frozen=True)
+28	class ToolSchema:
+29	    name: str
+30	    description: str
+31	    input_schema: dict  # JSON Schema
+32	    metadata: dict = field(default_factory=dict, hash=False, compare=False)
+33	    """Arbitrary metadata attached to the tool.
+34	
+35	    Convention — use ``"tags"`` for tag-based filtering::
+36	
+37	        ToolSchema(name="rm", ..., metadata={"tags": ["dangerous", "write"]})
+38	
+39	    ``TagToolFilter`` reads ``metadata["tags"]`` to allow/block tool schemas
+40	    before they are sent to the model.
+41	    """
+42	
+43	
+44	@dataclass(frozen=True)
+45	class ToolCall:
+46	    id: str
+47	    name: str
+48	    input: dict
+49	
+50	
+51	@dataclass(frozen=True)
+52	class Usage:
+53	    input_tokens: int = 0
+54	    output_tokens: int = 0
+55	    cache_read_tokens: int = 0
+56	    cache_write_tokens: int = 0
+57	
+58	    @property
+59	    def total_tokens(self) -> int:
+60	        return self.input_tokens + self.output_tokens
+61	
+62	
+63	@dataclass(frozen=True)
+64	class EvalResult:
+65	    passed: bool
+66	    score: float  # 0.0 ~ 1.0
+67	    reason: str
+68	    reward: float = 0.0
+69	
+70	
+71	# ─── Base Event ───────────────────────────────────────────────────────────────
+72	
+73	
+74	@dataclass(frozen=True)
+75	class Event:
+76	    type: str
+77	    run_id: str
+78	    step_id: int
+79	    ts: float = field(default_factory=time.time)
+80	
+
+[Showing lines 1–80 of 580 total. Use offset=80 to read the next section.]

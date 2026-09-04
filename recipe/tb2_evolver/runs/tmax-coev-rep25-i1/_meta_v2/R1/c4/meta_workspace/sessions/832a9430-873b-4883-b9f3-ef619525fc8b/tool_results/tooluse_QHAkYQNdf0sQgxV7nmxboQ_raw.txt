@@ -1,0 +1,82 @@
+111	    model: str,
+112	    instruction: str,
+113	    exec_fn: Callable[[str, float], tuple[int, str]],
+114	    max_steps: int = 80,
+115	    temperature: float = 0.0,
+116	    api_key: str = "EMPTY",
+117	    request_timeout: float = 180.0,
+118	    default_cmd_timeout: float = 60.0,
+119	    system_prompt: str | None = None,
+120	    max_tokens: int | None = 4096,
+121	) -> AgentResult:
+122	    sys_prompt = (system_prompt or SYSTEM_PROMPT).strip() or SYSTEM_PROMPT
+123	    messages: list[dict[str, Any]] = [
+124	        {"role": "system", "content": sys_prompt},
+125	        {"role": "user", "content": instruction},
+126	    ]
+127	    log: list[StepLog] = []
+128	
+129	    for step in range(1, max_steps + 1):
+130	        try:
+131	            resp = _chat(
+132	                api_base,
+133	                model,
+134	                messages,
+135	                temperature=temperature,
+136	                api_key=api_key,
+137	                timeout=request_timeout,
+138	                max_tokens=max_tokens,
+139	            )
+140	        except Exception as e:
+141	            return AgentResult(
+142	                steps=step - 1,
+143	                finished="error",
+144	                messages=messages,
+145	                log=log,
+146	                error=f"chat failed at step {step}: {e}",
+147	            )
+148	
+149	        choice = (resp.get("choices") or [{}])[0]
+150	        msg = choice.get("message") or {}
+151	        tool_calls = msg.get("tool_calls") or []
+152	        content = msg.get("content")
+153	
+154	        # Normalize assistant message for history.
+155	        asst: dict[str, Any] = {"role": "assistant", "content": content or ""}
+156	        if tool_calls:
+157	            asst["tool_calls"] = tool_calls
+158	        messages.append(asst)
+159	
+160	        entry = StepLog(step=step, role="assistant", content=content, tool_calls=tool_calls)
+161	        if not tool_calls:
+162	            log.append(entry)
+163	            return AgentResult(
+164	                steps=step, finished="no_tool_calls", messages=messages, log=log
+165	            )
+166	
+167	        for tc in tool_calls:
+168	            fn = (tc.get("function") or {})
+169	            name = fn.get("name") or ""
+170	            args = _parse_args(fn.get("arguments"))
+171	            tc_id = tc.get("id") or f"call_{step}"
+172	            if name.lower() not in ("bash",):
+173	                result = f"Error: unknown tool '{name}'. Only Bash is available."
+174	                rc = 1
+175	            else:
+176	                cmd = str(args.get("command") or "")
+177	                timeout_ms = args.get("timeout")
+178	                try:
+179	                    t_sec = (
+180	                        min(float(timeout_ms) / 1000.0, 300.0)
+181	                        if timeout_ms is not None
+182	                        else default_cmd_timeout
+183	                    )
+184	                except Exception:
+185	                    t_sec = default_cmd_timeout
+186	                if not cmd.strip():
+187	                    rc, result = 1, "Error: empty command"
+188	                else:
+189	                    t0 = time.time()
+190	                    try:
+
+[Showing lines 111–190 of 214 total. Use offset=190 to read the next section.]

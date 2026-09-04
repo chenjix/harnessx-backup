@@ -1,0 +1,57 @@
+    assert actual_target == target, f"Symlink {link_name} points to {actual_target}, expected {target}"
+E           AssertionError: Symlink primary_record_link.dat points to file_A.dat, expected financial_records_2021.dat
+E           assert 'file_A.dat' == 'financial_records_2021.dat'
+E             
+E             - financial_records_2021.dat
+E             + file_A.dat
+
+/tmp/test_final_state.py:35: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_safe_symlinks_exist_and_correct - ...
+1 failed, 5 passed in 
+=== task text hints from messages (first user msg) ===
+user : You are a backup administrator tasked with recovering data from a legacy archive that has been flagged for potential security risks (specifically "zip slip" style path traversal attacks via symbolic links).
+
+You have been provided with a specialized backup file at `/home/user/legacy_backup.txt.gz`. This file is a gzip-compressed text file. The text inside is a base64-encoded tarball (`.tar`).
+
+Your objectives are:
+
+1. **Custom Decompression & Extraction**:
+   - Decompress and decode `/home/user/legacy_backup.txt.gz` to obtain the original tarball.
+   - Safely extract the contents of the tarball into the directory `/home/user/recovery/` (create this directory first).
+
+2. **Link Sanitization (Zip Slip Mitigation)**:
+   - The archive contains several files, directories, and symbolic links.
+   - Some symbolic links are malicious and point to locations outside the `/home/user/recovery/` directory (e.g., using absolute paths like `/etc/passwd` or relative path traversals like `../../`).
+   - Find and **delete** any symbolic link in `/home/user/recovery/` (and its subdirectories) that resolves to a target outside the `/home/user/recovery/` directory tree.
+   - Keep all valid symbolic links that point within the recovery directory.
+
+3. **Structured Parsing & Bulk Renaming**:
+   - Inside the extracted root (`/home/user/recovery/`), there is a file named `mapping.json`.
+   - This file contains a single flat JSON object where the keys are the current filenames (relative to the recovery 
+assistant : Let me break down this task step by step:
+
+1. **Custom Decompression & Extraction**:
+   - Decompress `/home/user/legacy_backup.txt.gz` (gzip)
+   - Decode the base64 content to get a tarball
+   - Extract to `/home/user/recovery/`
+
+2. **Link Sanitization**:
+   - Find symbolic links that point outside `/home/user/recovery/`
+   - Delete those malicious symlinks
+   - Keep valid symlinks pointing within the recovery directory
+
+3. **Structured Parsing & Bulk Renaming**:
+   - Read `mapping.json` from the extracted root
+   - Rename files according to the mapping
+   - Delete `mapping.json`
+
+4. **Audit Reporting**:
+   - Create `/home/user/audit_report.txt`
+   - First line: count of malicious symlinks deleted
+   - Remaining lines: sorted list of top-level items (files, dirs, valid symlinks)
+
+Let me start by surveying the environment and understanding what we're working with.
+
+
+I'll tackle this task systematically. Let me start by surveying the environment and understanding the backup file.

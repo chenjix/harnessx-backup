@@ -1,0 +1,91 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	
+16	tool_registry:
+17	  builtin:
+18	  - Bash
+19	  custom: []
+20	tracer: null
+21	processors:
+22	# R4: system-prompt sidecar (system_prompt.txt beside this YAML) revised from
+23	# the 5-line default to an explicit general workflow — survey, plan, diagnose
+24	# before retry, budget awareness, verify deliverables the way an external
+25	# checker would (real HTTP client not raw socket; exact output path/format),
+26	# keep required services alive, avoid polluting the verifier's working dir.
+27	# Strategy-only; no task-specific literals. SiblingSystemPromptBuilder loads it.
+28	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+29	  system_builder:
+30	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+31	  _hook_: '*'
+32	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+33	  working_dir: /home/user
+34	  constraints: {}
+35	  header: Environment
+36	  max_tree_lines: 20
+37	  non_interactive: true
+38	  inject_integrity_rules: true
+39	  show_project_dir: false
+40	  _hook_: '*'
+41	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+42	  tool_schemas: {}
+43	  _hook_: '*'
+44	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+45	  warn_at:
+46	  - 0.7
+47	  - 0.9
+48	  _hook_: '*'
+49	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+50	# Without this, one stuck task can block an entire evolve round.
+51	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+52	  repeat_threshold: 2
+53	  head_chars: 1200
+54	  tail_chars: 600
+55	  _hook_: '*'
+56	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+57	  token_threshold: 140000
+58	  message_threshold: 100
+59	  retention_window: 6
+60	  eviction_fraction: 0.5
+61	  summarize_key: summarize
+62	  preserve_first_message: true
+63	  _hook_: '*'
+64	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+65	  max_consecutive_errors: 1
+66	  _hook_: '*'
+67	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+68	  drop_threshold: 5
+69	  _hook_: '*'
+70	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+71	  _hook_: '*'
+72	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+73	  threshold: 7
+74	  _hook_: '*'
+75	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+76	  _hook_: '*'
+77	# Ensure common verifier test-deps (HTTP client / config parser) are importable
+78	# in the container Python before the agent exits. TB2 verifiers frequently
+79	# `import requests` to probe a running HTTP server; when the base image lacks
+80	# it the verifier aborts at pytest collection time (ModuleNotFoundError) and a
+81	# correct solution scores 0. Fires at most once per run, only on exit-intent,
+82	# and is a no-op when the module is already present.
+83	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/R0/assets/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+84	  _hook_: '*'
+85	workspace: null
+86	workspace_template: default
+87	init_workspace: false
+88	step_snapshots: true
+89	sandbox_provider: null
+90	sandbox_hint_id: null
+91	plugins: []

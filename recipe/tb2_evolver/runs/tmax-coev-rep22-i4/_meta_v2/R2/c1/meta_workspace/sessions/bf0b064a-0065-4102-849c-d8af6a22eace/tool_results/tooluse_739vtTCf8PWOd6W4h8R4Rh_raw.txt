@@ -1,0 +1,52 @@
+1	---
+2	name: validate
+3	description: Self-validation CLIs for the artifacts you write, plus the post-flight workflow the orchestrator runs after `end_turn`. Three categories — validity (canonicalize / dry_fire / contract / synthetic replay) blocks; policy (novelty / evidence) blocks on non-noop rounds; advisory (literals) never blocks. Read when you've just written or edited `config.yaml`, `tools/*.py`, `processors/*.py`, or `templates/*.j2`.
+4	---
+5	
+6	# Self-validation — run it before you stop
+7	
+8	## What runs when, and why
+9	
+10	After your `end_turn`, the orchestrator executes the
+11	`EvolveValidator` workflow in three phases:
+12	
+13	| Phase | Checks | Blocks round? |
+14	|---|---|---|
+15	| **validity** | `canonicalize` → `dry_fire` (implicit via canonicalize + replay) → `contract` (for processors that mutate messages) → `synthetic_task` replay | yes — first failure fails the round |
+16	| **policy** | `novelty` + `evidence` (candidates.md + cited_candidates cross-ref) — only when the structural changeset is non-empty | yes on non-noop rounds |
+17	| **advisory** | `literals` — scan authored tools / processors for task-id-shaped literals | **no** — writes `_meta_scratch/LITERALS_WARNING.md` with findings; next round's agent can see it |
+18	
+19	There is **no retry loop** at the orchestrator stage — a validity
+20	or policy failure hard-fails the round. Running the validators
+21	yourself before `end_turn` is the only way to fix a broken
+22	artifact inside the same session, while your context still has
+23	the reasoning that produced it.
+24	
+25	Every validator prints a **JSON report** to stdout and exits with:
+26	- `0` → `{"ok": true, ...}` — clean
+27	- non-zero → `{"ok": false, "error": "..."}` — findings; read the
+28	  artifact file the validator wrote under `_meta_scratch/`.
+29	
+30	Run them via `Bash`. All paths below are absolute.
+31	
+32	## Canonicalize (validity)
+33	
+34	**What it catches**: YAML shape errors, unresolvable `_target_`
+35	entries, missing / empty / broken-Jinja `template_path` files.
+36	
+37	```bash
+38	python -m harnessx.meta_harness.validate_workflow canonicalize \
+39	    <output_dir>/config.yaml
+40	```
+41	
+42	Success: `{"ok": true, "checked_templates": N}` — the config loads
+43	AND every `TemplateSystemPromptBuilder` eagerly renders.
+44	
+45	Failure: read the `error_type` + `error` fields in the JSON. Common
+46	shapes:
+47	- `TemplateSyntaxError` → fix the Jinja in the `.j2` file named.
+48	- `FileNotFoundError` on `template_path` → you referenced a template
+49	  you forgot to write. Write it, or repoint to the existing one.
+50	- `ModuleNotFoundError: No module named 'tools.foo'` → a `file://`
+
+[Showing lines 1–50 of 172 total. Use offset=50 to read the next section.]

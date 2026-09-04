@@ -1,0 +1,302 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""CyclicLoopBreaker — break degenerate period-k tool-call cycles *and let the
+4	run continue*, instead of terminating it.
+5	
+6	Failure mode this closes
+7	------------------------
+8	The Tmax agent frequently gets stuck repeating the SAME tool call (or the SAME
+9	short alternating sequence of calls) that returns byte-identical output every
+10	time, making no progress and burning its entire step budget on a distraction
+11	before it can even attempt the real task. Observed on the evolve set:
+12	
+13	* ``task_000118_3043e92d`` (system_administration, budget_exceeded @ 80 steps):
+14	  28 *consecutive* identical (call, output) triples — the agent fixated on a
+15	  zombie process (``kill -9 1`` → same ``[python3] <defunct>`` output) for
+16	  ~50 turns, recognised it was looping ("I'm stuck in a loop") but could not
+17	  break out. It finally escaped on its own and started writing the actual
+18	  ``deployment_monitor.py`` at step 60 — with only ~20 steps of budget left,
+19	  not enough to iterate on the (buggy) monitor. Peak log dir = 209MB vs. the
+20	  45MB threshold → reward 0.
+21	* ``task_001857_24daeef3`` (debugging, budget_exceeded @ 80 steps): a strict
+22	  period-2 A-B cycle — two commands with byte-identical outputs alternating
+23	  for ~8 cycles (fingerprints ``f2ccf2, 2bf091, f2ccf2, 2bf091, …``).
+24	* ``task_001979_a1e24b6f`` (data_processing, exit=error): one fingerprint
+25	  repeated 37× across the run.
+26	
+27	Why the existing pipeline misses it
+28	-----------------------------------
+29	* ``LengthTruncationRecoveryProcessor`` resets its counter on *any* tool call,
+30	  so a loop that carries tool calls never trips it.
+31	* ``ParseRetryProcessor`` only counts parse errors, not productive-looking
+32	  repeats.
+33	* The stock ``LoopDetectionProcessor`` exact detector only counts a *period-1
+34	  consecutive* tail (A A A A) — it is blind to the period-2 A-B-A-B case, and
+35	  it is not even registered in this pipeline.
+36	
+37	Design — redirect, don't terminate
+38	-----------------------------------
+39	A prior candidate proposed a detector that raises ``LoopDetectedError`` on the
+40	same shape. Terminating the run reclaims budget but can *never flip* these
+41	tasks: the agent never gets to finish. task_000118 shows the agent can recover
+42	on its own if it stops looping early enough. So this processor:
+43	
+44	1. ``on_after_tool``: fingerprints the (tool_name, tool_input, result) triple
+45	   and, when the tail forms an identical period-k cycle repeated
+46	   ``warn_cycles`` times, appends a one-time corrective warning to the result
+47	   (a nudge — still lets the tool run).
+48	2. ``on_before_tool``: if the *incoming* call would extend a cycle that has
+49	   already repeated ``break_cycles`` times, it **blocks the call**
+50	   (``approved=False``) and injects a forceful redirect as the synthetic
+51	   result — WITHOUT ending the run. The agent keeps its remaining budget and
+52	   is pushed to abandon the dead-end line and work the actual task.
+53	3. Safety net: if the agent ignores the redirect and keeps re-forming the same
+54	   loop, blocked calls are cheap (instant, no execution), but if the number of
+55	   blocks in one run exceeds ``max_total_blocks`` we raise ``LoopDetectedError``
+56	   so a pathological non-recovering agent can't spin its whole budget.
+57	
+58	False-positive guard: the fingerprint includes the observable *output*, so
+59	productive exploration where the environment changes (an install that finally
+60	succeeds, a Traceback that becomes a success) produces different outputs each
+61	cycle and is never flagged. Empty/no-op steps can never join a cycle.
+62	
+63	Compaction-aware: the window is cleared on a large message-count drop so stale
+64	pre-compaction fingerprints can't inflate a cycle count.
+65	
+66	Contains no task-specific constants, paths, commands, or answers — it keys
+67	purely on the structural property "identical call+output repeated".
+68	"""
+69	
+70	from __future__ import annotations
+71	
+72	import dataclasses
+73	import hashlib
+74	import json
+75	from collections import deque
+76	
+77	from harnessx.core.events import (
+78	    StepStartEvent,
+79	    TaskEndEvent,
+80	    TaskStartEvent,
+81	    ToolCallEvent,
+82	    ToolResultEvent,
+83	)
+84	from harnessx.core.processor import MultiHookProcessor
+85	from harnessx.core.runloop import LoopDetectedError
+86	
+87	
+88	_WARN_TEMPLATE = (
+89	    "\n\n[CyclicLoopBreaker] WARNING: you have repeated the SAME cycle of "
+90	    "{period} command(s) {cycles} times and the output is identical every "
+91	    "time. You are stuck and making no progress. STOP repeating this. Re-read "
+92	    "the original task, question whether this action is even relevant to the "
+93	    "goal, and take a fundamentally different step."
+94	)
+95	
+96	_BREAK_TEMPLATE = (
+97	    "[CyclicLoopBreaker] This exact command has already been run and returned "
+98	    "identical output {runs} times with no change — it is blocked to stop an "
+99	    "infinite loop. Repeating it will NOT help. Do not run it again. Step back: "
+100	    "re-read the ORIGINAL task requirements, drop whatever tangent you are stuck "
+101	    "on (it is almost certainly not required by the task), and make concrete "
+102	    "progress on the actual deliverable now. If the real work is done, finish."
+103	)
+104	
+105	
+106	class CyclicLoopBreaker(MultiHookProcessor):
+107	    """Detect a repeating identical period-k tool cycle, then block-and-redirect.
+108	
+109	    Args:
+110	        max_period:   Largest cycle length to test for (default 4). Periods
+111	                      1..max_period are all checked each step.
+112	        warn_cycles:  Identical-cycle repetitions that inject a soft warning
+113	                      into the tool result (default 2).
+114	        break_cycles: Identical-cycle repetitions after which the *next*
+115	                      matching call is blocked and redirected instead of run
+116	                      (default 3).
+117	        max_total_blocks: Total blocked calls allowed in one run before falling
+118	                      back to LoopDetectedError as a hard safety net
+119	                      (default 12).
+120	        window_size:  Sliding fingerprint-window length (default 32).
+121	        compaction_drop_threshold: Message-count drop that signals compaction
+122	                      and clears the window (default 5).
+123	    """
+124	
+125	    _singleton_group = "cyclic_loop_breaker"
+126	    # After CompactionProcessor / PostCompactionRefresh so the window reflects
+127	    # post-eviction message counts, and after BgInstallGuard so it can't fight
+128	    # another on_before_tool blocker for the same call.
+129	    _order = 22
+130	
+131	    def __init__(
+132	        self,
+133	        max_period: int = 4,
+134	        warn_cycles: int = 2,
+135	        break_cycles: int = 3,
+136	        max_total_blocks: int = 12,
+137	        window_size: int = 32,
+138	        compaction_drop_threshold: int = 5,
+139	    ) -> None:
+140	        self.max_period = max(1, int(max_period))
+141	        self.warn_cycles = max(1, int(warn_cycles))
+142	        self.break_cycles = max(self.warn_cycles + 1, int(break_cycles))
+143	        self.max_total_blocks = max(1, int(max_total_blocks))
+144	        needed = self.max_period * (self.break_cycles + 2)
+145	        self.window_size = max(int(window_size), needed)
+146	        self.compaction_drop_threshold = int(compaction_drop_threshold)
+147	
+148	        # Full (call+result) fingerprint window — used for cycle detection.
+149	        self._fps: deque[str] = deque(maxlen=self.window_size)
+150	        # Call-only fingerprint window — used to match an *incoming* call to
+151	        # the repeating block before its result is known.
+152	        self._call_fps: deque[str] = deque(maxlen=self.window_size)
+153	        self._pending: dict[str, str] = {}
+154	        self._blocked_ids: set[str] = set()
+155	        self._current_run_id: str = ""
+156	        self._prev_message_count: int = 0
+157	        self._total_blocks: int = 0
+158	
+159	    # ------------------------------------------------------------------
+160	    # Helpers
+161	    # ------------------------------------------------------------------
+162	
+163	    @staticmethod
+164	    def _hash(text: str) -> str:
+165	        return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+166	
+167	    def _call_fp(self, tool_name: str, tool_input: dict) -> str:
+168	        try:
+169	            input_str = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
+170	        except Exception:
+171	            input_str = repr(tool_input)
+172	        return self._hash(f"{tool_name}\x00{input_str}")
+173	
+174	    @staticmethod
+175	    def _tail_cycle_count(fps: list[str], period: int) -> int:
+176	        """Identical consecutive blocks of length *period* at the tail."""
+177	        n = len(fps)
+178	        if n < period * 2:
+179	            return 1
+180	        block = fps[-period:]
+181	        if any(f == "" for f in block):
+182	            return 1
+183	        count = 1
+184	        idx = n - period
+185	        while idx - period >= 0 and fps[idx - period : idx] == block:
+186	            count += 1
+187	            idx -= period
+188	        return count
+189	
+190	    def _best_cycle(self, fps: list[str]) -> tuple[int, int]:
+191	        best_cycles, best_period = 1, 1
+192	        for period in range(1, self.max_period + 1):
+193	            if len(fps) < period * 2:
+194	                break
+195	            c = self._tail_cycle_count(fps, period)
+196	            if c > best_cycles:
+197	                best_cycles, best_period = c, period
+198	        return best_cycles, best_period
+199	
+200	    def _reset(self) -> None:
+201	        self._fps.clear()
+202	        self._call_fps.clear()
+203	        self._pending.clear()
+204	        self._blocked_ids.clear()
+205	        self._prev_message_count = 0
+206	        self._total_blocks = 0
+207	
+208	    # ------------------------------------------------------------------
+209	    # Hooks
+210	    # ------------------------------------------------------------------
+211	
+212	    async def on_task_start(self, event: TaskStartEvent):
+213	        self._reset()
+214	        self._current_run_id = event.run_id
+215	        yield event
+216	
+217	    async def on_step_start(self, event: StepStartEvent):
+218	        if event.run_id != self._current_run_id:
+219	            self._reset()
+220	            self._current_run_id = event.run_id
+221	        current = len(event.messages)
+222	        if (
+223	            self._prev_message_count > 0
+224	            and self._prev_message_count - current >= self.compaction_drop_threshold
+225	        ):
+226	            self._fps.clear()
+227	            self._call_fps.clear()
+228	        self._prev_message_count = current
+229	        yield event
+230	
+231	    async def on_before_tool(self, event: ToolCallEvent):
+232	        # Only intervene when a full-triple cycle is already established AND the
+233	        # incoming call is the same call that repeats inside that cycle.
+234	        call_fp = self._call_fp(event.tool_name, event.tool_input)
+235	        self._pending[event.tool_call_id] = f"{event.tool_name}\x00{call_fp}"
+236	
+237	        best_cycles, best_period = self._best_cycle(list(self._fps))
+238	        if best_cycles >= self.break_cycles and len(self._call_fps) >= best_period:
+239	            # The repeating call-block is the tail `best_period` call fps.
+240	            recent_block = list(self._call_fps)[-best_period:]
+241	            if call_fp in recent_block:
+242	                self._total_blocks += 1
+243	                if self._total_blocks > self.max_total_blocks:
+244	                    raise LoopDetectedError(
+245	                        f"Cyclic loop unbroken: a {best_period}-step identical "
+246	                        f"tool cycle kept re-forming and was blocked "
+247	                        f"{self.max_total_blocks} times without the agent making "
+248	                        f"progress"
+249	                    )
+250	                # Block the call, inject a redirect, keep the run alive.
+251	                # Do NOT record this call in the windows (it never executed);
+252	                # the pending entry is dropped and the id is tagged blocked so
+253	                # on_after_tool can tell a block apart from real progress.
+254	                self._pending.pop(event.tool_call_id, None)
+255	                self._blocked_ids.add(event.tool_call_id)
+256	                yield dataclasses.replace(
+257	                    event,
+258	                    approved=False,
+259	                    synthetic_result=_BREAK_TEMPLATE.format(runs=best_cycles),
+260	                )
+261	                return
+262	
+263	        yield event
+264	
+265	    async def on_after_tool(self, event: ToolResultEvent):
+266	        entry = self._pending.pop(event.tool_call_id, None)
+267	        if entry is None:
+268	            # A call we blocked: it never executed. Record a break so it can't
+269	            # join a cycle. The run-wide _total_blocks counter is intentionally
+270	            # NOT reset here — it is the safety-net budget.
+271	            if event.tool_call_id in self._blocked_ids:
+272	                self._blocked_ids.discard(event.tool_call_id)
+273	                self._fps.append("")
+274	                self._call_fps.append("")
+275	                yield event
+276	                return
+277	            # An unmatched result (no before_tool seen). Genuine progress:
+278	            # break any cycle.
+279	            self._fps.append("")
+280	            self._call_fps.append("")
+281	            yield event
+282	            return
+283	
+284	        tool_name, call_fp = entry.split("\x00", 1)
+285	        result_part = event.result or ""
+286	        if event.error:
+287	            result_part += f"\x01ERR\x01{event.error}"
+288	        full_fp = self._hash(f"{call_fp}\x00{result_part}")
+289	        self._fps.append(full_fp)
+290	        self._call_fps.append(call_fp)
+291	
+292	        best_cycles, best_period = self._best_cycle(list(self._fps))
+293	        if best_cycles >= self.warn_cycles:
+294	            warning = _WARN_TEMPLATE.format(period=best_period, cycles=best_cycles)
+295	            yield dataclasses.replace(event, result=(event.result or "") + warning)
+296	            return
+297	
+298	        yield event
+299	
+300	    async def on_task_end(self, event: TaskEndEvent):
+301	        self._reset()
+302	        yield event

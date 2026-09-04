@@ -1,0 +1,50 @@
+12:    here — they are injected by the agent at run time via ``cfg.copy(...)``.
+14:All processor classes are kept in this module so that YAML round-trip
+21:import dataclasses
+40:from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+48:from harnessx.processors.control.tool_call_correction import ToolCallCorrectionLayer
+60:def _extract_written_files(cmd: str) -> list[str]:
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+109:    _singleton_group = "tb2_self_verify"
+112:    def __init__(self) -> None:
+116:    async def on_task_start(self, event: TaskStartEvent):
+121:    async def on_before_model(self, event: BeforeModelEvent):
+128:        yield dataclasses.replace(
+133:    async def on_after_model(self, event: ModelResponseEvent):
+134:        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+143:            yield dataclasses.replace(event, tool_calls=(keepalive,))
+147:    async def on_before_tool(self, event: ToolCallEvent):
+149:            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+153:    async def on_task_end(self, event: TaskEndEvent):
+159:class CustomEditToolProcessor(MultiHookProcessor):
+160:    """Detect repeated Bash-based file edits and nudge the model to try a different approach.
+162:    TB2 only exposes Bash, so write operations are detected via command patterns
+168:    _singleton_group = "bash_edit_detector"
+171:    def __init__(self, threshold: int = 7) -> None:
+176:    async def on_task_start(self, event: TaskStartEvent):
+181:    async def on_before_tool(self, event: ToolCallEvent):
+182:        if event.tool_name == "Bash":
+185:                self._pending[event.tool_call_id] = paths
+188:    async def on_after_tool(self, event: ToolResultEvent):
+189:        paths = self._pending.pop(event.tool_call_id, [])
+190:        injections: list[str] = []
+195:                injections.append(_EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold))
+197:        if injections:
+198:            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+202:    async def on_task_end(self, event: TaskEndEvent):
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+227:    _singleton_group = "task_time_reminder"
+230:    def __init__(
+240:    async def on_task_start(self, event: TaskStartEvent):
+245:    async def on_step_start(self, event: StepStartEvent):
+266:            yield dataclasses.replace(
+274:    async def on_task_end(self, event: TaskEndEvent):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+285:    """After context compaction, re-inject a fresh workspace snapshot from the
+293:    _singleton_group = "tb2_post_compaction_refresh"
+296:    def __init__(self, drop_threshold: int = 5) -> None:
+300:    async def on_task_start(self, event: TaskStartEvent):
+304:    async def on_step_start(self, event: StepStartEvent):
+341:        yield dataclasses.replace(
+347:    async def on_task_end(self, event: TaskEndEvent):
+400:class _StaticSystemPromptBuilder(BaseSystemPromptBuilder):

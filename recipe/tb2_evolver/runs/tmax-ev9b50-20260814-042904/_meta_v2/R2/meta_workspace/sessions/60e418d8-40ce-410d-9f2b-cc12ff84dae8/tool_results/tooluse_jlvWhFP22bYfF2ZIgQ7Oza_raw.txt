@@ -1,0 +1,74 @@
+1	# Evolution Journal — tmax-ev9b50 (Terminal-Bench 2)
+2	
+3	## Round 1 — add loop-detection guard
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-14T05:10:00Z
+8	hypothesis_id: h_loop_detection_v1
+9	levers: [configuration, control]
+10	predicted_affected: [task_000010, task_001031, task_000958]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=29/50; +3/-4 gained=task_000965_069bb95f,task_001264_9f4ca84a,task_001818_b251e5ea lost=task_000536_9c16e8ef,task_000578_cebe85a5,task_000684_1a33ef37,task_000748_c9807703; score 0.5800 >= incumbent(mean) 0.6000 - tol 0.0400
+14	expected_global_gain: "Flips the exact-consecutive-repeat runaway cluster (3 reward=0 tasks) by aborting stuck loops early enough to leave step/time budget for recovery; cheaper failed runs on any future runaway."
+15	regression_risk: "A legitimate task that issues 6 identical tool calls in a row would abort early. Max exact-consec among the 30 passing baseline tasks is 2, so headroom is 3x; risk is low. Strategy-2 (name-only) warnings disabled (name_warn_threshold=999) to avoid false-positive nagging on legitimate exploration."
+16	cost_shift: "Net negative expected: runaway tasks currently burn 30-66 steps / hundreds of seconds looping; early abort at 6 consec cuts those tails. No added cost on passing tasks (guard is dormant below threshold)."
+17	rollback_trigger: "If any baseline-passing task regresses to exit_reason=loop_detected, or pass_rate drops, revert the processor."
+18	-->
+19	
+20	### Why
+21	
+22	Baseline: 30/50 pass (0.6). Among the 20 failures, one cluster is
+23	cleanly harness-addressable: three reward=0 tasks fall into runaway
+24	exact-repeat loops, emitting the *identical* tool call dozens of times
+25	until they exhaust step/time budget with no progress. This is a harness
+26	deficiency (no interrupt on a non-recoverable repeat state), not a model
+27	capability gap. The other failure buckets — 8 `chat ... timed out`
+28	agent_errors (model-server slowness, outside the HarnessConfig surface),
+29	and diverse sysadmin/reward=0 capability gaps — are not clusterable into
+30	one harness fix and are logged below as skips.
+31	
+32	### Changes
+33	
+34	- `config.yaml` — register `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+35	  on `_hook_: '*'` with `window_size=12, warn_threshold=3, threshold=6,
+36	  name_warn_threshold=999, compaction_drop_threshold=5`. Strategy 1
+37	  (exact name+input) warns at 3 consecutive repeats and raises
+38	  `LoopDetectedError` at 6; Strategy 2 (name-only) warnings disabled.
+39	  `LoopDetectedError` maps to `exit_reason=loop_detected` (not `error`),
+40	  so it does not trip the post-flight replay gate.
+41	
+42	### Evidence
+43	
+44	- `task_000010`: 48 exact-consecutive identical tool calls, reward=0.
+45	- `task_001031`: 41 rewrites of analyze.py (35 exact-consecutive),
+46	  66 steps / 548s, reward=0.
+47	- `task_000958`: 31 exact-consecutive identical calls, reward=0.
+48	- Contrast: max exact-consecutive-repeat among all 30 *passing* tasks
+49	  is 2 → threshold=6 leaves a 3x safety margin.
+50	- `task_001818` (separate thrash, timed out): rewrote main.rs 12x,
+51	  rebuilt 11x over 54 calls — different-args thrash, not exact-repeat;
+52	  Strategy 1 will not catch it (correctly, since it is not the target
+53	  cluster) and Strategy-2 is disabled to avoid false positives.
+54	
+55	### Skips (model-capability / out-of-surface — no harness fix)
+56	
+57	- 8 tasks `chat failed at step N: timed out`: single model API
+58	  generation call times out (fires even at step 7 / ~8.7K chars, far
+59	  below compaction threshold). Root cause is model-server slowness;
+60	  retry/timeout lives in the provider/model-client layer, not the
+61	  evolvable HarnessConfig surface. No harness fix — skip.
+62	- Sysadmin cluster (0/5) and remaining reward=0 `ok` exits: diverse
+63	  genuine capability gaps (missing flock, unresolved deadlock, wrong
+64	  process persistence/naming, incomplete at max_steps). Not one class
+65	  — no single harness fix — skip.
+66	
+67	### Uncertainty
+68	
+69	The bet is that aborting the loop early frees enough budget for the
+70	model to recover on those 3 tasks; it is possible the underlying
+71	capability gap means they still fail (just cheaper/faster). Even then,
+72	the change is net-positive on cost and carries near-zero regression
+73	risk (3x threshold margin, Strategy-2 disabled). If any passing task
+74	regresses to `loop_detected`, revert.

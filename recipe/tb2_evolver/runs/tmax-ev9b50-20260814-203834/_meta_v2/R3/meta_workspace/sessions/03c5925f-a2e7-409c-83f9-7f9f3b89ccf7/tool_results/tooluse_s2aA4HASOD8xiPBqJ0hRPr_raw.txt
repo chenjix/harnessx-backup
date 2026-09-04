@@ -1,0 +1,159 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""LengthTruncationRecoveryProcessor.
+4	
+5	Closes a systemic failure mode observed on small-model TB2 runs: the model
+6	enters a *degenerate repetition loop* — it keeps emitting the same narration
+7	paragraph over and over inside the assistant ``content`` field with no tool
+8	call, until the response hits the provider ``max_tokens`` limit
+9	(``finish_reason == "length"``). The run loop then appends a passive
+10	"Your previous response was cut off by the token limit. Please continue from
+11	where you left off." nudge, which merely re-primes the same runaway
+12	generation. The cycle repeats, burning steps and eventually crashing the task
+13	with ``exit_reason=error``.
+14	
+15	This processor intercepts that mechanism with two mechanical hooks:
+16	
+17	* ``on_after_model`` — when a response finishes with ``finish_reason=length``
+18	  and carries no tool call, the (potentially hundreds-of-KB) runaway ``content``
+19	  is collapsed to a short head+tail excerpt so it does not pollute the next
+20	  turn's context and re-seed the loop. A per-task counter of *consecutive*
+21	  length-truncations is maintained, and a pending corrective nudge is armed.
+22	
+23	* ``on_before_model`` — if a corrective nudge is armed, exactly one ``user``
+24	  message is appended that redirects the model away from open-ended narration
+25	  and toward a single concrete Bash action (escalating on repeats). This
+26	  replaces the passive "continue" behaviour with an actionable instruction that
+27	  breaks the loop.
+28	
+29	Any response that ends normally (a tool call, or a non-``length`` finish)
+30	resets the counter, so a one-off long turn is tolerated without penalty.
+31	
+32	The processor is benchmark-agnostic in mechanism: it keys purely on
+33	``finish_reason`` / ``tool_calls`` / ``content`` length, never on task content.
+34	"""
+35	
+36	from __future__ import annotations
+37	
+38	import dataclasses
+39	
+40	from harnessx.core.events import (
+41	    BeforeModelEvent,
+42	    Message,
+43	    ModelResponseEvent,
+44	    TaskEndEvent,
+45	    TaskStartEvent,
+46	)
+47	from harnessx.core.processor import MultiHookProcessor
+48	
+49	
+50	_HEAD_CHARS = 1200
+51	_TAIL_CHARS = 600
+52	_TRUNC_MARKER = (
+53	    "\n\n[response truncated by harness: the model hit the output token limit "
+54	    "without issuing a tool call; the omitted middle was discarded to prevent a "
+55	    "repetition loop]\n\n"
+56	)
+57	
+58	# First occurrence: gentle redirect toward a concrete action.
+59	_NUDGE_FIRST = (
+60	    "Your last turn ran into the output token limit without running any command. "
+61	    "Do NOT re-explain or continue the previous narration. In your next turn write "
+62	    "at most two sentences of reasoning, then issue exactly ONE concrete Bash "
+63	    "command that makes progress (inspect a file, run a script, or write output). "
+64	    "Keep the response short."
+65	)
+66	
+67	# Repeated occurrence: the model is stuck in a loop — force a decisive action.
+68	_NUDGE_REPEAT = (
+69	    "STOP. You have now hit the output token limit multiple turns in a row, which "
+70	    "means you are repeating yourself instead of acting. Abandon the current line "
+71	    "of narration entirely. Do not write any prose analysis. Respond with a SINGLE "
+72	    "short Bash tool call that either (a) writes the required output file(s) to the "
+73	    "path named in the task, or (b) runs a quick command to check the current state "
+74	    "so you can decide the next concrete step. One command only."
+75	)
+76	
+77	
+78	class LengthTruncationRecoveryProcessor(MultiHookProcessor):
+79	    """Break the max_tokens repetition loop and redirect the model to act.
+80	
+81	    Parameters
+82	    ----------
+83	    repeat_threshold:
+84	        Number of *consecutive* length-truncations at (or above) which the
+85	        escalated nudge is used instead of the gentle one. Default 2 (i.e. the
+86	        first truncation gets the gentle nudge, the second and beyond get the
+87	        forceful one).
+88	    head_chars / tail_chars:
+89	        How much of the runaway content to keep at the start / end when
+90	        collapsing an over-length response.
+91	    """
+92	
+93	    _singleton_group = "tb2_length_recovery"
+94	    # Run early in the after-model chain so downstream processors (e.g. the
+95	    # self-verify keepalive) see the already-collapsed content.
+96	    _order = 5
+97	
+98	    def __init__(
+99	        self,
+100	        repeat_threshold: int = 2,
+101	        head_chars: int = _HEAD_CHARS,
+102	        tail_chars: int = _TAIL_CHARS,
+103	    ) -> None:
+104	        self.repeat_threshold = max(1, int(repeat_threshold))
+105	        self.head_chars = max(0, int(head_chars))
+106	        self.tail_chars = max(0, int(tail_chars))
+107	        self._consecutive: int = 0
+108	        self._pending_nudge: str = ""
+109	
+110	    async def on_task_start(self, event: TaskStartEvent):
+111	        self._consecutive = 0
+112	        self._pending_nudge = ""
+113	        yield event
+114	
+115	    async def on_after_model(self, event: ModelResponseEvent):
+116	        length_truncated = (
+117	            event.finish_reason == "length" and not event.tool_calls
+118	        )
+119	        if not length_truncated:
+120	            # Any normal / tool-calling turn clears the streak.
+121	            self._consecutive = 0
+122	            self._pending_nudge = ""
+123	            yield event
+124	            return
+125	
+126	        self._consecutive += 1
+127	        self._pending_nudge = (
+128	            _NUDGE_REPEAT
+129	            if self._consecutive >= self.repeat_threshold
+130	            else _NUDGE_FIRST
+131	        )
+132	
+133	        content = event.content or ""
+134	        if len(content) > (self.head_chars + self.tail_chars + len(_TRUNC_MARKER)):
+135	            collapsed = (
+136	                content[: self.head_chars]
+137	                + _TRUNC_MARKER
+138	                + (content[-self.tail_chars :] if self.tail_chars else "")
+139	            )
+140	            yield dataclasses.replace(event, content=collapsed)
+141	        else:
+142	            yield event
+143	
+144	    async def on_before_model(self, event: BeforeModelEvent):
+145	        if not self._pending_nudge:
+146	            yield event
+147	            return
+148	        nudge = self._pending_nudge
+149	        self._pending_nudge = ""
+150	        # Append exactly one user message (contract-safe: +1 insertion).
+151	        yield dataclasses.replace(
+152	            event,
+153	            messages=event.messages + (Message(role="user", content=nudge),),
+154	        )
+155	
+156	    async def on_task_end(self, event: TaskEndEvent):
+157	        self._consecutive = 0
+158	        self._pending_nudge = ""
+159	        yield event

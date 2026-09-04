@@ -1,0 +1,21 @@
+--- R3
++++ R4
+@@ -89,2 +89,18 @@
+   _hook_: '*'
++# Ensure the standard networking CLI tools the external verifier shells out to
++# are installed in the container. Same structural gap as the `requests` pip
++# primer above, one layer down: several TB2 verifier tests do
++# `subprocess.run(["curl", ...])` / `subprocess.run(["ss", ...])` in the
++# post-agent phase and die with `FileNotFoundError: 'curl'` / `'ss'` before
++# they can assert on otherwise-correct work → automatic 0. The agent hits
++# `curl: command not found` during its own phase and simply works around it
++# (wget / python stdlib), so it never installs the CLI client itself.
++# This processor injects ONE quiet, idempotent, time-boxed apt install on the
++# first model turn: a `command -v` guard makes it a no-op when the tools are
++# already present, `timeout 90` bounds a blocked package index, and `|| true`
++# means it can never fail the turn. Touches only system dirs, never a task
++# output path. Fires once per task.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i3/_meta_v2/R4/processors/verifier_cli_primer.py::VerifierCliPrimerProcessor
++  apt_packages: curl iproute2
++  _hook_: '*'
+ - _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor

@@ -1,0 +1,35 @@
+=== 000028 full task description ===
+You are an infrastructure engineer automating the provisioning of a video analysis microservice. We have a partially complete setup that is currently failing. An Nginx reverse proxy is configured to expose the service, but it is returning a 502 Bad Gateway because it is pointing to the wrong upstream UNIX socket path.
+
+Your objectives:
+1. **Fix Nginx Routing**: Inspect and fix the Nginx configuration at `/app/nginx.conf`. It currently routes requests to an incorrect UNIX socket. Update it to point to `/tmp/video_backend.sock`.
+2. **Fix and Update C++ Backend**: 
+   - We have a basic C++ HTTP socket server at `/app/server.cpp`. It is currently configured to listen on the wrong socket. Update it to listen on `/tmp/video_backend.sock`.
+   - Update the C++ code to analyze the video file located at `/app/video.mp4`. The server must dynamically calculate the exact total number of video frames in this file (you may use `ffprobe`, which is preinstalled, by shelling out from C++).
+   - The server must respond to any HTTP GET request with `HTTP/1.1 200 OK` and the body containing ONLY the integer frame count of the video.
+3. **Compile and Run**: Compile the C++ server into an executable at `/app/server`. Run it in the background. Its standard output and standard error must be appended to `/app/server.log`.
+4. **Log Configuration**: Create a logrotate configuration file at `/app/logrotate.conf` to manage `/app/server.log`. It should be configured to rotate daily, keep exactly 3 backups, and compress old logs.
+5. **Start Services**: Start Nginx using your fixed `/app/nginx.conf`. Nginx is configured to listen on `127.0.0.1:8080`.
+
+Ensure the final setup is robust. An automated verifier will make HTTP requests to `http://127.0.0.1:8080/` to check your Nginx proxy and C++ server inte
+
+=== 000958 task description ===
+You are a Database Reliability Engineer managing a complex backup infrastructure. The metadata for all backups (Full and Incremental) across hundreds of databases is stored in a SQLite database located at `/home/user/backup_catalog.db`. 
+
+Your task is to implement a C++ HTTP microservice that answers specific analytical queries about the backup state. You must also optimize the database schema to ensure these queries perform efficiently.
+
+The SQLite database has the following table:
+`CREATE TABLE backups (id INTEGER PRIMARY KEY, db_name TEXT, backup_type TEXT, parent_id INTEGER, size_bytes INTEGER, status TEXT, created_at DATETIME);`
+`backup_type` is either 'FULL' or 'INC'. If it's 'INC', `parent_id` points to the immediately preceding backup in the chain (which could be an 'INC' or 'FULL' backup). If 'FULL', `parent_id` is NULL.
+
+Write a C++ HTTP server listening exactly on `127.0.0.1:9090`. You may download and use the header-only `cpp-httplib` library for the HTTP server, and link against `sqlite3`. 
+
+Your service must implement the following REST endpoints. All endpoints must require an `Authorization` header containing exactly `Bearer dbre-token-xyz123`. Return HTTP 401 Unauthorized if missing or incorrect.
+
+1. **`GET /chain?id=<id>`**
+   * **Goal:** Trace the lineage of an incremental backup back to its root Full backup.
+   * **Implementation:** Use a Recursive CTE to traverse the `parent_id` relationships upwards until `parent_id` is NULL.
+   * **Output Format:** A JSON array of backup IDs representing the chain, starting with the requested `<id>` and ending with the root FULL backup ID. Example: `[45, 42, 40]`. Return 404 if the ID doesn't exist.
+
+2. **`GET /largest_increments`**
+   * **Goal:** For every FULL backup, find the single largest INC backup within its

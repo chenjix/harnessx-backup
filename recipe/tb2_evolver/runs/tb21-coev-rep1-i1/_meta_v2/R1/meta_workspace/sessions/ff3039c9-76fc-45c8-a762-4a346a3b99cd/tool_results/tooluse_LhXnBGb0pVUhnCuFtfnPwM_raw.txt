@@ -1,0 +1,102 @@
+513	    """Recommended base class for implementing harness processors.
+514	
+515	    **Why subclass this instead of implementing ``Processor`` directly?**
+516	
+517	    - Override only the ``on_*`` methods you need; all others are no-ops.
+518	    - Use ``@on(EventClass)`` to name handler methods freely (see module docs).
+519	    - ``HarnessBuilder.add()`` auto-registers subclasses under ``"*"`` with no
+520	      extra configuration — just set ``_singleton_group`` and ``_order``.
+521	
+522	    Internally, ``process()`` dispatches to the right ``on_*`` method via
+523	    ``_DISPATCH`` (a ``{EventType: method_name}`` table built at class creation).
+524	    Subclasses that use ``@on()`` have their entries merged into ``_DISPATCH``
+525	    automatically by ``__init_subclass__``.
+526	
+527	    Example — two hooks, one class::
+528	
+529	        class AuditProcessor(MultiHookProcessor):
+530	            _singleton_group = "audit"
+531	            _order = 50
+532	
+533	            def __init__(self):
+534	                self._log: list[dict] = []
+535	
+536	            async def on_step_end(self, event: StepEndEvent):
+537	                self._log.append({"step": event.step_id, "cost": event.cumulative_cost_usd})
+538	                yield event
+539	
+540	            async def on_task_end(self, event: TaskEndEvent):
+541	                print(f"Audit: {len(self._log)} steps, "
+542	                      f"${event.total_cost_usd:.4f} total")
+543	                yield event
+544	
+545	    Example — free method name via ``@on``::
+546	
+547	        class CostGuard(MultiHookProcessor):
+548	            _singleton_group = "cost_guard"
+549	            _order = 10
+550	
+551	            @on(BeforeModelEvent)
+552	            async def check(self, event: BeforeModelEvent):
+553	                if event.cumulative_cost_usd >= self.limit:
+554	                    raise BudgetExceededError()
+555	                yield event
+556	    """
+557	
+558	    # Dispatch table: event type → method name.
+559	    # Subclasses that use @on() have their entries merged in by __init_subclass__.
+560	    _DISPATCH: dict[type, str] = {
+561	        TaskStartEvent: "on_task_start",
+562	        StepStartEvent: "on_step_start",
+563	        BeforeModelEvent: "on_before_model",
+564	        ModelResponseEvent: "on_after_model",
+565	        ToolCallEvent: "on_before_tool",
+566	        ToolResultEvent: "on_after_tool",
+567	        StepEndEvent: "on_step_end",
+568	        TaskEndEvent: "on_task_end",
+569	    }
+570	
+571	    def __init_subclass__(cls, **kwargs: Any) -> None:
+572	        """Merge @on() decorated methods into this subclass's _DISPATCH table.
+573	
+574	        Also validates that any method named ``on_*`` is either a recognised
+575	        hook name or decorated with ``@on(EventClass)``.  This catches typos
+576	        like ``on_tool_call`` (should be ``on_before_tool``) at import time
+577	        rather than silently never being called.
+578	        """
+579	        super().__init_subclass__(**kwargs)
+580	        dispatch: dict[type, str] = dict(cls._DISPATCH)  # inherit parent entries
+581	
+582	        # First pass: register @on()-decorated methods (they may use any name).
+583	        for name in vars(cls):
+584	            method = vars(cls)[name]  # use vars() to avoid MRO lookup
+585	            if callable(method) and hasattr(method, "_on_event_type"):
+586	                dispatch[method._on_event_type] = name
+587	
+588	        # Second pass: flag on_* methods that aren't valid hooks and aren't @on()-decorated.
+589	        valid_hook_names = set(dispatch.values())
+590	        for name in vars(cls):
+591	            method = vars(cls)[name]
+592	            if (
+593	                callable(method)
+594	                and name.startswith("on_")
+595	                and name not in valid_hook_names
+596	                and not hasattr(method, "_on_event_type")
+597	            ):
+598	                raise TypeError(
+599	                    f"{cls.__qualname__}.{name}: unrecognised hook method name. "
+600	                    f"Valid on_* names: {sorted(valid_hook_names)}. "
+601	                    f"Use @on(EventClass) to handle a custom event type under a free name."
+602	                )
+603	
+604	        cls._DISPATCH = dispatch
+605	
+606	    # Ordering hints — set on subclasses, read by HarnessBuilder.
+607	    # _order:  use PRE / NORMAL / POST constants (or fine-grained int offsets).
+608	    # _after:  list of _singleton_group names that must run before this processor
+609	    #          within the same hook.  Soft: unregistered groups are silently ignored.
+610	    _after: list[str] = []
+611	
+612	    # Sub-harness registry: populated at Harness.__init__() time via _bind_sub_harnesses().
+
+[Showing lines 513–612 of 844 total. Use offset=612 to read the next section.]

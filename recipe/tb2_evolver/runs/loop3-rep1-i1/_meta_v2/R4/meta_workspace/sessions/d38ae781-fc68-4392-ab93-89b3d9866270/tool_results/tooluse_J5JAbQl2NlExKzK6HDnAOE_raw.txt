@@ -1,0 +1,199 @@
+1	# Routed evidence for this round
+2	
+3	Every failure in this round was attributed to a responsible side before you were shown it. **Only the defects listed under "Editable defects" are yours to fix.** The rest are listed as counts so you know what the score contains, but editing the harness cannot address them — do not write prompt text aimed at them.
+4	
+5	- trajectories: **28**  (7 failed, 21 passed)
+6	- attributed to the harness/tool layer (yours): **0**
+7	- attributed to the model (goes to SFT, not to you): **6**
+8	- environment / benchmark / unattributable (nobody's to fix here): **1**
+9	
+10	## Editable defects
+11	
+12	Grouped across trajectories: `count` is how many trials exhibited the same defect, so a count of 20 is one bug, not twenty.
+13	
+14	### 1. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && .<path> <n>>&<n>; echo "Exit code: $?"`  (count=1, tasks=1)
+15	- interaction edge: `Model-Tool`
+16	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+17	- affected tasks: custom-memory-heap-crash
+18	- evidence:
+19	  - `custom-memory-heap-crash` step 8: action `cd /app && ./debug 2>&1; echo "Exit code: $?"`
+20	    observation: `=== Monte Carlo π Estimation Application ===  === Running Monte Carlo Simulation ===  Estimating π using Monte Carlo method... Samples: 1000000 Estimated π: 3.142428 Actual π: 3.141593 Error: 0.000835 Accuracy: 99.97%  =`
+21	    trial: `custom-memory-heap-crash__PHweANb`
+22	
+23	### 2. [CONTESTED] `visible_error_no_effective_recovery` — on ` head -<n>; which g++ <n>>&<n>; which clang <`  (count=1, tasks=1)
+24	- interaction edge: `Model-Tool`
+25	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+26	- affected tasks: largest-eigenval
+27	- evidence:
+28	  - `largest-eigenval` step 3: action `which cc && cc --version 2>&1 | head -3; which g++ 2>&1; which clang 2>&1; ls /usr/bin/gcc* /usr/bin/cc* /usr/bin/c++* 2>&1`
+29	    observation: `ls: cannot access '/usr/bin/gcc*': No such file or directory ls: cannot access '/usr/bin/cc*': No such file or directory ls: cannot access '/usr/bin/c++*': No such file or directory  (exit 2)`
+30	    trial: `largest-eigenval__M7nag3K`
+31	
+32	### 3. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && python3 benchmark.py <n>>&<n>`  (count=1, tasks=1)  ⟳ SEEN IN 1 EARLIER ROUND(S)
+33	- interaction edge: `Model-Tool`
+34	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+35	- affected tasks: portfolio-optimization
+36	- evidence:
+37	  - `portfolio-optimization` step 8: action `cd /app && python3 benchmark.py 2>&1`
+38	    observation: `Portfolio Optimization Benchmark ========================================  Testing portfolio size: 5000 assets ------------------------------ Python baseline time: 1524.3 ms Risk - Python: 0.022532625110, C: 0.0225326251`
+39	    trial: `portfolio-optimization__ECDALCR`
+40	
+41	### 4. [CONTESTED] `visible_error_no_effective_recovery` — on `python3 -c " import torch state_dict = torch.load('<path> ma`  (count=1, tasks=1)  ⟳ SEEN IN 1 EARLIER ROUND(S)
+42	- interaction edge: `Model-Tool`
+43	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+44	- affected tasks: pytorch-model-cli
+45	- evidence:
+46	  - `pytorch-model-cli` step 1: action `python3 -c "
+47	import torch
+48	state_dict = torch.load('/app/model.pth', map_location='cpu')
+49	for k, v in state_dict.items():
+50	    print(f'{k}: shape={v.shape}, dtype=`
+51	    observation: `Traceback (most recent call last):   File "<string>", line 2, in <module>     import torch ModuleNotFoundError: No module named 'torch'  (exit 1)`
+52	    trial: `pytorch-model-cli__M3Zz7SK`
+53	
+54	### 5. [CONTESTED] `visible_error_no_effective_recovery` — on `sqlite3 -header -csv <path> < <path> > <path> <n>>&<n> echo `  (count=1, tasks=1)
+55	- interaction edge: `Model-Tool`
+56	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+57	- affected tasks: query-optimize
+58	- evidence:
+59	  - `query-optimize` step 5: action `sqlite3 -header -csv /app/oewn.sqlite < /app/my-sql-query.sql > /tmp/original_output.csv 2>&1
+60	echo "Exit code: $?"
+61	wc -l /tmp/original_output.csv
+62	head -5 /tmp/o`
+63	    observation: `Error: Command timed out after 120 seconds`
+64	    trial: `query-optimize__i2uKqrZ`
+65	
+66	## Not actionable by a harness edit
+67	
+68	- `missing_dependency_or_broken_env`: 1
+69	
+70	These are excluded from the editable list on purpose. If the score looks low, some of it is these — that is not a signal about your config.
+71	
+72	## Affordance gaps (harness-actionable, derived by contrast)
+73	
+74	Each entry pairs an error **our** model failed to recover from with recoveries a stronger model achieved on the **same error class** (mined from the Tmax success corpus — a different model on a different harness). The Tmax half is **not evidence of a defect here**; it is a demonstration that a recovery exists. Your question for each: *given the current config, is that recovery reachable?* Concretely — is the error surfaced in full rather than truncated, does any tool description or prompt line make the probe an obvious next move, is there a step budget left to attempt it?
+75	
+76	### A1. `package_install_failed` — our model failed to recover 2x
+77	- our failure modes: `visible_error_no_effective_recovery`x2
+78	- affected tasks: custom-memory-heap-crash, portfolio-optimization
+79	- what our model did:
+80	  - `custom-memory-heap-crash`: ran `cd /app && ./debug 2>&1; echo "Exit code: $?"`
+81	    got: `=== Monte Carlo π Estimation Application ===  === Running Monte Carlo Simulation ===  Estimating π using Monte Carlo method... Samples: 1000000 Estimated π: 3.142428 Actual π: 3.141593 Error: 0.000835 Accuracy: 99.97%  === Computation compl`
+82	  - `portfolio-optimization`: ran `cd /app && python3 benchmark.py 2>&1`
+83	    got: `Portfolio Optimization Benchmark ========================================  Testing portfolio size: 5000 assets ------------------------------ Python baseline time: 1524.3 ms Risk - Python: 0.022532625110, C: 0.022532625110, diff: 1.39e-17 R`
+84	- what a successful recovery looks like on this error class:
+85	  - after `cat /home/user/lu_solver.c` failed, recovered with **`cat /home/user/input_matrix.csv`** (7 turns to success)
+86	  - after `date && echo "---" && echo $TZ && echo "---" && python3 -c "
+87	import os, time
+88	print('os.environ TZ:', os.enviro` failed, recovered with **`sed -i 's/TZ=America\/New_York/TZ=UTC/' /home/user/app/config.env && cat /home/user/app/config.env`** (8 turns to success)
+89	  - after `timeout 5 /usr/bin/expect /home/user/start_daemon.exp; echo "Expect exit code: $?"` failed, recovered with **`rm -f /home/user/heartbeat.log /home/user/monitor.log && /home/user/monitor.sh &
+90	echo "Monitor PID: $!"
+91	sleep 3
+92	echo "--- After 3 seconds ---"
+93	echo "H`** (8 turns to success)
+94	
+95	### A2. `python_traceback` — our model failed to recover 1x
+96	- our failure modes: `ignored_visible_error_repeated_action`x1
+97	- affected tasks: cancel-async-tasks
+98	- what our model did:
+99	  - `cancel-async-tasks`: ran `cd /app && python3 -c "
+100	import asyncio
+101	from run import run_tasks
+102	
+103	# Test 1: Basic functionality with concurrency limit
+104	print('=== Test 1: Basic concurrency ===')
+105	results = []
+106	
+107	async def make_task(name`
+108	    got: `Traceback (most recent call last):   File "<string>", line 22, in <module>     asyncio.run(test_basic())     ~~~~~~~~~~~^^^^^^^^^^^^^^   File "/usr/local/lib/python3.13/asyncio/runners.py", line 195, in run     return runner.run(main)      `
+109	- what a successful recovery looks like on this error class:
+110	  - after `sed -i "s/print(f\"Sample rate: {sample_rate}, Samples: {len(audio_data_raw), dtype: {audio_data_raw.dtype}\")` failed, recovered with **`source /home/user/venv/bin/activate && python3 -c "import pocketsphinx; print(dir(pocketsphinx))" 2>&1`** (5 turns to success)
+111	  - after `python3 << 'PYEOF'
+112	import numpy as np
+113	from PIL import Image
+114	
+115	# Generate 60 frames of a 1D cross-section video
+116	` failed, recovered with **`python3 << 'PYEOF'
+117	import numpy as np
+118	from PIL import Image
+119	import subprocess
+120	import os
+121	
+122	# Generate 60 frames of a 1D cross-section video
+123	width = 200
+124	`** (7 turns to success)
+125	  - after `python3 << 'PYEOF'
+126	import numpy as np
+127	from PIL import Image
+128	
+129	# Generate 60 frames of a 1D cross-section video
+130	` failed, recovered with **`python3 << 'PYEOF'
+131	import numpy as np
+132	from PIL import Image
+133	
+134	# Generate 60 frames of a 1D cross-section video
+135	width = 200
+136	height = 100
+137	
+138	frames = []
+139	fo`** (8 turns to success)
+140	
+141	### A3. `no_such_file` — our model failed to recover 1x
+142	- our failure modes: `visible_error_no_effective_recovery`x1
+143	- affected tasks: largest-eigenval
+144	- what our model did:
+145	  - `largest-eigenval`: ran `which cc && cc --version 2>&1 | head -3; which g++ 2>&1; which clang 2>&1; ls /usr/bin/gcc* /usr/bin/cc* /usr/bin/c++* 2>&1`
+146	    got: `ls: cannot access '/usr/bin/gcc*': No such file or directory ls: cannot access '/usr/bin/cc*': No such file or directory ls: cannot access '/usr/bin/c++*': No such file or directory  (exit 2)`
+147	- what a successful recovery looks like on this error class:
+148	  - after `ls /usr/share/zoneinfo/ 2>&1 | head -20` failed, recovered with **`cat > /home/user/app/process_logs.py << 'EOF'
+149	import os
+150	from datetime import datetime, timezone
+151	
+152	def process():
+153	    with open('/home/user/app/events.t`** (7 turns to success)
+154	  - after `ls -la /usr/share/zoneinfo/America/New_York 2>&1 && echo "---" && TZ=America/New_York python3 -c "
+155	import time` failed, recovered with **`ls /usr/share/zoneinfo/ 2>&1 | head -20`** (8 turns to success)
+156	  - after `ls -la /app 2>&1; echo "---"; ls -la /home/user/ 2>&1` failed, recovered with **`mkdir -p /app`** (11 turns to success)
+157	
+158	### A4. `module_not_found` — our model failed to recover 1x
+159	- our failure modes: `visible_error_no_effective_recovery`x1
+160	- affected tasks: pytorch-model-cli
+161	- what our model did:
+162	  - `pytorch-model-cli`: ran `python3 -c "
+163	import torch
+164	state_dict = torch.load('/app/model.pth', map_location='cpu')
+165	for k, v in state_dict.items():
+166	    print(f'{k}: shape={v.shape}, dtype={v.dtype}')
+167	    print(v)
+168	"`
+169	    got: `Traceback (most recent call last):   File "<string>", line 2, in <module>     import torch ModuleNotFoundError: No module named 'torch'  (exit 1)`
+170	- what a successful recovery looks like on this error class:
+171	  - after `python3 -c "import matplotlib" 2>&1 || pip install matplotlib` failed, recovered with **`cd /home/user/workspace && python3 mcmc.py`** (5 turns to success)
+172	  - after `python3 << 'PYEOF'
+173	import numpy as np
+174	import cv2
+175	import os
+176	
+177	# Create a synthetic experiment video - 50 frames ` failed, recovered with **`pip install opencv-python-headless 2>&1 | tail -5`** (6 turns to success)
+178	  - after `ls -la /home/user/workspace/libcustom_math.so && python3 -c "import matplotlib; print('matplotlib available')"` failed, recovered with **`pip install matplotlib -q`** (6 turns to success)
+179	
+180	### A5. `timeout` — our model failed to recover 1x
+181	- our failure modes: `visible_error_no_effective_recovery`x1
+182	- affected tasks: query-optimize
+183	- what our model did:
+184	  - `query-optimize`: ran `sqlite3 -header -csv /app/oewn.sqlite < /app/my-sql-query.sql > /tmp/original_output.csv 2>&1
+185	echo "Exit code: $?"
+186	wc -l /tmp/original_output.csv
+187	head -5 /tmp/original_output.csv`
+188	    got: `Error: Command timed out after 120 seconds`
+189	- what a successful recovery looks like on this error class:
+190	  - after `find /home/user/archive_mount -type f && echo "---" && cat /home/user/archive_mount/system.jsonl && echo "---"` failed, recovered with **`cat /home/user/done.txt && echo "" && find /home/user/archive_mount -name "*.tmp" -type f`** (2 turns to success)
+191	  - after `echo "=== system.jsonl ===" && cat /home/user/archive_mount/system.jsonl && echo "=== app/db.jsonl ===" && cat` failed, recovered with **`echo "=== Original files still exist ===" && ls -la /home/user/live_logs/app/db.log /home/user/live_logs/system.log /home/user/live_logs/web_ui/fronte`** (3 turns to success)
+192	  - after `cat /home/user/live_logs/app/db.log` failed, recovered with **`cat /home/user/live_logs/system.log && echo "---" && cat /home/user/live_logs/web_ui/frontend.log`** (8 turns to success)
+193	
+194	## Model-side failures (routed to SFT, not to you)
+195	
+196	- `visible_error_no_effective_recovery`: 5
+197	- `ignored_visible_error_repeated_action`: 1
+198	
+199	The model saw the error and did not recover. A harness edit can sometimes help here (by making recovery easier to reach — see the affordance gaps above), but the primary fix is training data, which is already being collected.

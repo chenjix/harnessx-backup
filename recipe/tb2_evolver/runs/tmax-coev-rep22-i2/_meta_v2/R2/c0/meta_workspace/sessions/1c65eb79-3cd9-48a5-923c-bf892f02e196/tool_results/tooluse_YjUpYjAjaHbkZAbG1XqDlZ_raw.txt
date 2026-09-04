@@ -1,0 +1,58 @@
+145	## Round 2 (c2) — no-op: assigned task is a docker-infra flake
+146	
+147	<!-- journal:frontmatter
+148	round: 2
+149	timestamp: 2026-09-01T06:00:00Z
+150	hypothesis_id: h_noop_docker_name_conflict_v1
+151	levers: []
+152	predicted_affected: []
+153	gating_outcome: noop
+154	gating_attribution: noop
+155	expected_global_gain: "None from config — the failure is a pre-run-loop docker container-name conflict unreachable by any HarnessConfig artifact; net gain requires a fix in read-only recipe/tmax_eval/docker_env.py (see NEEDS_FROM_HUMAN.md)."
+156	regression_risk: "None — byte-identical config copy."
+157	cost_shift: "Zero."
+158	rollback_trigger: "N/A (no change)."
+159	-->
+160	
+161	### Why
+162	
+163	Assigned focus `task_000028_7fe033ac` did NOT fail inside the agent loop. Its
+164	`result.json`: `status=error`, `elapsed_s=0.1`, no `messages.json` — the
+165	container never started. Error:
+166	`docker run failed ... Conflict. The container name
+167	"/tmax-task0000287fe033ac-1788232928" is already in use`.
+168	
+169	This is systemic, not a one-off: 26 of 137 task result rows (~19%) errored with
+170	the identical container-name conflict, all `elapsed_s~=0.1`, all trajectory-less
+171	(includes R1 targets task_000010/task_001090 and R2 OCR targets
+172	task_000015/task_000505 — prior interventions could not even be evaluated this
+173	round). Root cause is in `recipe/tmax_eval/docker_env.py::start_container`:
+174	`name = f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"` collides on
+175	same-second retries / un-reaped stale containers, and there is no `docker rm -f`
+176	+ retry. `run_eval.run_one` calls `start_container()` BEFORE
+177	`harness_runner.run_harness_agent()`, so no processor/tool/system-prompt hook in
+178	the meta-agent's write scope fires before `docker run`. The failure is
+179	structurally unreachable by `HarnessConfig`.
+180	
+181	### Changes
+182	
+183	- `config.yaml` — byte-identical copy of R1 config (explicit no-op).
+184	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — root cause + three suggested fixes for
+185	  the read-only `docker_env.py` (rm+retry on Conflict / uuid suffix / reap
+186	  `tmax-*` at startup).
+187	
+188	### Evidence
+189	
+190	- `task_000028_7fe033ac` result.json: `status=error`, `elapsed_s=0.1`,
+191	  `error="... container name ... already in use ..."`; only `result.json`
+192	  present, no trajectory.
+193	- Sweep of all result rows: `status` counts `{ok:70, agent_error:4, error:26}`;
+194	  every one of the 26 `error` rows carries `docker run failed ... Conflict`.
+195	
+196	### Uncertainty
+197	
+198	If the docker_env fix lands upstream, these 26 tasks re-run with real
+199	trajectories and the true harness signal (R1/R2 targets) becomes visible again.
+200	Until then, any meta-agent focus assigned to one of these 26 task_ids is
+201	un-actionable from config — recommend the orchestrator re-run affected tasks
+202	before assigning them as evolve focuses.

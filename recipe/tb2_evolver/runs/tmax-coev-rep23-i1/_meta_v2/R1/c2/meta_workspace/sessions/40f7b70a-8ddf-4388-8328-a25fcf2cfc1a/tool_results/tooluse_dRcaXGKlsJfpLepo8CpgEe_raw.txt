@@ -1,0 +1,86 @@
+--- CMD ---
+{"command": "ls -la /app/", "timeout": 10000}
+--- CMD ---
+{"command": "cat /app/nginx.conf", "timeout": 10000}
+--- CMD ---
+{"command": "cat /app/server.cpp", "timeout": 10000}
+--- CMD ---
+{"command": "ffprobe -v error -show_entries format=nb_frames -of default=noprint_wrappers=1:nokey=1 /app/video.mp4", "timeout": 10000}
+--- CMD ---
+{"command": "ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of csv=p=0 /app/video.mp4", "timeout": 10000}
+--- CMD ---
+{"command": "cat > /app/nginx.conf << 'EOF'\nevents {}\nhttp {\n    server {\n        listen 127.0.0.1:8080;\n        location / {\n            proxy_pass http://unix:/tmp/video_backend.sock;\n        }\n    }\n}\nEOF", "timeout": 10000}
+--- CMD ---
+{"command": "cat > /app/server.cpp << 'EOF'\n#include <iostream>\n#include <sys/socket.h>\n#include <sys/un.h>\n#include <unistd.h>\n#include <string>\n#include <cstring>\n#include <cstdio>\n#include <cstdlib>\n\nint main() {\n    // Create a Unix domain socket server\n    int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);\n    struct sockaddr_un address;\n    address.sun_family = AF_UNIX;\n    strc
+--- CMD ---
+{"command": "g++ -o /app/server /app/server.cpp -o /app/server", "timeout": 10000}
+--- CMD ---
+{"command": "cat > /app/server.cpp << 'EOF'\n#include <iostream>\n#include <sys/socket.h>\n#include <sys/un.h>\n#include <unistd.h>\n#include <string>\n#include <cstring>\n#include <cstdio>\n#include <cstdlib>\n\nint main() {\n    // Create a Unix domain socket server\n    int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);\n    struct sockaddr_un address;\n    address.sun_family = AF_UNIX;\n    strc
+--- CMD ---
+{"command": "cat > /app/server.cpp << 'EOF'\n#include <iostream>\n#include <sys/socket.h>\n#include <sys/un.h>\n#include <unistd.h>\n#include <string>\n#include <cstring>\n#include <cstdio>\n#include <cstdlib>\n\nint main() {\n    // Create a Unix domain socket server\n    int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);\n    struct sockaddr_un address;\n    address.sun_family = AF_UNIX;\n    strc
+--- CMD ---
+{"command": "g++ -o /app/server /app/server.cpp", "timeout": 10000}
+--- CMD ---
+{"command": "/app/server >> /app/server.log 2>&1 &", "timeout": 10000}
+--- CMD ---
+{"command": "ps aux | grep server", "timeout": 10000}
+--- CMD ---
+{"command": "cat /app/server.log", "timeout": 10000}
+--- CMD ---
+{"command": "ls -la /tmp/video_backend.sock", "timeout": 10000}
+--- CMD ---
+{"command": "echo -e \"GET / HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n\" | socat - UNIX-CONNECT:/tmp/video_backend.sock 2>&1", "timeout": 10000}
+--- CMD ---
+{"command": "(echo -e \"GET / HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n\"; sleep 0.5) | nc -U /tmp/video_backend.sock 2>&1", "timeout": 10000}
+--- CMD ---
+{"command": "(printf \"GET / HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n\"; sleep 0.5) | cat /dev/null > /dev/null 2>&1 &\nPID=$!\nsleep 0.5\nkill $PID 2>/dev/null\necho \"Test completed\"", "timeout": 10000}
+--- CMD ---
+{"command": "cat > /tmp/test_client.c << 'EOF'\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <sys/un.h>\n#include <unistd.h>\n\nint main() {\n    int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);\n    struct sockaddr_un address;\n    address.sun_family = AF_UNIX;\n    strcpy(address.sun_path, \"/tmp/video_backend.sock\");\n    \n    if (connect(cli
+--- CMD ---
+{"command": "cat > /tmp/test_client.c << 'EOF'\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <sys/un.h>\n#include <unistd.h>\n\nint main() {\n    int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);\n    struct sockaddr_un address;\n    address.sun_family = AF_UNIX;\n    strcpy(address.sun_path, \"/tmp/video_backend.sock\");\n    \n    if (connect(cli
+--- CMD ---
+{"command": "cat > /app/logrotate.conf << 'EOF'\n/app/server.log {\n    daily\n    rotate 3\n    compress\n    missingok\n    notifempty\n    create 0644 root root\n}\nEOF", "timeout": 10000}
+--- CMD ---
+{"command": "nginx -c /app/nginx.conf -t", "timeout": 10000}
+--- CMD ---
+{"command": "nginx -c /app/nginx.conf", "timeout": 10000}
+--- CMD ---
+{"command": "ps aux | grep nginx", "timeout": 10000}
+--- CMD ---
+{"command": "curl -s http://127.0.0.1:8080/", "timeout": 10000}
+--- CMD ---
+{"command": "wget -qO- http://127.0.0.1:8080/", "timeout": 10000}
+--- CMD ---
+{"command": "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e \"GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; cat <&3; exec 3>&-", "timeout": 10000}
+--- CMD ---
+{"command": "ls -la /tmp/video_backend.sock", "timeout": 10000}
+--- CMD ---
+{"command": "ps aux | grep -E \"server|nginx\" | grep -v grep", "timeout": 10000}
+--- CMD ---
+{"command": "cat /var/log/nginx/error.log 2>/dev/null || echo \"No error log found\"", "timeout": 10000}
+--- CMD ---
+{"command": "chmod 777 /tmp/video_backend.sock", "timeout": 10000}
+--- CMD ---
+{"command": "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e \"GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; cat <&3; exec 3>&-", "timeout": 10000}
+--- CMD ---
+{"command": "cat /app/logrotate.conf", "timeout": 10000}
+--- CMD ---
+{"command": "cat /app/nginx.conf", "timeout": 10000}
+--- CMD ---
+{"command": "cat /app/server.cpp", "timeout": 10000}
+--- CMD ---
+{"command": "ls -la /app/server /app/server.log", "timeout": 10000}
+--- CMD ---
+{"command": "echo \"=== Final Verification ===\" && \\\necho \"1. Nginx config:\" && cat /app/nginx.conf && \\\necho \"\" && \\\necho \"2. Server executable:\" && ls -la /app/server && \\\necho \"\" && \\\necho \"3. Logrotate config:\" && cat /app/logrotate.conf && \\\necho \"\" && \\\necho \"4. Testing HTTP request through nginx proxy:\" && \\\nexec 3<>/dev/tcp/127.0.0.1/8080; echo -e \"GET / HTT
+--- CMD ---
+{}
+--- CMD ---
+{"command": "echo \"=== 1. Required Files Check ===\" && \\\nls -lh /app/nginx.conf /app/server.cpp /app/server /app/video.mp4 /app/server.log /app/logrotate.conf", "timeout": 10000}
+--- CMD ---
+{"command": "cat /app/nginx.conf", "timeout": 10000}
+--- CMD ---
+{"command": "echo \"=== Process Check ===\" && \\\nps aux | grep -E \"nginx|server\" | grep -v grep", "timeout": 10000}
+--- CMD ---
+{"command": "echo \"=== Final HTTP Test ===\" && \\\nexec 3<>/dev/tcp/127.0.0.1/8080; echo -e \"GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; cat <&3; exec 3>&-", "timeout": 10000}
+--- CMD ---
+{"command": "echo \"Task completed successfully. All requirements verified.\"", "timeout": 10000}

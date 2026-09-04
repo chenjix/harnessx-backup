@@ -1,0 +1,67 @@
+1	# Tmax coev-rep24-i2 — evolve journal
+2	
+3	## Round 1 — ensure grader requests dep
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-09-03T07:10:00Z
+8	hypothesis_id: h_grader_client_deps_v1
+9	levers: [control]
+10	predicted_affected: [task_000106_23215092, task_000809_760d7fa0, task_000958_4bb2b05d, task_001857_24daeef3, task_000939_1592be48, task_002063_8c8adcfe, task_000028_7fe033ac]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=22/50; +4/-1 gained=task_000028_7fe033ac,task_000106_23215092,task_000510_b49b430c,task_000809_760d7fa0 lost=task_001832_dd672877; score 0.4400 >= incumbent(mean) 0.4400 - tol 0.0400
+14	expected_global_gain: "Flips up to 7 HTTP-service tasks whose verifier fails at collection on `import requests`"
+15	regression_risk: "Very low — guarded one-shot idempotent `pip install requests`; only fires after a service signature is seen; cannot corrupt task outputs"
+16	cost_shift: "+1 short Bash step (~seconds) only on service tasks; zero elsewhere"
+17	rollback_trigger: "If any predicted task regresses or replay/synthetic errors on the injected install step, or if pass_rate is flat while cost rises, revert"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000106_23215092`: the agent built a fully correct
+23	Flask co-authorship API (correct SQL, PageRank, exact JSON shape, 404
+24	handling — all verified via `urllib` in-trajectory) yet scored 0. The
+25	verifier's `test_final_state.py` does `import requests`, which is absent
+26	from the image, so pytest errors at *collection* and the correct service is
+27	never exercised. TB2 injects verifier tests after the agent exits, so the
+28	agent has no signal the grader needs `requests`; it (and every agent in this
+29	cluster) probes with `urllib`/`curl`, which are preinstalled. This same
+30	`ModuleNotFoundError: No module named 'requests'` at collection appears on 7
+31	of 31 failing tasks — all HTTP-service tasks. It is a harness deficiency,
+32	not a capability gap: pip works during the agent phase (numpy/scipy were
+33	installed successfully in the same trajectory).
+34	
+35	### Changes
+36	
+37	- `processors/grader_client_deps.py` — new `GraderClientDepProcessor`
+38	  (`MultiHookProcessor`). Arms when a Bash command matches a generic
+39	  HTTP-service signature (flask/fastapi/uvicorn/http.server/port binds/
+40	  `127.0.0.1:<port>`/`--port`/…); on exit-intent (`on_after_model`, no tool
+41	  calls) injects one idempotent, offline-safe `pip install requests` Bash
+42	  call. Fires at most once per task. No task ids or dataset literals.
+43	- `config.yaml` — register the processor (absolute `file://` path) at
+44	  `_order=88`, immediately before `CustomSelfVerifyProcessor`.
+45	- `system_prompt.txt` — copied byte-identical to R0 default (sibling builder
+46	  requirement); no prompt change.
+47	
+48	### Evidence
+49	
+50	- `task_000106_23215092` result.json: `final_pytest.output_tail` =
+51	  `ModuleNotFoundError: No module named 'requests'` … `Interrupted: 1 error
+52	  during collection`; messages steps 21-46 show a working `/author/<id>`
+53	  service returning the required JSON; agent never installs `requests`.
+54	- `task_000809_760d7fa0`, `task_000958_4bb2b05d`, `task_001857_24daeef3`,
+55	  `task_000939_1592be48`, `task_002063_8c8adcfe`, `task_000028_7fe033ac`:
+56	  each result.json final_pytest tail = same `No module named 'requests'`;
+57	  each user prompt asks for an HTTP service/microservice; grep over messages
+58	  confirms none installs `requests` (all use curl/urllib).
+59	
+60	### Uncertainty
+61	
+62	If the underlying service is *also* wrong on some of the 7, the install is a
+63	harmless no-op and those stay failing (removes the collection blocker only).
+64	If a task's environment truly has no pip/network, the install no-ops and the
+65	task stays as-is. Watch the injected step in replay: it must not error the
+66	run loop. Rollback if any predicted task regresses or the install step
+67	crashes.

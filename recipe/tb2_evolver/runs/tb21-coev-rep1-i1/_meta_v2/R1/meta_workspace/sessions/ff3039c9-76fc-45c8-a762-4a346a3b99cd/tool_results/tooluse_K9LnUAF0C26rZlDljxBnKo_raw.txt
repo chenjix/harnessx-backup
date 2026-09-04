@@ -1,0 +1,142 @@
+601	                    f"Use @on(EventClass) to handle a custom event type under a free name."
+602	                )
+603	
+604	        cls._DISPATCH = dispatch
+605	
+606	    # Ordering hints — set on subclasses, read by HarnessBuilder.
+607	    # _order:  use PRE / NORMAL / POST constants (or fine-grained int offsets).
+608	    # _after:  list of _singleton_group names that must run before this processor
+609	    #          within the same hook.  Soft: unregistered groups are silently ignored.
+610	    _after: list[str] = []
+611	
+612	    # Sub-harness registry: populated at Harness.__init__() time via _bind_sub_harnesses().
+613	    # Each entry is a minimal Harness configured for that provider key.
+614	    _sub_harnesses: dict[str, Any] = {}
+615	
+616	    # ModelConfig reference: populated at Harness.__init__() time via _bind_model_config().
+617	    _model_config: Any = None
+618	
+619	    # HarnessConfig reference: populated at Harness.__init__() time via _bind_harness_config().
+620	    _harness_config: Any = None
+621	
+622	    def _bind_model_config(self, model_config: Any) -> None:
+623	        """Called by Harness.__init__() to inject the parent ModelConfig.
+624	
+625	        Processors that need parent model context use this to access the
+626	        current ``ModelConfig``. The default implementation stores it on
+627	        the instance.
+628	        """
+629	        self._model_config = model_config
+630	
+631	    def _bind_harness_config(self, harness_config: Any) -> None:
+632	        """Called by Harness.__init__() to inject the parent HarnessConfig.
+633	
+634	        Processors that need harness context use this to access the current
+635	        harness configuration (workspace, tool_registry, tracer). The default
+636	        implementation stores it on the instance.
+637	        """
+638	        self._harness_config = harness_config
+639	
+640	    def _bind_runtime(self, rt: Any) -> None:
+641	        """Called by Harness.__init__() to inject the live _HarnessRuntime.
+642	
+643	        Processors that need to manipulate the active processor set (e.g.
+644	        LightMeta's plan processor) use this to access _rt.processors — the
+645	        hook-keyed dict of instantiated Processor objects used by the runloop.
+646	        """
+647	        self._harness_runtime = rt
+648	
+649	    def _bind_sub_harnesses(self, sub_harnesses: dict[str, Any]) -> None:
+650	        """Called by Harness.__init__() to inject minimal sub-harnesses keyed by provider role.
+651	
+652	        Processors that need a secondary model call ``sub_harness.run()`` instead
+653	        of ``provider.complete()`` — all model calls go through the RunLoop, so
+654	        cost, trace, and trajectory are captured automatically.
+655	
+656	        ``parent_run_id`` is threaded via the event's ``run_id`` at call time::
+657	
+658	            sub = self._sub_harnesses.get(self._judge_key)
+659	            if sub is not None:
+660	                result = await sub.run(BaseTask(description=prompt, max_steps=1),
+661	                                       parent_run_id=event.run_id)
+662	        """
+663	        self._sub_harnesses = dict(sub_harnesses)
+664	
+665	    def _bind_tool_registry(self, tool_registry: Any) -> None:
+666	        """Called by Harness.__init__() to give processors access to the registered tool names.
+667	
+668	        Override in subclasses that need to introspect available tools — for example to
+669	        build a case-insensitive name lookup table.  The default implementation is a no-op.
+670	        """
+671	
+672	    async def process(self, event: Event) -> AsyncIterator[Event]:
+673	        method_name = self._DISPATCH.get(type(event))
+674	        if not method_name:
+675	            yield event
+676	            return
+677	        handler = getattr(self, method_name, None)
+678	        if not handler:
+679	            yield event
+680	            return
+681	        try:
+682	            async for out in handler(event):
+683	                yield out
+684	        except asyncio.CancelledError:
+685	            raise
+686	        except Exception as exc:
+687	            # Control-flow exceptions (budget/loop/context/parse signals) must
+688	            # propagate so run_loop can translate them into exit_reason.  Any
+689	            # other exception is a bug inside the processor — we log identity
+690	            # (processor class + hook) and pass the event through unchanged so
+691	            # one buggy processor cannot crash the run.  This is the backstop
+692	            # for generated meta-skill processors whose runtime bugs escape
+693	            # smoke_load + admission probe.
+694	            from .runloop import HarnessError
+695	
+696	            if isinstance(exc, (HarnessError, ContractViolationError)):
+697	                raise
+698	            exc_name = type(exc).__name__
+699	            if exc_name in (
+700	                "ToolFailureLimitError",
+701	                "ContextLengthExceeded",
+702	                "GenerationAborted",
+703	            ):
+704	                raise
+705	            _logger.warning(
+706	                "processor crashed, skipping: processor=%s hook=%s event=%s error=%s: %s",
+707	                type(self).__name__,
+708	                method_name,
+709	                type(event).__name__,
+710	                exc_name,
+711	                exc,
+712	            )
+713	            _logger.debug("processor crash traceback:", exc_info=True)
+714	            yield event
+715	
+716	    # Default no-op handlers — override as needed
+717	
+718	    async def on_task_start(self, event: TaskStartEvent) -> AsyncIterator[Event]:
+719	        """Once per task. Allowed: modify ``system_prompt``. No ``messages`` field on this event."""
+720	        yield event
+721	
+722	    async def on_step_start(self, event: StepStartEvent) -> AsyncIterator[Event]:
+723	        """Start of each step. Structural history edits OK (system stays at [0]). Forbidden: last-user-only substitution without a structural change."""
+724	        yield event
+725	
+726	    async def on_before_model(self, event: BeforeModelEvent) -> AsyncIterator[Event]:
+727	        """Just before the LLM call. last=user → may edit last user content only; last≠user → may append exactly +1 user. History window is frozen."""
+728	        yield event
+729	
+730	    async def on_after_model(self, event: ModelResponseEvent) -> AsyncIterator[Event]:
+731	        """After model responds. Allowed: modify ``content`` / ``tool_calls``. ``ModelResponseEvent`` carries no ``messages`` field — history is structurally inaccessible."""
+732	        yield event
+733	
+734	    async def on_before_tool(self, event: ToolCallEvent) -> AsyncIterator[Event]:
+735	        """Before a tool executes. Allowed: modify ``tool_input``, set ``approved=False``. ``ToolCallEvent`` carries no ``messages`` field — history is structurally inaccessible."""
+736	        yield event
+737	
+738	    async def on_after_tool(self, event: ToolResultEvent) -> AsyncIterator[Event]:
+739	        """After a tool returns. Allowed: modify ``result``. ``ToolResultEvent`` carries no ``messages`` field — history is structurally inaccessible."""
+740	        yield event
+
+[Showing lines 601–740 of 844 total. Use offset=740 to read the next section.]

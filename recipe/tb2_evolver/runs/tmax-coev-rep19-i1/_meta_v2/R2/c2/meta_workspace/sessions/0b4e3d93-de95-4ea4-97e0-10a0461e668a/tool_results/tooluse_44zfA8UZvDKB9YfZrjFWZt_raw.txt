@@ -1,0 +1,132 @@
+201	
+202	# pip package-name → python import name for common mismatches
+203	_PKG_IMPORT = {
+204	    'pillow': 'PIL', 'pil': 'PIL',
+205	    'scikit-learn': 'sklearn',
+206	    'opencv-python': 'cv2', 'opencv-python-headless': 'cv2',
+207	    'pyyaml': 'yaml',
+208	    'beautifulsoup4': 'bs4',
+209	    'python-dateutil': 'dateutil',
+210	    'typing-extensions': 'typing_extensions',
+211	    'torch': 'torch', 'torchvision': 'torchvision', 'torchaudio': 'torchaudio',
+212	    'tensorflow': 'tensorflow', 'tf-nightly': 'tensorflow',
+213	    'jax': 'jax', 'jaxlib': 'jaxlib',
+214	    'pytest-json-ctrf': 'pytest_json_ctrf',
+215	    'pytest-xdist': 'xdist',
+216	}
+217	
+218	def _pip_installed(pkg):
+219	    base = re.split(r'[><=!;\[@]', pkg)[0].strip().lower()
+220	    imp = _PKG_IMPORT.get(base, base.replace('-', '_'))
+221	    return _sh(f'python3 -c "import {imp}"') == 0
+222	
+223	def _apt_installed(pkg):
+224	    base = re.split(r'[><=]', pkg)[0].strip()
+225	    return _sh(f'dpkg -l {base} 2>/dev/null | grep -q "^ii"') == 0
+226	
+227	try:
+228	    src = open('test.sh').read()
+229	except OSError:
+230	    sys.exit(0)
+231	
+232	lines = src.splitlines()
+233	out = []
+234	skipped = []
+235	
+236	for line in lines:
+237	    s = line.strip()
+238	    if not s or s.startswith('#'):
+239	        out.append(line)
+240	        continue
+241	
+242	    # apt-get update — skip if package lists were refreshed within last 24 h
+243	    if re.match(r'apt-get\s+update\b', s):
+244	        if _sh('find /var/lib/apt/lists -maxdepth 1 -name "*.InRelease"'
+245	               ' -mmin -1440 2>/dev/null | grep -q .') == 0:
+246	            out.append('# [warm-cache] apt lists fresh — skipped: ' + s)
+247	            skipped.append('apt-get-update')
+248	            continue
+249	
+250	    # apt-get install -y <pkg> …
+251	    m = re.match(r'apt-get\s+install\b', s)
+252	    if m:
+253	        pkgs = [p for p in re.sub(r'apt-get\s+install\s+', '', s).split()
+254	                if not p.startswith('-')]
+255	        if pkgs and all(_apt_installed(p) for p in pkgs):
+256	            out.append('# [warm-cache] apt packages present — skipped: ' + s)
+257	            skipped.append('apt:' + ','.join(pkgs))
+258	            continue
+259	
+260	    # curl … | sh  — uv installer (astral.sh or direct GitHub release)
+261	    if re.search(r'curl\b', s) and '|' in s:
+262	        if re.search(r'astral\.sh.*uv|github\.com/astral-sh/uv', s):
+263	            if _sh('command -v uv || test -x /root/.local/bin/uv || test -x /root/.cargo/bin/uv') == 0:
+264	                out.append('# [warm-cache] uv present — skipped: ' + s)
+265	                skipped.append('uv-install')
+266	                continue
+267	
+268	    # pip install / pip3 install / python -m pip install
+269	    if re.match(r'(?:pip3?|python3?\s+-m\s+pip)\s+install\b', s):
+270	        pkgs = [p for p in re.sub(r'.+install\s+', '', s).split()
+271	                if not p.startswith('-')]
+272	        if pkgs and all(_pip_installed(p) for p in pkgs):
+273	            out.append('# [warm-cache] pip packages present — skipped: ' + s)
+274	            skipped.append('pip:' + ','.join(pkgs))
+275	            continue
+276	
+277	    # uv pip install <pkgs>
+278	    if re.match(r'uv\s+pip\s+install\b', s):
+279	        pkgs = [p for p in re.sub(r'uv\s+pip\s+install\s+', '', s).split()
+280	                if not p.startswith('-')]
+281	        if pkgs and all(_pip_installed(p) for p in pkgs):
+282	            out.append('# [warm-cache] uv pip packages present — skipped: ' + s)
+283	            skipped.append('uv-pip:' + ','.join(pkgs))
+284	            continue
+285	
+286	    # uvx [-p <ver>] [-w <pkg>]* <tool> [args…]  →  persistent venv
+287	    # Creates /root/.tb2_warm_venv once; subsequent runs skip the install.
+288	    if re.match(r'^uvx\b', s):
+289	        _VENV = '/root/.tb2_warm_venv'
+290	        _py_ver = re.search(r'-p\s+(\S+)', s)
+291	        _pkgs   = re.findall(r'-w\s+(\S+)', s)
+292	        _cmd    = re.sub(r'-p\s+\S+\s*', '', re.sub(r'^uvx\s+', '', s))
+293	        _cmd    = re.sub(r'-w\s+\S+\s*', '', _cmd).strip()
+294	        _bin    = _cmd.split()[0] if _cmd else ''
+295	        _args   = _cmd[len(_bin):].strip() if _bin else ''
+296	        _py_f   = f'-p {_py_ver.group(1)}' if _py_ver else ''
+297	        _pkg_q  = ' '.join(f'"{p}"' for p in _pkgs)
+298	        _imps   = [_PKG_IMPORT.get(re.split(r'[><=!;\[@]', p)[0].strip().lower(),
+299	                                    re.split(r'[><=!;\[@]', p)[0].strip().lower().replace('-', '_'))
+300	                   for p in _pkgs]
+301	        _imp_csv = ', '.join(_imps) if _imps else ''
+302	        out.append('# [warm-cache] uvx → persistent venv (' + _VENV + '): ' + s)
+303	        if _imp_csv:
+304	            out.append(f'if ! [ -f {_VENV}/bin/python ] || ! {_VENV}/bin/python -c "import {_imp_csv}" 2>/dev/null; then')
+305	        else:
+306	            out.append(f'if ! [ -f {_VENV}/bin/python ]; then')
+307	        out.append(f'  uv venv {_py_f} {_VENV} 2>/dev/null || true')
+308	        if _pkg_q:
+309	            out.append(f'  uv pip install --python {_VENV} {_pkg_q}')
+310	        out.append('fi')
+311	        if _bin:
+312	            out.append(f'{_VENV}/bin/{_bin}' + (f' {_args}' if _args else ''))
+313	        skipped.append('uvx→venv:' + (_bin or s))
+314	        continue
+315	
+316	    out.append(line)
+317	
+318	patched = '\n'.join(out)
+319	if patched != src:
+320	    open('test.sh', 'w').write(patched)
+321	    print('[warm-cache] test.sh patched; skipped:', skipped)
+322	"""
+323	
+324	    # Shell fallback used when the container has no python3.
+325	    # Handles only the uv-install curl|sh line and apt-get update since those
+326	    # are the expensive network operations; pip-install checks require python3.
+327	    _PATCHER_SHELL = r"""
+328	set -e
+329	[ -f test.sh ] || exit 0
+330	_uv_present() {
+
+[Showing lines 201–330 of 533 total. Use offset=330 to read the next section.]

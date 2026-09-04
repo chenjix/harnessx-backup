@@ -1,0 +1,94 @@
+426	### Uncertainty
+427	
+428	If the upscaled image still OCRs to garbage the residual is a pure model/OCR
+429	capability limit and 015 stays F; the format cross-check (505 ed25519 prefix,
+430	536 CSV format) is more mechanical and likelier to land. Append-only prompt
+431	guidance cannot itself remove a mechanism, so regression risk is low; watch for
+432	step-count inflation on easy tasks and for any regression on 338/1652. If the
+433	cluster is unchanged on the same assertions next round, revert to R0 prompt per
+434	the rollback trigger.
+435	
+436	
+437	## Round 3 — break degenerate low-information tool-call loops
+438	
+439	<!-- journal:frontmatter
+440	round: 3
+441	timestamp: 2026-08-28T15:00:00Z
+442	hypothesis_id: h_degenerate_loop_breaker_v1
+443	levers: [control]
+444	predicted_affected: [task_000010_644ab1c2, task_000958_4bb2b05d, task_001706_24462a09, task_001031_a8f0eb37]
+445	cited_candidates: [C-001]
+446	gating_outcome: pending
+447	gating_attribution: pending
+448	expected_global_gain: "Flip/relieve the degenerate-loop failing cluster (>=4 tasks) where the model cycles on the same completed tool call(s) with identical results, making no new observations; content-agnostic so it generalizes."
+449	regression_risk: "Very low — append-only on the tool result (CustomEditToolProcessor contract), contract-clean, 0 of 29 passing tasks in R2 hit the window=6/distinct<=2 condition so no passing task ever sees the note."
+450	cost_shift: "Net decrease — breaks loops at ~6th repeated result instead of running to the step-80 wall, reclaiming tens of steps per stuck task; ~90-token note fires only inside a loop."
+451	rollback_trigger: "If R4 shows cited loopers still reward=0 with the loop unbroken (nudge ignored) and no passing regression, escalate (lower refire_gap or add hard loop-terminate) rather than reship; if any previously-passing task regresses to F, revert."
+452	-->
+453	
+454	### Why
+455	
+456	Assigned focus `task_000010_644ab1c2` (system_administration, reward=0,
+457	exit_reason=done, steps=65). The task requires a script at `/home/user/operator.py`,
+458	but that filename shadows Python's stdlib `operator` module — so any `python3`
+459	process with `/home/user` on `sys.path[0]` triggers a circular import
+460	(`from operator import eq` inside `collections`). final_pytest fails with that
+461	exact circular-import traceback.
+462	
+463	The agent correctly *diagnosed* the shadowing but never escaped it. It fell into a
+464	byte-identical 2-cycle (messages.json msgs 45–54): tool_call
+465	`rm operator.py && ln -sf k8s_operator.py operator.py && python3 -c "import operator"`
+466	→ `OK`, alternating with `cd /tmp && python3 k8s_operator.py` → the same traceback,
+467	9× each, until the run ended with no working deliverable.
+468	
+469	Root harness gap: nothing in R0 intercepts a loop of *completed* tool calls whose
+470	results never change. `LengthTruncationRecoveryProcessor` only handles
+471	`finish_reason=="length" and not tool_calls` (no-tool-call token-cap loops) — the
+472	other loop shape in this same trajectory (msgs 58–84). The completed-tool-call loop
+473	was uncovered. Sweep confirmed a recurring cluster: task_000958 (sqlite3 x13,
+474	budget_exceeded), task_001706 (x12, budget_exceeded), task_001031 (x47, error).
+475	
+476	Critically, task_000010's loop is a 2-cycle, so a naive "N consecutive identical
+477	results" detector (max strictly-consecutive = 2) misses it. A rolling window of the
+478	last 6 (command,result) fingerprints collapsing to <=2 distinct values catches both
+479	the 2-cycle AND the back-to-back reruns. Empirically, 0 of 29 R2-passing tasks hit
+480	this condition — the shape is exclusive to the looping/failing cluster.
+481	
+482	Distinct from reverted R1 `h_step_budget_reminder_v1` (a step-fraction reminder,
+483	control): this fires on the *repetition shape* of tool results, not on a budget
+484	threshold, and is append-only on the result rather than injecting user messages.
+485	
+486	### Changes
+487	
+488	- `processors/degenerate_loop_breaker.py` — new `DegenerateLoopBreakerProcessor`
+489	  (`MultiHookProcessor`, `_order=33`, after CustomEditToolProcessor(30), before
+490	  CustomSelfVerifyProcessor(90)). Pairs each command with its result in
+491	  `on_before_tool`/`on_after_tool`, maintains a rolling window of blake2b
+492	  fingerprints; when distinct fingerprints in the window <= `distinct_max` it
+493	  appends an escalating (soft→hard) "you are looping, change strategy" note to the
+494	  tool result. Append-only, non-terminating, content-agnostic (no task ids/paths/
+495	  syntax literals). Re-fires every `refire_gap` results so a stubborn loop is nudged
+496	  again without spamming.
+497	- `config.yaml` — register the processor via absolute `file://` path
+498	  (window=6, distinct_max=2, min_window_fill=6, refire_gap=4). Rest byte-identical
+499	  to R0; `system_prompt.txt` sibling copied unchanged.
+500	
+501	### Evidence
+502	
+503	- task_000010_644ab1c2 result.json: reward=0, exit_reason=done, steps=65;
+504	  final_pytest circular-import traceback on `import operator` from `/home/user/operator.py`.
+505	- task_000010 messages.json msgs 45–54: the `rm/ln/python3 -c` ↔ `python3 k8s_operator.py`
+506	  2-cycle, 9× each. windows-that-would-fire=13.
+507	- task_000958_4bb2b05d (budget_exceeded, max_consec_result=13), task_001706_24462a09
+508	  (budget_exceeded, max_consec_result=12), task_001031_a8f0eb37 (error, dupcmd=47).
+509	- Passing-task false-positive sweep: 0 of 29 reward=1 tasks would fire the detector.
+510	
+511	### Uncertainty
+512	
+513	If the model reads the note but cannot find the general escape (for 000010, the
+514	stdlib-shadow escape is a real reasoning step — strip the script dir from sys.path or
+515	run via a wrapper), 000010 may stay F even though the loop is broken; that residual is
+516	a model reasoning limit, not a harness gap. For the budget_exceeded loopers the
+517	reclaimed-budget benefit is more mechanical. Append-only design cannot itself regress a
+518	passing task. If R4 shows the nudge too weak (loops persist), escalate cadence or add a
+519	terminate-on-loop guard per rollback_trigger.

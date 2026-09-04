@@ -1,0 +1,69 @@
+1	# Evolve Journal — tmax-coev-rep22-i2
+2	
+3	## Round 1 — install requests for HTTP verifier
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-09-01T04:00:00Z
+8	hypothesis_id: h_http_verifier_requests_v1
+9	levers: [control]
+10	predicted_affected: [task_000106_23215092, task_000958_4bb2b05d, task_002063_8c8adcfe]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Flips the HTTP-service cluster (>=3 tasks) that hard-fails at verifier test-collection with `ModuleNotFoundError: requests`, despite correct running services"
+15	regression_risk: "One extra user turn on tasks that start a server; non-service tasks never trigger. Worst case is a small distraction on service tasks that already pass"
+16	cost_shift: "Negligible: +1 short user message and +1 `pip install requests` command on service tasks only; zero on all other tasks"
+17	rollback_trigger: "If R2 shows the service cluster still failing at `requests` collection, or regressions on non-service tasks attributable to the injected turn, revert the processor"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000106_23215092` (data_querying) built a fully correct
+23	Flask co-authorship-graph API: correct self-join SQL, networkx PageRank
+24	summing to 1.0, exact JSON schema, 404 handling, all verified in-trajectory
+25	with `urllib`. It still scored 0. The verifier's `test_final_state.py` fails
+26	at **collection** with `ModuleNotFoundError: No module named 'requests'` — the
+27	grading client library is simply absent from the container. Per the TB2
+28	playbook, verifier files are injected *after* the agent exits, so the agent
+29	cannot see that the test imports `requests`. This is a harness/verifier
+30	environment gap, not a solution defect or a model capability gap. It recurs:
+31	three distinct HTTP-service tasks across two domains and three languages
+32	(Python/C++/Rust) all hard-fail with the identical `requests` collection error.
+33	
+34	### Changes
+35	
+36	- `processors/http_verifier_dep.py` — new `HttpVerifierDepProcessor`
+37	  (`MultiHookProcessor`). Detects a server-start / port-bind in the agent's
+38	  Bash commands (`_SERVICE_SIGNALS` regex: flask/fastapi/uvicorn/gunicorn/
+39	  http.server/`app.run(`/`.listen(`/`--port`/`127.0.0.1:PORT` etc.), then on
+40	  the next model turn injects exactly one reminder that the external test
+41	  drives the service with `requests` and the agent must make `requests`
+42	  importable (`python3 -m pip install requests`) before finishing. Fires once
+43	  per task, only when a server was started.
+44	- `config.yaml` — register `HttpVerifierDepProcessor` (`_order=91`) at the end
+45	  of the pipeline, after `CustomSelfVerifyProcessor`.
+46	
+47	### Evidence
+48	
+49	- `task_000106_23215092` `final_pytest.output_tail`:
+50	  `import requests / ModuleNotFoundError: No module named 'requests' /
+51	  Interrupted: 1 error during collection`; agent body: "curl is not
+52	  available. Let me use Python to test the API instead" → tests with
+53	  `urllib`, confirms `pagerank 0.204787` and `Got expected 404`, never
+54	  installs `requests`.
+55	- `task_000958_4bb2b05d` (C++ HTTP microservice) `final_pytest.output_tail`:
+56	  identical `import requests` / `ModuleNotFoundError` / `Interrupted: 1 error
+57	  during collection`.
+58	- `task_002063_8c8adcfe` (Rust/pyo3 validation service)
+59	  `final_pytest.output_tail`: identical `requests` ImportError at collection.
+60	- Same trajectory shows `pip3 install numpy` and `pip3 install scipy` both
+61	  succeeding, so `pip install requests` is viable in this environment.
+62	
+63	### Uncertainty
+64	
+65	If a container has no outbound access at all, `pip install requests` could
+66	fail; the reminder still costs little and the agent may find a vendored wheel.
+67	If the model ignores the nudge, the fix does not land and we revert. If the
+68	regex over-fires on a non-service command, the worst case is one wasted user
+69	turn — measured by regressions on currently-passing non-service tasks in R2.

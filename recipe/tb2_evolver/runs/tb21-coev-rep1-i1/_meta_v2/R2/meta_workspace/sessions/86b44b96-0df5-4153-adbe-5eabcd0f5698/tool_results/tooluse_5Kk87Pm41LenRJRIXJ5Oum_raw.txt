@@ -1,0 +1,42 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""ActLoopKeepalive — keep a stalled agent acting instead of ending the run.
+4	
+5	Motivation (harness deficiency, not a model-knowledge gap)
+6	----------------------------------------------------------
+7	On Terminal-Bench 2 the only tool is ``Bash``; a task is solved by *writing
+8	files / starting services via Bash*, never by emitting prose. The run loop,
+9	however, treats any assistant turn with ``finish_reason in ("end_turn",
+10	"stop")`` and **no tool calls** as a natural completion and ``break``s the
+11	episode (harnessx/core/runloop.py ~L745). The stock
+12	``CustomSelfVerifyProcessor`` intercepts this — but only **once per task**
+13	("Fires at most once per task run. On the next no-tool-call turn it stays
+14	silent."). After that single keepalive is spent, the *next* text-only turn
+15	ends the run.
+16	
+17	Trajectory evidence (R1, tb21-coev-rep1-i1):
+18	  Failing tasks consistently end on a large text-only assistant turn (94k-254k
+19	  chars) that contains no ``Bash`` call — the model rambles / plans in prose
+20	  instead of executing. Examples: regex-log ends after the model emits a
+21	  90k-char reasoning turn with no tool call (5 steps); large-scale-text-editing
+22	  ends after a 254k-char text-only turn (2 steps, 0 output tokens recorded, no
+23	  ``apply_macros.vim`` produced); db-wal-recovery ends on a 105k-char text-only
+24	  turn with no ``recovered.json`` written. In every case the required output
+25	  file simply never gets created because the agent stopped mid-thought.
+26	  Passing tasks (configure-git-webserver, git-leak-recovery, kv-store-grpc)
+27	  keep every assistant turn small and tool-call-bearing.
+28	
+29	This is a *class* deficiency: the harness gives up after one nudge, so a model
+30	prone to multi-turn rambling loses the run. The fix is to make the keepalive
+31	**repeatable but bounded** — nudge the agent back to action up to
+32	``max_reprompts`` times, then let the run stop so we never spin forever.
+33	
+34	Mechanism
+35	---------
+36	``on_after_model`` (``_order`` just after the stock one-shot self-verify, so on
+37	the turn *that* processor handles this stays silent because the response now
+38	carries its keepalive tool call):
+39	
+40	  * Detect a *stall*: ``finish_reason in ("end_turn","stop")`` AND no tool calls
+
+[Showing lines 1–40 of 213 total. Use offset=40 to read the next section.]

@@ -1,0 +1,223 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""LengthTruncationRecoveryProcessor (v3 — small-max_tokens loop break).
+4	
+5	Closes a systemic ``budget_exceeded`` / step-cap failure mode observed on the
+6	small-model TB2 runs: the model keeps emitting the *same* verbose narration
+7	paragraph, which is cut off by a small provider ``max_tokens`` cap (here the
+8	truncated turns are only ~2000 chars — about 512 tokens — with **no tool call**
+9	and ``finish_reason == "length"``). The run loop reacts by appending a passive
+10	"Your previous response was cut off by the token limit. Please continue from
+11	where you left off." user message, which *re-primes the very narration that got
+12	truncated*. The model then regenerates the identical paragraph, is truncated
+13	again, and the cycle repeats for dozens of steps until the task grinds to the
+14	step cap with reward 0.
+15	
+16	Trajectory evidence (r0 round):
+17	  * task_000740 — 11 passive "cut off" nudges, budget_exceeded @ 80 steps.
+18	  * task_001032 — 17 passive "cut off" nudges, 51 steps, done-but-wrong.
+19	  * task_000396 — 10 passive nudges, budget_exceeded @ 80 steps.
+20	  * task_000028 / task_001653 / task_000015 / task_000958 — 3-5 nudges each,
+21	    all failing, several budget_exceeded.
+22	  Every one of these runaway turns was ~2000-3100 chars — *far* below the v2
+23	  ``content_char_threshold`` of 40000, so v2 was a silent no-op on this model.
+24	
+25	Why v2 failed on this model
+26	---------------------------
+27	1. ``content_char_threshold`` (40000) was calibrated for a *different* backend
+28	   that emitted 160K-char blobs. This model's max_tokens truncates at ~2000
+29	   chars, so the char branch never matched.
+30	2. v2's ``on_before_model`` blindly *appended* a corrective user message. But
+31	   after a length-truncated turn the run loop has already appended its own
+32	   passive user "continue" message, so the last message role is ``user`` — and
+33	   the HarnessX before_model contract forbids adding a message when the last
+34	   role is already ``user`` (only content modification of the last user is
+35	   allowed there). v2's corrective nudge was therefore dropped / contract-
+36	   violating exactly in the situation it was written for, leaving the passive
+37	   "continue" message as the last thing the model saw.
+38	
+39	v3 fix
+40	------
+41	* ``on_after_model`` trigger keys on the reliable signal for this model:
+42	  ``finish_reason == "length"`` with no tool call (OR an oversized content blob
+43	  as a secondary safety net). Consecutive-truncation streak is tracked and a
+44	  tiered corrective nudge is armed. Oversized content is still collapsed.
+45	* ``on_before_model`` is now **contract-aware**:
+46	    - If the last message is the passive "continue" user message (or any user
+47	      message), it **rewrites that last user message's content** in place
+48	      (``len_delta == 0``; only the last user's content changes — contract
+49	      legal). This *replaces* the counter-productive "continue from where you
+50	      left off" instruction with an actionable "stop narrating, run ONE
+51	      command" directive that the model actually reacts to.
+52	    - Otherwise (last role is not user, e.g. a tool result) it appends exactly
+53	      one user message (``+1``; contract legal).
+54	  Either way the passive re-priming instruction never survives as the last
+55	  thing the model reads once a truncation streak is active.
+56	
+57	The processor is benchmark-agnostic: it keys purely on ``finish_reason`` /
+58	``tool_calls`` / ``content`` length and on the harness's own passive-nudge
+59	text, never on task content.
+60	"""
+61	
+62	from __future__ import annotations
+63	
+64	import dataclasses
+65	
+66	from harnessx.core.events import (
+67	    BeforeModelEvent,
+68	    Message,
+69	    ModelResponseEvent,
+70	    TaskEndEvent,
+71	    TaskStartEvent,
+72	)
+73	from harnessx.core.processor import MultiHookProcessor
+74	
+75	
+76	_HEAD_CHARS = 1200
+77	_TAIL_CHARS = 600
+78	_CONTENT_CHAR_THRESHOLD = 40000
+79	
+80	# Substring of the run loop's passive continuation message. If the last user
+81	# message contains this, it is the re-priming nudge we want to overwrite.
+82	_PASSIVE_MARKER = "cut off by the token limit"
+83	
+84	_TRUNC_MARKER = (
+85	    "\n\n[response truncated by harness: the model emitted a long response with "
+86	    "no tool call and hit the token limit (a repetition loop); the omitted "
+87	    "middle was discarded to prevent the loop from re-seeding itself]\n\n"
+88	)
+89	
+90	# First occurrence: gentle but concrete redirect.
+91	_NUDGE_FIRST = (
+92	    "Your last turn was cut off by the token limit before you ran any command. "
+93	    "Do NOT continue or re-explain the previous narration — that is what caused "
+94	    "the cut-off. In your next turn write at most TWO short sentences of "
+95	    "reasoning, then issue exactly ONE concrete Bash command that makes forward "
+96	    "progress (inspect a file, run/compile a script, or write an output file). "
+97	    "Keep the whole response short so it is not truncated again."
+98	)
+99	
+100	# Repeated occurrence: hard reset — the model is stuck regenerating the same text.
+101	_NUDGE_REPEAT = (
+102	    "STOP. Your responses have been cut off by the token limit multiple turns in "
+103	    "a row, which means you keep re-writing the same long analysis instead of "
+104	    "acting. Abandon that line of narration completely and do NOT restate it. "
+105	    "Write NO prose analysis. Respond with a SINGLE short Bash command only, that "
+106	    "either (a) writes the required output file(s) to the exact path named in the "
+107	    "task, or (b) runs one quick command to inspect the current state so you can "
+108	    "pick the next concrete step. One short command, nothing else."
+109	)
+110	
+111	
+112	class LengthTruncationRecoveryProcessor(MultiHookProcessor):
+113	    """Break the small-max_tokens repetition loop and redirect the model to act.
+114	
+115	    Parameters
+116	    ----------
+117	    repeat_threshold:
+118	        Number of *consecutive* truncations at (or above) which the escalated
+119	        nudge is used instead of the gentle one. Default 2.
+120	    head_chars / tail_chars:
+121	        How much of a runaway content blob to keep when collapsing it.
+122	    content_char_threshold:
+123	        Secondary trigger: assistant ``content`` length (chars) at or above
+124	        which a no-tool-call turn is treated as a runaway truncation even when
+125	        ``finish_reason`` is not reported as ``"length"``. The primary trigger
+126	        is ``finish_reason == "length"``, which is reliable on this backend.
+127	    """
+128	
+129	    _singleton_group = "tb2_length_recovery"
+130	    # Run early in the after-model chain so downstream processors see collapsed
+131	    # content; run late enough in before-model that the run loop's passive nudge
+132	    # is already present as the last message for us to overwrite.
+133	    _order = 5
+134	
+135	    def __init__(
+136	        self,
+137	        repeat_threshold: int = 2,
+138	        head_chars: int = _HEAD_CHARS,
+139	        tail_chars: int = _TAIL_CHARS,
+140	        content_char_threshold: int = _CONTENT_CHAR_THRESHOLD,
+141	    ) -> None:
+142	        self.repeat_threshold = max(1, int(repeat_threshold))
+143	        self.head_chars = max(0, int(head_chars))
+144	        self.tail_chars = max(0, int(tail_chars))
+145	        self.content_char_threshold = max(1, int(content_char_threshold))
+146	        self._consecutive: int = 0
+147	        self._pending_nudge: str = ""
+148	
+149	    async def on_task_start(self, event: TaskStartEvent):
+150	        self._consecutive = 0
+151	        self._pending_nudge = ""
+152	        yield event
+153	
+154	    async def on_after_model(self, event: ModelResponseEvent):
+155	        content = event.content or ""
+156	        no_tool_call = not event.tool_calls
+157	        # Primary trigger: explicit length finish (reliable on this backend).
+158	        # Secondary: an oversized no-tool-call content blob (other backends).
+159	        length_truncated = no_tool_call and (
+160	            event.finish_reason == "length"
+161	            or len(content) >= self.content_char_threshold
+162	        )
+163	        if not length_truncated:
+164	            # Any normal / tool-calling turn clears the streak.
+165	            self._consecutive = 0
+166	            self._pending_nudge = ""
+167	            yield event
+168	            return
+169	
+170	        self._consecutive += 1
+171	        self._pending_nudge = (
+172	            _NUDGE_REPEAT
+173	            if self._consecutive >= self.repeat_threshold
+174	            else _NUDGE_FIRST
+175	        )
+176	
+177	        if len(content) > (self.head_chars + self.tail_chars + len(_TRUNC_MARKER)):
+178	            collapsed = (
+179	                content[: self.head_chars]
+180	                + _TRUNC_MARKER
+181	                + (content[-self.tail_chars :] if self.tail_chars else "")
+182	            )
+183	            yield dataclasses.replace(event, content=collapsed)
+184	        else:
+185	            yield event
+186	
+187	    async def on_before_model(self, event: BeforeModelEvent):
+188	        if not self._pending_nudge:
+189	            yield event
+190	            return
+191	        nudge = self._pending_nudge
+192	        self._pending_nudge = ""
+193	
+194	        messages = event.messages
+195	        if messages and messages[-1].role == "user":
+196	            # Contract-safe path: rewrite ONLY the last user message's content.
+197	            # This overwrites the run loop's passive "continue from where you
+198	            # left off" re-priming nudge (the actual root cause of the loop)
+199	            # with an actionable directive. len_delta == 0, history untouched.
+200	            last = messages[-1]
+201	            existing = last.content or ""
+202	            # Preserve nothing of the passive nudge; if the last user message is
+203	            # something else, prepend the directive so its content is not lost.
+204	            if _PASSIVE_MARKER in existing:
+205	                new_content = nudge
+206	            else:
+207	                new_content = nudge + "\n\n" + existing
+208	            new_last = dataclasses.replace(last, content=new_content)
+209	            yield dataclasses.replace(
+210	                event, messages=messages[:-1] + (new_last,)
+211	            )
+212	        else:
+213	            # Last role is not user (e.g. a tool result) — append exactly one
+214	            # user message (+1, contract legal).
+215	            yield dataclasses.replace(
+216	                event,
+217	                messages=messages + (Message(role="user", content=nudge),),
+218	            )
+219	
+220	    async def on_task_end(self, event: TaskEndEvent):
+221	        self._consecutive = 0
+222	        self._pending_nudge = ""
+223	        yield event

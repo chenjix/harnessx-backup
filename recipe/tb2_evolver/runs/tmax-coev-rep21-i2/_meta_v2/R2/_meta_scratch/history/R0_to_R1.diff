@@ -1,0 +1,23 @@
+--- R0
++++ R1
+@@ -49,2 +49,20 @@
+   _hook_: '*'
++# Break ACTION-level loops: the model issues the exact same Bash command
++# many times in a row (18-29 verbatim repeats observed on the R0
++# budget_exceeded cluster). Strategy 1 (exact name+inputs) injects an
++# escalating "you are looping — try something fundamentally different"
++# warning into each repeated tool result from repeat 3 onward, then
++# raises LoopDetectedError at repeat 8 to reclaim budget on hopeless
++# verbatim loops. Warn-before-raise gives the model several chances to
++# self-correct and finish before the run is terminated. Strategy 2
++# (name-only) is warn-only and, because the only tool is Bash, is
++# effectively disabled by a high name_warn_threshold so it does not
++# false-positive on legitimate multi-command work.
++- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
++  window_size: 12
++  warn_threshold: 3
++  threshold: 8
++  name_warn_threshold: 999
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

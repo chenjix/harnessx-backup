@@ -1,0 +1,82 @@
+340	        msg = Message(role="user", content=snapshot)
+341	        yield dataclasses.replace(
+342	            event,
+343	            messages=event.messages + (msg,),
+344	            raw_messages=event.raw_messages + (msg,),
+345	        )
+346	
+347	    async def on_task_end(self, event: TaskEndEvent):
+348	        self._prev_count = 0
+349	        yield event
+350	
+351	
+352	# ---------------------------------------------------------------------------
+353	# System prompt
+354	# ---------------------------------------------------------------------------
+355	
+356	_TB2_SYSTEM = """\
+357	# System
+358	You are an expert software engineer solving terminal-based programming tasks in a Linux sandbox.
+359	
+360	## Key Facts About This Environment
+361	- You are inside an isolated Docker container.
+362	- Your job is to implement the task correctly so the external verifier passes when it runs.
+363	
+364	## Workflow
+365	1. **Read the task carefully.** Before writing any code, understand:
+366	   - Required output format, file paths, field names, CLI flags
+367	   - Accuracy or size constraints
+368	   - What a correct solution looks like from the outside
+369	2. **Explore the environment first.**
+370	```bash
+371	   ls /app && find /app -name '*.md' -o -name '*.txt' -o -name '*.sh' 2>/dev/null | head -20
+372	```
+373	3. **For complex tasks, decompose before implementing.** Break the problem into concrete subtasks. Solve and verify each subtask before moving to the next — do not attempt everything at once.
+374	4. **Implement the solution.** Match the task's specified interface exactly — file paths, output format, and CLI behavior all matter to the verifier.
+375	5. **Write outputs to the exact paths the task specifies.** Re-read the task description to confirm paths before writing anything.
+376	6. **Verify outputs explicitly** — do not assume a file was written just because a script ran without errors. Check with `ls` and inspect the contents:
+377	```bash
+378	   ls -lh /path/to/required/output   # confirm file exists and is non-empty
+379	   head -20 /path/to/required/output  # confirm content is correct
+380	```
+381	7. **For background services**, keep them running after you exit and verify they are reachable:
+382	```bash
+383	   nohup python server.py > /tmp/server.log 2>&1 &
+384	   sleep 1 && curl -sf http://localhost:8080/health
+385	```
+386	8. **Do not use unbounded background commands.** If a command's runtime is unpredictable, run it synchronously. Only use `&` / `nohup` for long-running services the verifier will connect to.
+387	9. **Do not run `apt-get update`.** Package lists are pre-cached — `apt-get install -y <pkg>` works directly and completes in seconds.
+388	
+389	## Definition of Done
+390	- All required output files exist at the exact paths specified in the task — confirmed with `ls`
+391	- Any required services are running and reachable
+392	- You have inspected the actual output values and confirmed they are correct
+393	- No temporary or debug files remain that could interfere with the verifier
+394	
+395	When all checks pass, end your final message with:
+396	**SUCCESS: task complete. Output files confirmed at [list each required path].**
+397	"""
+398	
+399	
+400	class _StaticSystemPromptBuilder(BaseSystemPromptBuilder):
+401	    """Minimal TB2-specific system prompt — returns a fixed base identity prompt."""
+402	
+403	    async def build(self, workspace=None) -> str:  # noqa: ARG002
+404	        return _TB2_SYSTEM
+405	
+406	
+407	def _build_tb2_tools() -> InMemoryToolRegistry:
+408	    """TB2 tool set: Bash only — matches the official Harbor evaluation."""
+409	    registry = InMemoryToolRegistry()
+410	    registry.register(bash_tool)
+411	    return registry
+412	
+413	
+414	def make_tb2_harness_config(
+415	    *,
+416	    timeout_seconds: int | None = None,
+417	    workspace_path: str = WORKSPACE_PATH,
+418	    output_limit: int = OUTPUT_LIMIT,
+419	) -> HarnessConfig:
+
+[Showing lines 340–419 of 466 total. Use offset=419 to read the next section.]

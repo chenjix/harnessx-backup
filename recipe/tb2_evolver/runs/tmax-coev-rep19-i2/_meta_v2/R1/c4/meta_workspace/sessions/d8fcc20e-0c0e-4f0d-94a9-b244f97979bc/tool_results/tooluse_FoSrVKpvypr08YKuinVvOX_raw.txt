@@ -1,0 +1,79 @@
+1	# Evolve Journal — tmax-coev-rep19-i2
+2	
+3	## Round 1 — verifier http-dep reminder
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-30T17:00:00Z
+8	hypothesis_id: h_verifier_http_dep_v1
+9	levers: [control]
+10	predicted_affected: [task_000028_7fe033ac, task_000106_23215092, task_000809_760d7fa0, task_000958_4bb2b05d, task_001857_24daeef3, task_002063_8c8adcfe]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Flips up to 6 reward=0 tasks whose external HTTP verifier fails to import `requests`; cross-domain structural cluster, not a one-off."
+15	regression_risk: "Low — processor appends one user message only when BOTH a verifier-intent AND a service-shape regex match the task description; non-service tasks untouched. Contract-clean."
+16	cost_shift: "Negligible: ~+250 tokens once per matched task plus at most one `pip install requests` Bash round-trip; zero on unmatched tasks."
+17	rollback_trigger: "If none of the 6 predicted tasks flip to pass, OR any previously-passing service task regresses (e.g. reminder derails a working run), revert."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus was `task_000028_7fe033ac` (system_administration, reward=0).
+23	Reading its trajectory: the agent fully solved the task — fixed the nginx
+24	`proxy_pass`, rewrote the C++ socket server to compute the frame count via
+25	ffprobe, compiled it, ran it in the background, wrote the logrotate config,
+26	chmod'd the socket to fix a 502, and verified `HTTP/1.1 200 OK` with body
+27	`150` through nginx on `127.0.0.1:8080`. It still scored 0. The cause is
+28	entirely in the verifier phase: `final_pytest` errors with
+29	`ModuleNotFoundError: No module named 'requests'` while *collecting*
+30	`/tmp/test_final_state.py` — the verifier can't even load its own test
+31	module because the base image lacks `requests`.
+32	
+33	A sweep of the round's 27 failures found this is a **6-task cluster** (000028,
+34	000106, 000809, 000958, 001857, 002063) — every one a build-a-service task
+35	whose external verifier probes over HTTP with Python `requests`, all failing
+36	with the identical import-collection error. This is a harness deficiency, not
+37	a model capability gap: the agent can't see the verifier's test files during
+38	its phase (sandbox topology, per tb2-playbook), so it has no way to know
+39	`requests` is needed; and it tests its own service with curl/`/dev/tcp`, so it
+40	has no local signal to install it. Critically, task_000106 proves outbound pip
+41	works here (`pip3 install numpy`/`scipy` both succeed from PyPI) — so the fix
+42	is available, the agent just lacks the knowledge to apply it.
+43	
+44	### Changes
+45	
+46	- `processors/verifier_http_dep_reminder.py` — new `VerifierHttpDepReminder`
+47	  `MultiHookProcessor`. On the first step, if the task description matches BOTH
+48	  an external-verifier signal AND a build-a-service signal, appends one `user`
+49	  reminder to ensure the system Python has the standard HTTP client library
+50	  before finishing (agent runs the install itself via Bash). Fires at most once
+51	  per task; no task-specific literals.
+52	- `config.yaml` — register `VerifierHttpDepReminder` (dep_module=requests) in
+53	  the pipeline at `_order=7`, just after `TaskTimeReminderProcessor`.
+54	- `system_prompt.txt` — copied byte-for-byte from R0 (SiblingSystemPromptBuilder
+55	  resolves it relative to the active config dir).
+56	
+57	### Evidence
+58	
+59	- task_000028_7fe033ac `final_pytest`: `ModuleNotFoundError: No module named
+60	  'requests'` / `Interrupted: 1 error during collection`; agent's own probe
+61	  earlier returned `HTTP/1.1 200 OK ... 150` → service correct, verifier
+62	  couldn't load. Task text: "An automated verifier will make HTTP requests to
+63	  http://127.0.0.1:8080/".
+64	- task_000106_23215092 `final_pytest`: same `import requests` collection error;
+65	  trajectory shows `Successfully installed numpy-2.2.6` and scipy download →
+66	  pip/PyPI reachable.
+67	- task_000809 / task_000958 / task_001857 / task_002063: all HTTP-service /
+68	  microservice tasks; all `final_pytest` tails carry the identical
+69	  `No module named 'requests'` collection error.
+70	
+71	### Uncertainty
+72	
+73	The weak 9B model might ignore the reminder or install into a virtualenv the
+74	verifier won't use (the reminder explicitly warns against this, but adherence
+75	isn't guaranteed). Some of the 6 tasks may also have secondary functional
+76	defects beyond the missing dep — those won't flip. If zero of the 6 flip,
+77	the reminder isn't landing (model ignores it or installs wrong) → revert and
+78	consider a deterministic force-install processor instead. If any previously
+79	passing service task regresses, the reminder is derailing good runs → revert.

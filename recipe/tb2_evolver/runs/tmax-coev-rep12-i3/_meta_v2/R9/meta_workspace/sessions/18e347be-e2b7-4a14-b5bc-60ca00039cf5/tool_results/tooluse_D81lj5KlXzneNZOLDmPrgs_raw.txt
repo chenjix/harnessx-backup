@@ -1,0 +1,495 @@
+1	# Evolve journal — tmax-coev-rep12-i3
+2	
+3	## Round 1 — fix compaction threshold for 64k model
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-23T10:00:00Z
+8	hypothesis_id: h_compaction_64k_v1
+9	levers: [configuration]
+10	predicted_affected: [task_001044_45c70cf1, task_000444_250abeda]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=11/50; +2/-2 gained=task_000628_dcc7eb30,task_000903_7604c91e lost=task_000437_8450eef7,task_001267_0acfd3a0; score 0.2200 >= incumbent(mean) 0.2200 - tol 0.0400
+14	expected_global_gain: "Eliminates 2 exit_reason=error crashes (structural 0-rewards) and prevents context-overflow 400s on the long-context cluster (task_001028 climbing toward the ceiling)"
+15	regression_risk: "Near-zero: all 11 passing tasks peak <13k rough tokens, far below the new 40000 threshold, so compaction never fires for them — identical behaviour"
+16	cost_shift: "Flat to slightly down: compaction shrinks the re-sent prompt on long tasks; no effect on short tasks"
+17	rollback_trigger: "If pass_rate drops vs R0, or a previously-passing task regresses to exit_reason!=done with a compaction boundary in its trace, revert to token_threshold=140000"
+18	-->
+19	
+20	### Why
+21	
+22	Baseline R0 = 11/50 (22%). Two tasks (task_001044_45c70cf1,
+23	task_000444_250abeda) came back with `status=agent_error` /
+24	`exit_reason=error`. Their episode traces both end with a hard
+25	`BadRequestError: 400 — This model's maximum context length is 65536 tokens.
+26	However, you requested 4096 output tokens and your prompt contains at least
+27	61441 input tokens`. The eval model (qwen35-9b-tmax-coev-r12) has a real 65536
+28	context window; harness_runner reserves max_tokens=4096 for output, leaving a
+29	~61440-token input ceiling. The pipeline's `CompactionProcessor.token_threshold`
+30	was 140000 — calibrated for a 128k+ model and therefore unreachable here, so
+31	compaction never fired and long histories overflowed the window into an
+32	API-level 400 that crashes the whole task. This is a pure harness
+33	mis-calibration, not a model capability gap.
+34	
+35	### Changes
+36	
+37	- `config.yaml` — `CompactionProcessor.token_threshold` 140000 → 40000.
+38	  `rough_token_count` (cl100k) under-counts the real request by ~9-10k
+39	  (system prompt + Bash tool schema + Qwen/cl100k tokenizer skew), so firing
+40	  at 40000 rough tokens (~50k real) keeps every request safely below the
+41	  61440 ceiling with margin for the 6-message retention window.
+42	- `system_prompt.txt` — copied byte-for-byte from R0 (sibling required by
+43	  `SiblingSystemPromptBuilder`; unchanged).
+44	
+45	### Evidence
+46	
+47	- `task_001044_45c70cf1` trace `task_end` step 43: `exit_reason=error`,
+48	  error = "maximum context length is 65536 tokens ... prompt contains at least
+49	  61441 input tokens". step_start rough `token_count` climbed
+50	  40435 → 43408 → 46381 → 49354 with the compaction threshold at 140000 never
+51	  approached; the next request overflowed.
+52	- `task_000444_250abeda` trace `task_end`: identical
+53	  "maximum context length is 65536 tokens" 400 error; history bloated by a
+54	  degenerate verbatim-repeat loop (assistant repeated the same
+55	  "Let me try a different approach…" paragraph across multiple steps).
+56	- Passing cluster peaked far below 40000 rough tokens (max ~13k), so the new
+57	  threshold leaves them untouched.
+58	
+59	### Uncertainty
+60	
+61	Both target tasks are hard reverse-engineering problems (disassembly / oracle
+62	smoothing) and may still fail on correctness after the crash is removed — the
+63	win here is converting an infrastructure-guaranteed 0 into a fair run, plus
+64	protecting the long-context cluster from the same overflow. If pass_rate does
+65	not hold or a passing task regresses with a compaction boundary in its trace,
+66	revert to 140000.
+67	
+68	## Round 2 — break identical-command loops
+69	
+70	<!-- journal:frontmatter
+71	round: 2
+72	timestamp: 2026-08-23T12:00:00Z
+73	hypothesis_id: h_repeat_command_breaker_v1
+74	levers: [control]
+75	predicted_affected: [task_000796_828a72cf, task_000325_3fbc5745, task_000506_c13429e7, task_000677_1de47eed, task_000730_265f23f6, task_000910_16cc0daf, task_002033_f03df97e, task_001267_0acfd3a0, task_000437_8450eef7, task_000713_b0778d60]
+76	cited_candidates: [C-002]
+77	gating_outcome: accepted
+78	gating_attribution: score=11/50; +3/-3 gained=task_000325_3fbc5745,task_000444_250abeda,task_001214_f44c0aa2 lost=task_000628_dcc7eb30,task_000710_fa628bd4,task_000903_7604c91e; score 0.2200 >= incumbent(mean) 0.2200 - tol 0.0400
+79	expected_global_gain: "Recovers ~25 wasted steps on the 11-task identical-command loop cluster (6 domains) that all die at budget_exceeded=80 steps, giving the model a fair attempt instead of a guaranteed 0"
+80	regression_risk: "Near-zero: processor only appends one redirect user message after 3 byte-identical consecutive Bash calls; never blocks/kills execution, so a slow legitimate retry is nudged at worst. Passing tasks essentially never repeat one command 3x"
+81	cost_shift: "Net down: cuts ~25 redundant model+tool round-trips per looping task; the injected message is tiny"
+82	rollback_trigger: "If pass_rate drops vs R1, or a previously-passing task regresses with a repeat-breaker nudge in its trace disrupting a legitimate retry, revert to R1 config"
+83	-->
+84	
+85	### Why
+86	
+87	R1's compaction fix removed the context-overflow crashes; the dominant
+88	remaining failure mode is now a step-budget loop. 16/39 failures exit
+89	`budget_exceeded` at exactly 80 steps. Command-level analysis of the assistant
+90	`tool_calls` shows the agent issuing the **byte-identical Bash command 20–29
+91	times in a row**, receiving the same (usually empty/failing) result each time,
+92	until the budget is exhausted. `LengthTruncationRecoveryProcessor` cannot catch
+93	this because these turns emit a well-formed tool call (`finish_reason != length`).
+94	The agent often even narrates "I keep repeating the same command" yet cannot
+95	self-break — a mechanical loop-breaker is the reliable fix. The only tool is
+96	`Bash`, so an Action lever is impossible; a prompt rule (Instruction) is what the
+97	model is already failing to self-enforce.
+98	
+99	### Changes
+100	
+101	- `processors/repeat_command_breaker.py` — new `RepeatCommandBreakerProcessor`
+102	  (`_order=6`, right after length_recovery). Tracks the normalized command of
+103	  single-Bash-call turns; after `repeat_threshold=3` consecutive identical
+104	  commands it injects a firm redirect user message (escalating wording on
+105	  persistence), then re-arms. Never blocks execution.
+106	- `config.yaml` — register the processor via absolute `file://` path with
+107	  `repeat_threshold: 3`. All other R1 processors/knobs unchanged.
+108	- `system_prompt.txt` — copied byte-for-byte from R1 (SiblingSystemPromptBuilder
+109	  sibling; unchanged).
+110	
+111	### Evidence
+112	
+113	- `task_000796_828a72cf` steps 4–32: byte-identical command
+114	  `# The video is only 13KB ... od -c /app/traffic_monitor.mp4 ...` emitted **29
+115	  times consecutively**; every tool result `(exit 0, no output captured)`; exits
+116	  `budget_exceeded`.
+117	- `task_000730_265f23f6` (dup=27), `task_000506_c13429e7` (dup=26),
+118	  `task_000677_1de47eed` (dup=26), `task_002033_f03df97e` (dup=26),
+119	  `task_001267_0acfd3a0` (dup=21): same shape, one command repeated ~all
+120	  remaining steps, all `budget_exceeded`.
+121	- `task_000713_b0778d60`: 26 consecutive identical commands then exits `done`
+122	  with reward 0 — the loop displaced the real work.
+123	- Passing looper `task_001537_fbfffb79`: ran an identical `pip3 install
+124	  pocketsphinx` 4x (all returned the same FileNotFoundError), then moved on and
+125	  passed on unrelated later steps — a 3x redirect would have helped, not hurt.
+126	
+127	### Uncertainty
+128	
+129	The redirect gives the model a fair chance but does not itself solve the task;
+130	some of these are genuinely hard (video-frame OCR, disassembly). The win is
+131	converting guaranteed budget-loss into a fair attempt for a large cluster while
+132	cutting cost. If R2 pass_rate does not hold or a passing task regresses with a
+133	repeat-breaker nudge disrupting a legitimate retry, revert to R1.
+134	
+135	## Round 3 — keep background services alive
+136	
+137	<!-- journal:frontmatter
+138	round: 3
+139	timestamp: 2026-08-23T13:00:00Z
+140	hypothesis_id: h_service_persistence_v1
+141	levers: [instruction]
+142	predicted_affected: [task_000796_828a72cf, task_000097_d9d1d187, task_000910_16cc0daf, task_002146_0bc2994c, task_001201_1340f4e2, task_000348_31fb8c8a]
+143	cited_candidates: [C-003]
+144	gating_outcome: accepted
+145	gating_attribution: score=14/50; +5/-2 gained=task_000097_d9d1d187,task_000437_8450eef7,task_000628_dcc7eb30,task_000903_7604c91e lost=task_000325_3fbc5745,task_001214_f44c0aa2; score 0.2800 >= incumbent(mean) 0.2200 - tol 0.0400
+146	expected_global_gain: "Closes a structural 'service killed between Bash calls' failure across the HTTP/socket-service cluster (6 tasks, 5 domains); flips tasks whose only blocker was a dead listener at verify time and gives the rest a fair correctness attempt"
+147	regression_risk: "Near-zero: additive strategy text only; no tool/processor behaviour change. Tasks that never start a service ignore the rule; the detach-and-re-verify nudge cannot harm a non-service task"
+148	cost_shift: "Flat-to-down: a surviving server removes the repeated kill/rebuild/restart loops (task_000796 burned ~13 steps fighting SIGTERM); added prompt text is a few hundred tokens once per task"
+149	rollback_trigger: "If R3 pass_rate drops vs R2, or the server-cluster tasks still show exit-143/Connection-refused with the agent using a plain background job despite the new rule, revert system_prompt.txt to the R2 5-line sidecar"
+150	-->
+151	
+152	### Why
+153	
+154	R1 removed context-overflow crashes; R2 broke identical-command loops. No
+155	exit_reason=error remain and several R2 loopers now exit done/short. The
+156	dominant harness-caused remaining failure is a service-persistence bug on
+157	HTTP/socket tasks. HarborSandbox.exec runs every command inside a setsid'd
+158	bash process group, and kill_running() sends SIGTERM to that command's process
+159	group between calls / on timeout. A server the agent starts as a plain
+160	background job inherits the exec'd bash's PGID, so it is SIGTERM'd (exit 143,
+161	defunct zombies) and is no longer listening when the external verifier probes
+162	it (Connection refused). The agent has the capability to fix this (setsid is
+163	in the image) but lacks the knowledge that a service must be detached into its
+164	OWN new session to survive — a pure Instruction gap, not a model capability
+165	gap.
+166	
+167	### Changes
+168	
+169	- system_prompt.txt (R3 sidecar beside config.yaml, read by
+170	  SiblingSystemPromptBuilder) — extended the R2 5-line prompt with a general
+171	  strategy: keep required long-running services alive by launching them
+172	  detached in their own new session (setsid ... < /dev/null &), and re-confirm
+173	  the listener is still up before finishing; plus an external-checker-style
+174	  verify-before-exit reminder. Strategy-only; no task-specific literals, ports,
+175	  paths, or process names.
+176	- config.yaml — copied from R2 byte-for-byte except the header comment, updated
+177	  to document the R3 sidecar change. Processor pipeline, knobs, and file://
+178	  references unchanged.
+179	
+180	### Evidence
+181	
+182	- task_000796_828a72cf messages steps 52-78: agent repeatedly rebuilds and
+183	  launches the server as a background job; every launch turn's tool result
+184	  ends (exit 143) (SIGTERM) and ps aux lists [server] <defunct> zombies; agent
+185	  narrates "The server was killed again." Final launch (step 77) also
+186	  (exit 143) -> verifier: Connection refused on 127.0.0.1:8443.
+187	- task_000097_d9d1d187 verifier output_tail: "Connection refused. Is the
+188	  service listening on 127.0.0.1:9090?" — server not alive at verify.
+189	- task_000348_31fb8c8a step-45: server WAS reachable (returned JSON) — confirms
+190	  the mechanism (a surviving server yields a real HTTP response); its fail was
+191	  a wrong graph-shortest-path result (partial capability gap), so it is
+192	  mechanism-evidence, not a guaranteed flip.
+193	- task_000910_16cc0daf, task_002146_0bc2994c: budget_exceeded service tasks;
+194	  also expose a secondary gap (verifier ModuleNotFoundError requests because
+195	  the exit-only dep guard never fires on budget_exceeded) — logged as deferred
+196	  C-004, not shipped this round to avoid replay-gate risk.
+197	
+198	### Uncertainty
+199	
+200	The rule is necessary-not-always-sufficient: some server tasks also have a
+201	correctness bug (task_000348). The guaranteed win is converting "listener dead
+202	at verify" 0s into fair scored runs and cutting the kill/rebuild loops. If the
+203	cluster still shows exit-143 / Connection-refused with a plain background job
+204	after R3, revert the sidecar to R2.
+205	
+206	Skipped (model capability gaps, no harness fix): task_000710_fa628bd4
+207	(hash/oracle equivalence), task_000713_b0778d60 (bio primer reverse-engineering),
+208	task_001674_125bb961 (diff-corpus classification), task_001201_1340f4e2
+209	(RPN parser correctness) — require domain reasoning, not a harness mechanism.
+210	
+211	## Round 4 — budget-aware verifier dep guard
+212	
+213	<!-- journal:frontmatter
+214	round: 4
+215	timestamp: 2026-08-23T12:57:08Z
+216	hypothesis_id: h_verifier_dep_guard_budget_v1
+217	levers: [action]
+218	predicted_affected: [task_000796, task_000910, task_002108]
+219	cited_candidates: [C-005]
+220	gating_outcome: accepted
+221	gating_attribution: score=13/50; +1/-2 gained=task_001267_0acfd3a0 lost=task_000436_cc1c950c,task_000628_dcc7eb30; score 0.2600 >= incumbent(mean) 0.2800 - tol 0.0400
+222	expected_global_gain: "Removes a deterministic structural-zero floor for budget-bound tasks whose hidden verifier imports requests/pyyaml but never reach exit intent (the exit-only R0 guard cannot fire); complements it."
+223	regression_risk: "One extra short Bash step near budget on tasks that approach the ceiling without exit intent; no-op when deps already importable. Passing exit-intent tasks unchanged (R0 guard at order 95 fires first; this one is idempotent)."
+224	cost_shift: "Negligible - at most one idempotent import-check Bash call on runs that near budget without a clean end_turn; pure no-op otherwise."
+225	rollback_trigger: "If R5 shows any previously-passing task regressing to budget_exceeded or a new error attributable to the injected Bash step, revert this processor (keep the exit-intent guard)."
+226	-->
+227	
+228	### Why
+229	
+230	The R0 `VerifierDepGuardProcessor` installs verifier test-deps (`requests`,
+231	`pyyaml`) only on exit intent - the model ending its turn with no tool call.
+232	But a cluster of tasks (task_000796, task_000910, task_002108) exhaust the
+233	80-step budget mid-work (`exit_reason=budget_exceeded`) and NEVER reach exit
+234	intent, so the guard never fires. Their hidden `test_final_state.py` does
+235	`import requests`; the image lacks it, so pytest aborts at COLLECTION time with
+236	`ModuleNotFoundError` -> a deterministic structural 0 no matter what the final
+237	container state is. R3 logged this as deferred C-004; this round ships the fix
+238	as C-005 (distinct hypothesis id, distinct implementation shape - budget-aware
+239	trigger - not a re-proposal of a reverted bet).
+240	
+241	### Changes
+242	
+243	- `processors/verifier_dep_guard_budget.py` - new
+244	  `BudgetAwareVerifierDepGuardProcessor` (order 96, own singleton group). Fires
+245	  the same idempotent dep-ensure Bash call on the first no-tool-call turn once
+246	  `step_id >= max_steps - budget_margin` (margin 6), OR on exit intent -
+247	  whichever first. `max_steps` read from `StepStartEvent.task`; fallback 80.
+248	  At-most-once per task; only on turns with no model tool call; guarded per-module
+249	  import check -> pure no-op when deps already present.
+250	- `config.yaml` - register the new processor immediately after the R0
+251	  exit-intent guard; kwargs budget_margin 6, fallback_max_steps 80.
+252	
+253	### Evidence
+254	
+255	- task_000796 / task_000910 / task_002108 `result.json`:
+256	  `exit_reason=budget_exceeded`, reward 0; all 80 steps consumed.
+257	- `messages.json` for all three: no clean exit-intent turn appears (the run
+258	  ends on budget), confirming the R0 exit-only guard's trigger is never met;
+259	  narration-only no-tool turns recur near the ceiling (task_002108: 12), which
+260	  the budget-approach trigger latches onto to fire before step 80.
+261	- Verifier `test_final_state.py` opens with `import requests`; container lacks
+262	  it -> collection-time `ModuleNotFoundError` is deterministic.
+263	
+264	### Uncertainty
+265	
+266	This removes a structural floor; it does not guarantee content-correctness -
+267	these tasks may still fail on wrong values / dead services (a capability gap).
+268	The guaranteed effect is converting collection-error 0s into fair scored runs.
+269	If R5 shows no flips AND no regressions, the change is cost-neutral insurance
+270	and can stay; if it causes any T->F regression, revert per the rollback trigger.
+271	
+272	## Round 5 — hard-block identical-command loops
+273	
+274	<!-- journal:frontmatter
+275	round: 5
+276	timestamp: 2026-08-23T14:05:00Z
+277	hypothesis_id: h_repeat_command_blocker_v1
+278	levers: [control]
+279	predicted_affected: [task_001214_f44c0aa2, task_000908_170e5e4e, task_000506_c13429e7, task_001044_45c70cf1]
+280	cited_candidates: [C-006]
+281	gating_outcome: reverted
+282	gating_attribution: score=11/50; +1/-3 gained=task_000628_dcc7eb30 lost=task_000097_d9d1d187,task_000472_6c2ef24d,task_001267_0acfd3a0; score 0.2200 < incumbent(mean) 0.2800 - tol 0.0400 -> revert to R3
+283	expected_global_gain: "Frees ~40-72 wasted steps on a 4-task byte-identical-command loop cluster (2 budget_exceeded, 2 done-but-wrong-after-looping) so the model gets a real attempt; generalizes to any future task that falls into a command loop"
+284	regression_risk: "Near-zero: no currently-passing task reaches 4 consecutive non-empty identical commands (measured); empty self-verify marker loops (task_000903 x21, task_001537 x26 both PASS) are excluded by normalization; a different next command re-arms the guard to silence"
+285	cost_shift: "Net down: each block removes one real Bash round-trip and truncates ~20+ wasted model turns per looping task; synthetic_result is a few hundred tokens"
+286	rollback_trigger: "If R6 shows any previously-passing task regressing T->F with a BLOCKED BY HARNESS marker disrupting legitimate iteration, revert to R4 config (drop this processor; do NOT restore the dead R2 breaker)"
+287	-->
+288	
+289	### Why
+290	
+291	R4 = 13/50. No exit_reason=error remain (R1 fix holds). The dominant remaining
+292	failure family is budget_exceeded at 80 steps. Root cause found: the R2
+293	RepeatCommandBreakerProcessor is a SILENT NO-OP. It injected a redirect user
+294	message in on_before_model, but the run loop rebuilds model input from
+295	state.raw_messages each step and never writes on_before_model edits back to
+296	state, so the nudge evaporated the next turn. Grep of "loop detected by the
+297	harness" across all 50 R4 message logs returned 0 matches. Looping tasks still
+298	burned the whole budget re-issuing one byte-identical command (pycdc x24,
+299	cat-heredoc x28, printf x9).
+300	
+301	### Changes
+302	
+303	- processors/repeat_command_blocker.py — new RepeatCommandBlockerProcessor
+304	  (order 6). Tracks consecutive byte-identical non-empty single-Bash commands
+305	  in on_after_model; once the same command reaches block_threshold (four), it
+306	  intercepts the call in on_before_tool with approved=False plus a
+307	  synthetic_result. The run loop then skips the useless execution AND writes the
+308	  corrective text into state.raw_messages as the tool result (runloop.py
+309	  synthetic branch, lines 600-629), so the block PERSISTS in context and
+310	  compounds. Re-arms on a different command; no task ids/paths/commands
+311	  hard-coded.
+312	- config.yaml — replaced the dead R2 RepeatCommandBreakerProcessor registration
+313	  with the new blocker. All other processors/knobs unchanged.
+314	- system_prompt.txt — copied byte-for-byte from R4 (SiblingSystemPromptBuilder
+315	  sibling; unchanged).
+316	
+317	### Evidence
+318	
+319	- task_001214_f44c0aa2 messages: pycdc decompile of auth.pyc issued 24
+320	  consecutive identical times, every result the same usage error; exits
+321	  budget_exceeded.
+322	- task_000908_170e5e4e messages: a cat-heredoc rewrite of graph_analytics.py
+323	  (identical content) 28 consecutive times, every result "(exit 0, no output
+324	  captured)"; loop reaches four repeats at step 8 of 80 (~72 steps wasted);
+325	  budget_exceeded.
+326	- task_000506_c13429e7 (9 consecutive), task_001044_45c70cf1 (4 consecutive):
+327	  same shape.
+328	- Retroactive regression check: max consecutive non-empty identical run per
+329	  task; only these 4 (all failures) reach four-plus; every PASSING task is at
+330	  most three. The two passing high-repeat tasks (task_000903 x21, task_001537
+331	  x26) repeat the EMPTY command (self-verify markers), excluded by
+332	  normalization. So the block cannot fire on a currently-passing trajectory.
+333	- Verified via runloop.py that approved=False plus synthetic_result is the
+334	  supported interception path and that the synthetic result is written to
+335	  persisted history via add_raw_message (unlike the R2 before_model nudge).
+336	
+337	### Uncertainty
+338	
+339	Blocking the loop is necessary-not-always-sufficient: the freed steps may still
+340	end in a correctness gap. The guaranteed win is converting budget-burned-in-a-loop
+341	into a fair scored attempt at lower cost. Any T-to-F regression with a BLOCKED
+342	marker triggers revert to R4.
+343	
+344	
+345	## Round 7 - collapse max_tokens truncation loop
+346	
+347	<!-- journal:frontmatter
+348	round: 7
+349	timestamp: 2026-04-27T00:00:00Z
+350	hypothesis_id: h_truncation_loop_compactor_v1
+351	levers: [control]
+352	predicted_affected: [task_000998_4d9c7852, task_001214_f44c0aa2, task_001028_5bc8bc70, task_000908_170e5e4e, task_001267_0acfd3a0, task_000710_fa628bd4, task_000032_3fb303f6, task_000796_828a72cf, task_000437_8450eef7]
+353	cited_candidates: [C-007]
+354	gating_outcome: accepted
+355	gating_attribution: score=13/50; +3/-1 gained=task_000710_fa628bd4,task_001267_0acfd3a0,task_001537_fbfffb79 lost=task_000097_d9d1d187; score 0.2600 >= incumbent(mean) 0.2600 - tol 0.0400
+356	expected_global_gain: "Recovers dozens of wasted steps across a 9-task truncation-loop cluster (5 domains) that die at budget_exceeded; generalizes to any future task falling into the max_tokens loop (structural trigger, no literals)."
+357	regression_risk: "Fires only on 3+ consecutive near-identical truncated (200+ char, no-tool-call) assistant turns - absent from all passing tasks (passive-nudge count 0). Never blocks/drops/fabricates a tool call; preserves the first narration turn. Long passers (task_000097 nudge=1, task_000628 nudge=0) below the min_run=3 trigger."
+358	cost_shift: "Net down - collapsing the repetition wall shrinks assembled prompts and shortens loops so tasks stop burning the full 80-step budget."
+359	rollback_trigger: "If R8 shows any previously-passing task regressing T->F with a harness collapse note disrupting legitimate work, or pass_rate drops vs R3 incumbent mean, drop the TruncationLoopCompactor registration and keep the R3 pipeline."
+360	-->
+361	
+362	### Why
+363	
+364	Dominant harness-shaped failure in the r6 draw (11/50): a self-reinforcing
+365	max_tokens verbosity loop. The eval model runs under a hard max_tokens=4096
+366	output cap (set outside config, unchangeable here). On hard tasks it emits
+367	~4096 tokens of prose with NO tool call (finish_reason=length); the run loop
+368	appends a passive "Your previous response was cut off by the token limit.
+369	Please continue" nudge; the model, now staring at a growing wall of its own
+370	near-identical truncated narration, reproduces that wall 8-23x until
+371	budget_exceeded. The pre-existing LengthTruncationRecoveryProcessor fires but
+372	its on_before_model edit is ephemeral (never lands in state.raw_messages), so
+373	the duplicate wall keeps growing and keeps priming the loop.
+374	
+375	### Changes
+376	
+377	- processors/truncation_loop_compactor.py - new MultiHookProcessor
+378	  TruncationLoopCompactor (on_step_start, order 20, after compaction).
+379	  Collapses 3+ consecutive near-identical truncated assistant turns (200+
+380	  chars, no tool_calls) + interleaved passive nudges into one trimmed turn plus
+381	  one "emit ONE short Bash command" directive. Run loop persists step_start
+382	  structural edits, so the wall is durably removed.
+383	- config.yaml - copied R3 incumbent byte-for-byte, appended the new processor
+384	  registration after PostCompactionRefreshProcessor. Also copied R3
+385	  system_prompt.txt sidecar so SiblingSystemPromptBuilder resolves it beside
+386	  the new config.
+387	
+388	### Evidence
+389	
+390	- task_000998_4d9c7852 steps 2-34: assistant content truncated to ~1964
+391	  chars every turn (finish_reason=length), prefix "The user is right - I've
+392	  been stuck in a loop. The files are..." repeated x10, each followed by the
+393	  passive nudge; exit budget_exceeded.
+394	- task_001214_f44c0aa2: prefix "...Let me take a..." x11, passive-nudge count
+395	  21, budget_exceeded.
+396	- task_000908_170e5e4e: prefix "...Let me just w..." x13, passive-nudge count
+397	  18, budget_exceeded.
+398	- All 8 short passing tasks and the 2 long passers have passive-nudge count 0-1
+399	  (below min_run=3), so the trigger is provably absent from the passing set.
+400	
+401	### Uncertainty
+402	
+403	Blocking the loop is necessary-not-always-sufficient: some of these 9 tasks
+404	also carry a content-correctness gap, so freed steps may still end wrong. The
+405	guaranteed win is converting budget-burned-in-a-loop into a fair scored attempt
+406	at lower cost. Distinct from R2 (identical-tool-call breaker, still live) and
+407	the reverted R5 (tool-block) - this touches only truncated narration turns,
+408	never tool calls. Rollback if any passer regresses with the collapse note in
+409	its trace.
+410	
+411	## Round 8 — durably break identical-command loops
+412	
+413	<!-- journal:frontmatter
+414	round: 8
+415	timestamp: 2026-04-27T16:00:00Z
+416	hypothesis_id: h_identical_command_loop_compactor_v1
+417	levers: [control]
+418	predicted_affected: [task_000730_265f23f6, task_001028_5bc8bc70]
+419	cited_candidates: [C-008]
+420	gating_outcome: accepted
+421	gating_attribution: score=13/50; +2/-2 gained=task_000325_3fbc5745,task_000437_8450eef7 lost=task_001267_0acfd3a0,task_001537_fbfffb79; score 0.2600 >= incumbent(mean) 0.2600 - tol 0.0400
+422	expected_global_gain: "Recovers ~20-30 wasted steps each on the identical-Bash-command loop subcluster (task_000730 x31, task_001028 x19) that die at budget_exceeded, converting a guaranteed budget-loss 0 into a fair scored attempt; generalizes to any future task that falls into a byte-identical Bash loop (structural trigger, no literals)."
+423	regression_risk: "Near-zero: fires only at 10-plus consecutive identical non-empty single-Bash commands; the passing set's max identical run is 7 (task_001537, a truncation-interleaved iterative PASS), so the collapse provably cannot fire on any currently-passing R7 trajectory. Never blocks/drops/fabricates a tool call (commands already ran); contract-clean net message reduction ending on one user directive."
+424	cost_shift: "Net down: collapsing the repetition wall shrinks the assembled prompt and the directive breaks the loop early, so looping tasks stop burning the full 80-step budget."
+425	rollback_trigger: "If R9 shows any previously-passing task regressing T->F with a harness collapse note ('your previous N turns issued the SAME command') in its trace disrupting legitimate iteration, or pass_rate drops vs the R7 incumbent mean, drop the IdenticalCommandLoopCompactor registration and keep the R7 pipeline."
+426	-->
+427	
+428	### Why
+429	
+430	R7 = 13/50. No exit_reason=error remain (R1 fix holds). The budget_exceeded
+431	family is still the largest failure bucket. Within it, a subcluster burns the
+432	whole 80-step budget on ONE byte-identical single Bash command repeated turn
+433	after turn, getting the same (empty/failing) result each time. This is distinct
+434	from the finish_reason=length narration loop that the R7 TruncationLoopCompactor
+435	handles (those turns carry NO tool call); here every turn emits a well-formed
+436	Bash tool call. The R2 RepeatCommandBreaker (registered, order 6) is a proven
+437	SILENT NO-OP — its on_before_model redirect never lands in state.raw_messages,
+438	so the nudge evaporates each step and the model never sees it (grep of "loop
+439	detected by the harness" across all 50 R7 traces = 0 hits). The reverted R5
+440	blocker persisted but BLOCKED execution and disrupted legitimate iteration.
+441	
+442	### Changes
+443	
+444	- `processors/identical_command_loop_compactor.py` — new MultiHookProcessor
+445	  IdenticalCommandLoopCompactor (on_step_start, order 21, right after the R7
+446	  TruncationLoopCompactor at 20). Collapses a maximal run of min_run-plus
+447	  consecutive assistant turns whose single Bash tool call is byte-identical
+448	  (with their interleaved tool-result messages) down to the FIRST turn + its
+449	  result, and appends ONE corrective directive user message. Runs at
+450	  on_step_start so the edit changes history_hash and the run loop auto-generates
+451	  a SegmentBoundary that writes the trimmed window durably into
+452	  state.raw_messages/state.messages (runloop.py ~345-368) — the same durable
+453	  path the R7 compactor uses. NEVER blocks/drops/fabricates a tool call.
+454	- `config.yaml` — copied R7 byte-for-byte; registered the new processor after
+455	  TruncationLoopCompactor with min_run=10 (safely above the passing set's max
+456	  identical run of 7). system_prompt.txt copied byte-for-byte from R7.
+457	
+458	### Evidence
+459	
+460	- `_meta_scratch/dupscan.py` over all 50 R7 traces (max consecutive identical
+461	  non-empty single-Bash run): task_000730_265f23f6 = 31, task_001028_5bc8bc70
+462	  = 19 (both budget_exceeded, reward 0); highest PASSING task = task_001537
+463	  = 7 (truncation-interleaved iterative disasm, PASSES); all other passers 3 or below.
+464	- `task_000730_265f23f6`: `tesseract /app/bug_report.png stdout 2>&1` issued
+465	  31 consecutive identical times; exit budget_exceeded.
+466	- `task_001028_5bc8bc70`: `strings /home/user/log_analyzer` issued 19
+467	  consecutive identical times; last assistant even narrates "I've been stuck in
+468	  a loop repeatedly running the same strings command"; exit budget_exceeded.
+469	- No "loop detected by the harness" redirect appears in either trace, proving
+470	  the R2 breaker is inert on exactly the tasks it was meant to fix.
+471	- runloop.py 345-368: on_step_start message mutation triggers auto
+472	  SegmentBoundary which rewrites state.raw_messages/state.messages (durable).
+473	
+474	### Uncertainty
+475	
+476	Breaking the loop is necessary-not-always-sufficient: the freed steps may still
+477	end in a content-correctness gap (both tasks are hard reverse-engineering / OCR
+478	problems). The guaranteed win is converting budget-burned-in-a-loop into a fair
+479	scored attempt at lower cost. Distinct mechanism and distinct hypothesis id from
+480	the reverted R5 blocker (that intercepted on_before_tool with approved=False and
+481	blocked execution at threshold 4; this trims already-produced history without
+482	blocking, at a passing-set-safe threshold 10). If any passer regresses with the
+483	collapse note in its trace, revert per the rollback trigger.
+484	
+485	Skipped this round (model capability / correctness gaps, no harness fix): the
+486	~20 tasks that exit done/no_tool_calls having self-verified as complete (the
+487	CustomSelfVerifyProcessor checklist already fires once) but whose hidden verifier
+488	finds wrong values / missing files (e.g. task_000763 PIN 2778 vs 2394;
+489	task_000567 PC1_Sum 6.95 vs 7.77). Embedding the correct answers would be
+490	task-specific injection, not a harness mechanism. The verifier-requests
+491	ImportError floor (task_000796/task_000910/task_002108, budget_exceeded) was
+492	addressed by R4's accepted dep guard but dropped in the R5-to-R3 revert; not
+493	re-added this round because the dep guard alone did not flip them in R4 (the
+494	services are also functionally wrong), so it is pure insurance with no expected
+495	flip — deferred to keep this round's attribution clean.

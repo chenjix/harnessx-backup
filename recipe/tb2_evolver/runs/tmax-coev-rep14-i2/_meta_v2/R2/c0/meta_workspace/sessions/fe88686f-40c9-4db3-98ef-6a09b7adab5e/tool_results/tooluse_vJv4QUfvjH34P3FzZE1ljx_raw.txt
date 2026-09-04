@@ -1,0 +1,88 @@
+                else:
+                    raise
+
+        choice = response.choices[0]
+        msg = choice.message
+        content = msg.content or ""
+        finish_reason = choice.finish_reason or "stop"
+
+        # Capture reasoning content from o-series models.
+        # OpenAI exposes this via message.reasoning (Responses API) or
+        # message.reasoning_content (some SDK versions). We check both.
+        thinking = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None) or ""
+
+        tool_calls = []
+        if msg.tool_calls:
+            tool_calls = parse_tool_calls(msg.tool_calls)
+            finish_reason = "tool_use"
+
+        # Some models (e.g. Qwen3 thinking mode) return finish_reason="tool_calls"
+        # but no actual tool_calls in the message.  Normalize to "stop" so
+        # downstream processors (e.g. SelfVerifyProcessor) treat it as a done turn.
+        if not tool_calls and finish_reason == "tool_calls":
+            finish_reason = "stop"
+
+        usage = Usage(
+            input_tokens=response.usage.prompt_tokens if response.usage else 0,
+=== streaming path 372-430 ===
+        finish_reason = "stop"
+        input_tokens = 0
+        output_tokens = 0
+        # tool_calls accumulator: index -> {id, name, arguments_parts}
+        tc_accum: dict[int, dict] = {}
+
+        async for chunk in stream:
+            if chunk.usage:
+                input_tokens = chunk.usage.prompt_tokens or 0
+                output_tokens = chunk.usage.completion_tokens or 0
+
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
+
+            if delta.content:
+                content_parts.append(delta.content)
+
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tc_accum:
+                        tc_accum[idx] = {"id": "", "name": "", "arguments_parts": []}
+                    if tc_delta.id:
+                        tc_accum[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tc_accum[idx]["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tc_accum[idx]["arguments_parts"].append(tc_delta.function.arguments)
+
+        full_content = "".join(content_parts)
+
+        # Strip <think>...</think> blocks (QwQ-32B reasoning) → move to thinking field
+        thinking = ""
+        think_match = _re.search(r"<think>(.*?)</think>", full_content, _re.DOTALL)
+        if think_match:
+            thinking = think_match.group(1).strip()
+            full_content = _re.sub(r"<think>.*?</think>", "", full_content, flags=_re.DOTALL).strip()
+
+        # Build tool calls from accumulated deltas
+        from ..core.events import ToolCall
+
+        tool_calls = []
+        for idx in sorted(tc_accum):
+            tc = tc_accum[idx]
+            args_str = "".join(tc["arguments_parts"])
+            try:
+                args = _json.loads(args_str) if args_str else {}
+            except _json.JSONDecodeError:
+                args = {"raw": args_str}
+            tool_calls.append(ToolCall(id=tc["id"], name=tc["name"], input=args))
+
+        if tool_calls:
+            finish_reason = "tool_use"
+
+        # Rough token estimate when API doesn't report usage
+        if output_tokens == 0 and (full_content or thinking):
+            output_tokens = max(1, len(full_content + thinking) // 4)

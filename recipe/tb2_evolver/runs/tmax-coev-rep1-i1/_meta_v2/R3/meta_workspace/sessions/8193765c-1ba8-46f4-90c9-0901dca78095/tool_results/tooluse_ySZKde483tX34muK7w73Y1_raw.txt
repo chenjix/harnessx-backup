@@ -1,0 +1,192 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""LengthTruncationRecoveryProcessor (v2 — finish_reason-agnostic trigger).
+4	
+5	Closes a systemic failure mode observed on small-model TB2 runs: the model
+6	enters a *degenerate repetition loop* — it keeps emitting the same narration
+7	paragraph over and over inside the assistant ``content`` field with no tool
+8	call, until the response hits the provider ``max_tokens`` limit. The run loop
+9	then appends a passive "Your previous response was cut off by the token limit.
+10	Please continue from where you left off." nudge, which merely re-primes the
+11	same runaway generation. The cycle repeats, burning steps and wall-clock and
+12	eventually crashing the task (``exit_reason=error``) or grinding to the step
+13	cap with reward 0.
+14	
+15	The v1 processor gated purely on ``finish_reason == "length"``. Trajectory
+16	evidence from later rounds showed the vLLM/OpenAI-compatible backend used by
+17	this eval records ``finish_reason=None`` even on responses that clearly hit the
+18	output token cap (assistant ``content`` fields of 120K-320K characters with no
+19	tool call). Because the gate never matched, the v1 processor was a silent
+20	no-op on exactly the runaway loops it was written to break — every long-running
+21	failure in the round exhibited 1-44 oversized no-tool-call assistant turns with
+22	``finish_reason=None``, while *every* passing task kept its largest assistant
+23	turn under ~12K characters. That bimodal separation (passing max ~12K vs runaway
+24	min ~160K) is what this v2 keys on.
+25	
+26	v2 makes the trigger robust: a turn is treated as a runaway truncation when it
+27	carries **no tool call** and *either* ``finish_reason == "length"`` *or* its
+28	``content`` exceeds a large character threshold (``content_char_threshold``).
+29	The character threshold sits far above any legitimate assistant turn seen in
+30	passing trajectories, so normal long-but-productive turns are never affected.
+31	
+32	Two mechanical hooks, unchanged in spirit from v1:
+33	
+34	* ``on_after_model`` — when a runaway truncation is detected, the
+35	  (potentially hundreds-of-KB) runaway ``content`` is collapsed to a short
+36	  head+tail excerpt so it does not pollute the next turn's context and re-seed
+37	  the loop. A per-task counter of *consecutive* truncations is maintained, and
+38	  a pending corrective nudge is armed.
+39	
+40	* ``on_before_model`` — if a corrective nudge is armed, exactly one ``user``
+41	  message is appended that redirects the model away from open-ended narration
+42	  and toward a single concrete Bash action (escalating on repeats). This
+43	  replaces the passive "continue" behaviour with an actionable instruction that
+44	  breaks the loop.
+45	
+46	Any response that ends normally (a tool call, or a non-``length`` finish under
+47	the character threshold) resets the counter, so a one-off long turn is
+48	tolerated without penalty.
+49	
+50	The processor is benchmark-agnostic in mechanism: it keys purely on
+51	``finish_reason`` / ``tool_calls`` / ``content`` length, never on task content.
+52	"""
+53	
+54	from __future__ import annotations
+55	
+56	import dataclasses
+57	
+58	from harnessx.core.events import (
+59	    BeforeModelEvent,
+60	    Message,
+61	    ModelResponseEvent,
+62	    TaskEndEvent,
+63	    TaskStartEvent,
+64	)
+65	from harnessx.core.processor import MultiHookProcessor
+66	
+67	
+68	_HEAD_CHARS = 1200
+69	_TAIL_CHARS = 600
+70	# A legitimate assistant turn in the passing cluster never exceeded ~12K chars;
+71	# every runaway max_tokens blob was >=160K chars. 40K sits comfortably in the
+72	# empty band between the two, so this trigger cannot fire on a normal turn.
+73	_CONTENT_CHAR_THRESHOLD = 40000
+74	_TRUNC_MARKER = (
+75	    "\n\n[response truncated by harness: the model emitted a very long response "
+76	    "with no tool call (a max_tokens repetition loop); the omitted middle was "
+77	    "discarded to prevent the loop from re-seeding itself]\n\n"
+78	)
+79	
+80	# First occurrence: gentle redirect toward a concrete action.
+81	_NUDGE_FIRST = (
+82	    "Your last turn produced a very long response without running any command. "
+83	    "Do NOT re-explain or continue the previous narration. In your next turn write "
+84	    "at most two sentences of reasoning, then issue exactly ONE concrete Bash "
+85	    "command that makes progress (inspect a file, run a script, or write output). "
+86	    "Keep the response short."
+87	)
+88	
+89	# Repeated occurrence: the model is stuck in a loop — force a decisive action.
+90	_NUDGE_REPEAT = (
+91	    "STOP. You have now produced runaway-length responses multiple turns in a row, "
+92	    "which means you are repeating yourself instead of acting. Abandon the current "
+93	    "line of narration entirely. Do not write any prose analysis. Respond with a "
+94	    "SINGLE short Bash tool call that either (a) writes the required output file(s) "
+95	    "to the path named in the task, or (b) runs a quick command to check the "
+96	    "current state so you can decide the next concrete step. One command only."
+97	)
+98	
+99	
+100	class LengthTruncationRecoveryProcessor(MultiHookProcessor):
+101	    """Break the max_tokens repetition loop and redirect the model to act.
+102	
+103	    Parameters
+104	    ----------
+105	    repeat_threshold:
+106	        Number of *consecutive* truncations at (or above) which the escalated
+107	        nudge is used instead of the gentle one. Default 2 (i.e. the first
+108	        truncation gets the gentle nudge, the second and beyond get the
+109	        forceful one).
+110	    head_chars / tail_chars:
+111	        How much of the runaway content to keep at the start / end when
+112	        collapsing an over-length response.
+113	    content_char_threshold:
+114	        Assistant ``content`` length (chars) at or above which a no-tool-call
+115	        turn is treated as a runaway truncation even when ``finish_reason`` is
+116	        not reported as ``"length"``. Set well above any legitimate turn length.
+117	    """
+118	
+119	    _singleton_group = "tb2_length_recovery"
+120	    # Run early in the after-model chain so downstream processors (e.g. the
+121	    # self-verify keepalive) see the already-collapsed content.
+122	    _order = 5
+123	
+124	    def __init__(
+125	        self,
+126	        repeat_threshold: int = 2,
+127	        head_chars: int = _HEAD_CHARS,
+128	        tail_chars: int = _TAIL_CHARS,
+129	        content_char_threshold: int = _CONTENT_CHAR_THRESHOLD,
+130	    ) -> None:
+131	        self.repeat_threshold = max(1, int(repeat_threshold))
+132	        self.head_chars = max(0, int(head_chars))
+133	        self.tail_chars = max(0, int(tail_chars))
+134	        self.content_char_threshold = max(1, int(content_char_threshold))
+135	        self._consecutive: int = 0
+136	        self._pending_nudge: str = ""
+137	
+138	    async def on_task_start(self, event: TaskStartEvent):
+139	        self._consecutive = 0
+140	        self._pending_nudge = ""
+141	        yield event
+142	
+143	    async def on_after_model(self, event: ModelResponseEvent):
+144	        content = event.content or ""
+145	        no_tool_call = not event.tool_calls
+146	        # Trigger on either the explicit length finish OR an oversized
+147	        # no-tool-call content blob (the backend reports finish_reason=None
+148	        # on truncated responses in this eval, so length alone is unreliable).
+149	        length_truncated = no_tool_call and (
+150	            event.finish_reason == "length"
+151	            or len(content) >= self.content_char_threshold
+152	        )
+153	        if not length_truncated:
+154	            # Any normal / tool-calling turn clears the streak.
+155	            self._consecutive = 0
+156	            self._pending_nudge = ""
+157	            yield event
+158	            return
+159	
+160	        self._consecutive += 1
+161	        self._pending_nudge = (
+162	            _NUDGE_REPEAT
+163	            if self._consecutive >= self.repeat_threshold
+164	            else _NUDGE_FIRST
+165	        )
+166	
+167	        if len(content) > (self.head_chars + self.tail_chars + len(_TRUNC_MARKER)):
+168	            collapsed = (
+169	                content[: self.head_chars]
+170	                + _TRUNC_MARKER
+171	                + (content[-self.tail_chars :] if self.tail_chars else "")
+172	            )
+173	            yield dataclasses.replace(event, content=collapsed)
+174	        else:
+175	            yield event
+176	
+177	    async def on_before_model(self, event: BeforeModelEvent):
+178	        if not self._pending_nudge:
+179	            yield event
+180	            return
+181	        nudge = self._pending_nudge
+182	        self._pending_nudge = ""
+183	        # Append exactly one user message (contract-safe: +1 insertion).
+184	        yield dataclasses.replace(
+185	            event,
+186	            messages=event.messages + (Message(role="user", content=nudge),),
+187	        )
+188	
+189	    async def on_task_end(self, event: TaskEndEvent):
+190	        self._consecutive = 0
+191	        self._pending_nudge = ""
+192	        yield event

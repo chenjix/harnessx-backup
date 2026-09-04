@@ -1,0 +1,72 @@
+181	    if temperature is not None:
+182	        provider_kwargs["temperature"] = float(temperature)
+183	    # Cap per-call generation. Unbounded max_tokens lets a single degenerate
+184	    # repetition loop emit 100k+ tokens and stall an evolve round for hours.
+185	    # Override with TMAX_MAX_TOKENS (set 0 / negative to disable the cap).
+186	    raw_max = (os.environ.get("TMAX_MAX_TOKENS") or "4096").strip()
+187	    try:
+188	        max_tokens = int(raw_max)
+189	    except ValueError:
+190	        max_tokens = 4096
+191	    if max_tokens > 0:
+192	        provider_kwargs["max_tokens"] = max_tokens
+193	    provider = OpenAIProvider(model=model, **provider_kwargs)
+194	    harness = ModelConfig(main=provider).agentic(harness_config_rt)
+195	    task = BaseTask(description=instruction, max_steps=max_steps)
+196	
+197	    try:
+198	        result = await harness.run(task)
+199	    except Exception as e:
+200	        return HarnessAgentResult(
+201	            steps=0,
+202	            finished="error",
+203	            messages=[],
+204	            error=f"{type(e).__name__}: {e}",
+205	            exit_reason="error",
+206	            log=[{"traceback": traceback.format_exc()[-3000:]}],
+207	        )
+208	
+209	    state = getattr(result, "resume_state", None)
+210	    messages = _messages_from_state(state) if state is not None else []
+211	    finished, exit_reason, err = _finished_from_result(result)
+212	    steps = 0
+213	    if state is not None:
+214	        steps = int(getattr(state, "step", 0) or 0)
+215	    if steps <= 0:
+216	        # Fall back to counting assistant turns.
+217	        steps = sum(1 for m in messages if m.get("role") == "assistant")
+218	    return HarnessAgentResult(
+219	        steps=steps,
+220	        finished=finished,
+221	        messages=messages,
+222	        error=err,
+223	        exit_reason=exit_reason,
+224	    )
+225	
+226	
+227	def run_harness_agent(
+228	    *,
+229	    harness_config: Path,
+230	    container: str,
+231	    instruction: str,
+232	    api_base: str,
+233	    model: str,
+234	    max_steps: int = 80,
+235	    temperature: float = 0.0,
+236	    api_key: str = "EMPTY",
+237	    journal_dir: Path | None = None,
+238	    workspace_path: str = "/home/user",
+239	) -> HarnessAgentResult:
+240	    """Sync wrapper for thread-pool workers in ``run_eval``."""
+241	    return asyncio.run(
+242	        _run_async(
+243	            harness_config=harness_config,
+244	            container=container,
+245	            instruction=instruction,
+246	            api_base=api_base,
+247	            model=model,
+248	            max_steps=max_steps,
+249	            temperature=temperature,
+250	            api_key=api_key,
+
+[Showing lines 181–250 of 257 total. Use offset=250 to read the next section.]

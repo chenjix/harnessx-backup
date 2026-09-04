@@ -1,0 +1,68 @@
+1	# Tmax coev-rep19-i3 — evolve journal
+2	
+3	## Round 1 — hard-block repeated-command loops
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_repeated_cmd_hard_block_v1
+9	levers: [control]
+10	predicted_affected: [task_000028_7fe033ac, task_000118_3043e92d, task_000506_c13429e7]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=18/50; +0/-1 lost=task_001898_471c0535; gating disabled (tolerance < 0)
+14	expected_global_gain: "Frees 12-20 wasted steps on the budget_exceeded identical-command-loop cluster (3 R0 failures), giving the agent a real chance to reach the actual fix; generalises to any stuck-repeat class."
+15	regression_risk: "A legitimate idempotent poll intentionally retried 7+ identical times gets blocked; bounded because the synthetic result redirects to a different probe and 7 identical no-progress runs is already pathological. Passing task_001032 maxes at 5 identical repeats — below threshold, unaffected."
+16	cost_shift: "Down — blocked commands are not executed, so loop tasks stop burning tokens/time on redundant turns."
+17	rollback_trigger: "A previously-passing task newly fails and its trajectory shows a [RepeatedCommandBreaker] BLOCKED line on a command that was legitimately being retried; then raise block_threshold or set to 0 (advisory-only)."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000028_7fe033ac` (nginx reverse-proxy → C++ UNIX-socket
+23	backend) died `budget_exceeded` at 80 steps / 544s, reward 0, verifier
+24	502 Bad Gateway. The trajectory tail shows the agent running a
+25	byte-identical Bash command (`pkill -9 server ...; /app/server ...;
+26	python3 -c "import socket..."`) 12 times in a row. Each run SUCCEEDED
+27	(backend returned `HTTP/1.1 200 OK ... 150`) — the real fault was
+28	elsewhere (nginx couldn't reach the socket) — yet the agent kept
+29	re-probing the part that already worked. The existing
+30	`RepeatedCommandBreaker` fired its `_HARD` advisory each turn
+31	("Your very next command MUST be different") and the model ignored it
+32	every single time. The same shape recurs on two more R0 failures:
+33	task_000118 re-issued `ps aux | grep -v grep | grep python` 16 times,
+34	task_000506 re-issued a `wfg_analyzer.py` probe 21 times — both
+35	`budget_exceeded`, reward 0. The harness deficiency: the loop breaker
+36	was advisory-only and had no teeth against a weaker model.
+37	
+38	### Changes
+39	
+40	- `processors/repeated_command_breaker.py` — new copy of the processor
+41	  adding an `on_before_tool` HARD BLOCK: once a byte-identical command
+42	  has already executed `block_threshold` times, the next re-issue is
+43	  short-circuited (`approved=False` + `synthetic_result`), not executed.
+44	  Existing warn(3)/hard(5) advisories retained.
+45	- `config.yaml` — repoint `RepeatedCommandBreaker` `_target_` to the new
+46	  file and add `block_threshold: 7`.
+47	
+48	### Evidence
+49	
+50	- `task_000028_7fe033ac` result.json: `exit_reason=budget_exceeded`,
+51	  steps=80; last ~12 assistant turns byte-identical while tool result
+52	  carried `[RepeatedCommandBreaker] STOP. This identical command has now
+53	  run 6..12 times`.
+54	- `task_000118_3043e92d` `budget_exceeded`; max identical-command repeat
+55	  = 16 (`ps aux | grep -v grep | grep python`).
+56	- `task_000506_c13429e7` `budget_exceeded`; max identical-command repeat
+57	  = 21 (`echo ... | python3 .../wfg_analyzer.py 1 3`).
+58	- Contrast: passing `task_001032_1adaccb9` (reward 1) maxes at 5 identical
+59	  repeats — below block_threshold, so not affected.
+60	
+61	### Uncertainty
+62	
+63	The block frees budget but does not guarantee the agent finds the real
+64	fix (e.g. the nginx socket-path/permission bug on task_000028). If the
+65	cluster stays red at `budget_exceeded` even with steps freed, the gap is
+66	a capability/knowledge one (debugging reverse-proxy integration), not a
+67	loop-mechanism one — logged for a future round. Watch for any BLOCKED
+68	line landing on a legitimately-retried idempotent poll.

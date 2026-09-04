@@ -1,0 +1,63 @@
+151	    def _time_warning(self) -> str | None:
+152	        """Return a time budget warning string if a threshold has been crossed, else None."""
+153	        if not self._timeout or self._start_time is None:
+154	            return None
+155	        elapsed = time.monotonic() - self._start_time
+156	        pct = elapsed / self._timeout
+157	        if pct >= 0.90 and not self._warned_90:
+158	            self._warned_90 = True
+159	            return _TIME_WARNING_90
+160	        if pct >= 0.75 and not self._warned_75:
+161	            self._warned_75 = True
+162	            return _TIME_WARNING_75
+163	        return None
+164	
+165	    def _build_block(self, tree: str | None) -> str:
+166	        lines = [f"\n\n## {self._header}"]
+167	        lines.append(f"- Agent workspace path: `{self._working_dir}`")
+168	        if self._project_dir is not None:
+169	            lines.append(f"- Project path: `{self._project_dir}`")
+170	        if self._timeout:
+171	            lines.append(f"- Task timeout: {self._timeout}s")
+172	        for key, val in self._constraints.items():
+173	            lines.append(f"- {key}: {val}")
+174	        if tree:
+175	            lines.append(f"\n### Workspace\n```\n{tree}\n```")
+176	        if self._inject_integrity_rules:
+177	            lines.append(_INTEGRITY_RULES)
+178	        return "\n".join(lines)
+179	
+180	    async def on_task_start(self, event: TaskStartEvent):
+181	        self._start_time = time.monotonic()
+182	        # Honor an explicitly configured working_dir (e.g. Tmax /home/user) —
+183	        # do not overwrite it with a host-side Workspace.root (/app, etc.).
+184	        if event.workspace is not None and not self._working_dir_explicit:
+185	            try:
+186	                self._working_dir = str(Path(event.workspace.root).expanduser().resolve())
+187	            except Exception:
+188	                self._working_dir = str(event.workspace.root)
+189	        if self._inject_tree:
+190	            self._tree_cache = await self._fetch_tree()
+191	
+192	        tree = self._tree_cache if self._inject_tree else None
+193	        prompt = event.system_prompt
+194	        if self._non_interactive:
+195	            prompt = sp_append(prompt, _NON_INTERACTIVE)
+196	        prompt = sp_append(prompt, self._build_block(tree))
+197	        yield dataclasses.replace(event, system_prompt=prompt)
+198	
+199	    async def on_before_model(self, event: BeforeModelEvent):
+200	        # Inject time-budget warnings as a user message right before the model call.
+201	        time_warn = self._time_warning()
+202	        if time_warn:
+203	            msg = Message(role="user", content=time_warn.strip())
+204	            yield dataclasses.replace(event, messages=event.messages + (msg,))
+205	        else:
+206	            yield event
+207	
+208	    async def on_task_end(self, event: TaskEndEvent):
+209	        self._start_time = None
+210	        self._warned_75 = False
+211	        self._warned_90 = False
+212	        self._tree_cache = None
+213	        yield event

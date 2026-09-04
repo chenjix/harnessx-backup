@@ -1,0 +1,82 @@
+81	    "optimal",
+82	    "optimi",            # optimise / optimize / optimisation
+83	    "minimi",            # minimise / minimize
+84	    "maximi",            # maximise / maximize
+85	    "correlation",
+86	    "covariance",
+87	    "probability",
+88	    "statistic",
+89	    "numeric",
+90	    "numerical",
+91	    "matrix",
+92	    "dynamic programming",
+93	    "recurrence",
+94	    "compute the",
+95	    "calculate the",
+96	)
+97	
+98	# Require *some* evidence the result is written/reported as a numeric value,
+99	# so we don't arm on tasks that merely mention e.g. "matrix" in prose.
+100	_RESULT_TERMS = (
+101	    "round",           # "round to N decimal places"
+102	    "decimal",
+103	    "precision",
+104	    "4 decimal",
+105	    "result.txt",
+106	    "report",
+107	    "output",
+108	    "write",
+109	    "save",
+110	    "value",
+111	    "mean",
+112	    "median",
+113	    "sum",
+114	    "average",
+115	    "score",
+116	    "ci_",
+117	    "lower",
+118	    "upper",
+119	)
+120	
+121	_CROSSCHECK_NUDGE = (
+122	    "\n\n[CrossCheck — computed results] This task commits a computed numeric "
+123	    "result. A syntactically correct program that runs without error can still "
+124	    "produce the WRONG number. Before you finish:\n"
+125	    "1. Re-derive the key value(s) using an INDEPENDENT method or library "
+126	    "(e.g. a short Python/numpy recomputation, or a hand check on a small "
+127	    "slice) and confirm it agrees with your committed output to the required "
+128	    "precision. A second computation that merely reruns the SAME code is not "
+129	    "independent.\n"
+130	    "2. If the two disagree, do NOT exit — probe the usual culprits: off-by-one "
+131	    "/ indexing, data parsing (column order, header, delimiter, float "
+132	    "precision), seed and per-iteration draw order, rounding, and search "
+133	    "boundaries — then fix the discrepancy.\n"
+134	    "3. Sanity-check input record counts and intermediate ranges match the "
+135	    "task's stated sizes before trusting the final number."
+136	)
+137	
+138	
+139	class ComputeCrossCheckReminder(MultiHookProcessor):
+140	    """Append an independent-recompute nudge to the self-verify ACK on
+141	    numeric-computation tasks. Fires at most once per task; mutates only the
+142	    tool-result string (contract-safe)."""
+143	
+144	    _singleton_group = "tb2_compute_crosscheck"
+145	    _order = 95  # after CustomSelfVerifyProcessor (_order=90) so the ACK exists
+146	
+147	    def __init__(self, min_result_terms: int = 1) -> None:
+148	        self.min_result_terms = min_result_terms
+149	        self._armed = False
+150	        self._fired = False
+151	
+152	    @staticmethod
+153	    def _is_compute_task(desc: str, min_result_terms: int) -> bool:
+154	        d = desc.lower()
+155	        has_compute = any(term in d for term in _COMPUTE_TERMS)
+156	        if not has_compute:
+157	            return False
+158	        n_result = sum(1 for term in _RESULT_TERMS if term in d)
+159	        return n_result >= min_result_terms
+160	
+
+[Showing lines 81–160 of 184 total. Use offset=160 to read the next section.]

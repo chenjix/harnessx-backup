@@ -1,0 +1,81 @@
+    4. Same-index ``tool_call_id`` for ``role=tool`` messages.
+    5. ``before_model`` net length change only 0 or +1.
+    6. Non-authorized hooks must have net length change == 0.
+    7. boundary consistency is handled by RunLoop (hash-based); not rechecked here.
+    """
+    # Invariant 1: system constraint (only meaningful when final_msgs non-empty)
+    sys_count = sum(1 for m in final_msgs if m.role == "system") if final_msgs else 0
+    if sys_count > 1:
+        _handle_violation(
+            f"post-hook: {sys_count} system messages in final messages (max 1 allowed)",
+            hook=hook,
+            violation_type="invariant_system_count",
+            step_id=step_id,
+        )
+    if sys_count == 1 and final_msgs and final_msgs[0].role != "system":
+        _handle_violation(
+            "post-hook: system message exists but is not at position 0",
+            hook=hook,
+            violation_type="invariant_system_position",
+            step_id=step_id,
+        )
+
+    # Invariants 2-4: raw/effective track alignment (when raw provided)
+    if raw_msgs is not None:
+        if len(raw_msgs) != len(final_msgs):
+            _handle_violation(
+                f"post-hook: raw_track len={len(raw_msgs)} != effective_track len={len(final_msgs)}",
+                hook=hook,
+                violation_type="invariant_track_length",
+                step_id=step_id,
+            )
+        else:
+            for i, (r, e) in enumerate(zip(raw_msgs, final_msgs)):
+                if r.role != e.role:
+                    _handle_violation(
+                        f"post-hook: role mismatch at index {i}: raw={r.role!r} eff={e.role!r}",
+                        hook=hook,
+                        violation_type="invariant_role_mismatch",
+                        step_id=step_id,
+                    )
+                    break
+                if r.role == "tool" and r.tool_call_id != e.tool_call_id:
+                    _handle_violation(
+                        f"post-hook: tool_call_id mismatch at index {i}: raw={r.tool_call_id!r} eff={e.tool_call_id!r}",
+                        hook=hook,
+                        violation_type="invariant_tool_id_mismatch",
+                        step_id=step_id,
+                    )
+                    break
+
+    if initial_msgs is None:
+        return
+    net = len(final_msgs) - len(initial_msgs)
+
+    # Invariant 5: before_model net length 0 or +1
+    if hook == "before_model" and net not in (0, 1):
+        _handle_violation(
+            f"post-hook: before_model chain net length change is {net:+d} (must be 0 or +1)",
+            hook=hook,
+            violation_type=_VT_LENGTH_EXCEEDED,
+            step_id=step_id,
+        )
+
+    # Invariant 6: non-authorized hooks must not change messages length
+    _NO_LEN_CHANGE = {"after_model", "before_tool", "after_tool", "step_end", "task_end", "task_start"}
+    if hook in _NO_LEN_CHANGE and net != 0:
+        _handle_violation(
+            f"post-hook: {hook} chain changed messages length by {net:+d} (must be 0)",
+            hook=hook,
+            violation_type=_VT_LENGTH_EXCEEDED,
+            step_id=step_id,
+        )
+
+
+# Named ordering phases for MultiHookProcessor._order.
+# Use these instead of magic integers; fine-grained values are still accepted
+# (e.g. PRE + 5 runs just after PRE processors).
+PRE = 0  # Interceptors, guards, setup — run before main logic
+NORMAL = 50  # Main processing logic (default)
+POST = 100  # Cleanup, export, finalization
+

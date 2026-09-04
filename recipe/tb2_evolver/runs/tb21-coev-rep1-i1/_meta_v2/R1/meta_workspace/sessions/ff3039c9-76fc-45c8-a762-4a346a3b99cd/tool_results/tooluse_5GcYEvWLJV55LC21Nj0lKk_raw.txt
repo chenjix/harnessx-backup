@@ -1,0 +1,52 @@
+401	    """Minimal TB2-specific system prompt — returns a fixed base identity prompt."""
+402	
+403	    async def build(self, workspace=None) -> str:  # noqa: ARG002
+404	        return _TB2_SYSTEM
+405	
+406	
+407	def _build_tb2_tools() -> InMemoryToolRegistry:
+408	    """TB2 tool set: Bash only — matches the official Harbor evaluation."""
+409	    registry = InMemoryToolRegistry()
+410	    registry.register(bash_tool)
+411	    return registry
+412	
+413	
+414	def make_tb2_harness_config(
+415	    *,
+416	    timeout_seconds: int | None = None,
+417	    workspace_path: str = WORKSPACE_PATH,
+418	    output_limit: int = OUTPUT_LIMIT,
+419	) -> HarnessConfig:
+420	    """Build a serializable ``HarnessConfig`` for Terminal Bench 2.0.
+421	
+422	    This config contains only the processor pipeline and tool registry — no
+423	    runtime-only slots (``sandbox_provider``, ``tracer``).  It can be saved to
+424	    YAML via ``cfg.to_yaml_file(path)`` and evolved by the meta-harness.
+425	
+426	    The agent injects the runtime slots at run time::
+427	
+428	        base = make_tb2_harness_config(timeout_seconds=task_timeout)
+429	        harness_config = base.copy(
+430	            sandbox_provider=HarborSandboxProvider(environment, ...),
+431	            tracer=HarnessJournal(...),
+432	        )
+433	        harness = ModelConfig(main=provider).agentic(harness_config)
+434	
+435	    Args:
+436	        timeout_seconds:  Task timeout disclosed to the model via
+437	                          ``EnvironmentContextInjector`` and
+438	                          ``TaskTimeReminderProcessor``.
+439	        workspace_path:   Absolute path inside the container where task files live.
+440	        output_limit:     Maximum characters captured per tool call (passed
+441	                          through to ``HarborSandboxProvider`` at run time via
+442	                          the agent; stored here for reference only).
+443	    """
+444	    _ = output_limit  # documented here; consumed by HarborSandboxProvider in agent.py
+445	
+446	    return (
+447	        HarnessBuilder()
+448	        .add(SystemPromptProcessor(_StaticSystemPromptBuilder()), order=1)
+449	        .add(
+450	            EnvironmentContextInjector(
+
+[Showing lines 401–450 of 466 total. Use offset=450 to read the next section.]

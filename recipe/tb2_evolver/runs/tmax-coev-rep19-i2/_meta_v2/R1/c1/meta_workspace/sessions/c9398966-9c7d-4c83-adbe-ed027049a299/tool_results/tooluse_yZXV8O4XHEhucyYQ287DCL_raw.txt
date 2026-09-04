@@ -1,0 +1,41 @@
+12:    here — they are injected by the agent at run time via ``cfg.copy(...)``.
+40:from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+109:    _singleton_group = "tb2_self_verify"
+110:    _order = 90
+116:    async def on_task_start(self, event: TaskStartEvent):
+121:    async def on_before_model(self, event: BeforeModelEvent):
+127:        # last message is a tool result (role≠user) → append exactly +1 user
+130:            messages=event.messages + (Message(role="user", content=msg),),
+133:    async def on_after_model(self, event: ModelResponseEvent):
+147:    async def on_before_tool(self, event: ToolCallEvent):
+153:    async def on_task_end(self, event: TaskEndEvent):
+159:class CustomEditToolProcessor(MultiHookProcessor):
+164:    ``threshold`` times, a warning is appended to the tool result and the
+168:    _singleton_group = "bash_edit_detector"
+169:    _order = 30
+176:    async def on_task_start(self, event: TaskStartEvent):
+181:    async def on_before_tool(self, event: ToolCallEvent):
+188:    async def on_after_tool(self, event: ToolResultEvent):
+190:        injections: list[str] = []
+195:                injections.append(_EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold))
+197:        if injections:
+198:            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+202:    async def on_task_end(self, event: TaskEndEvent):
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+227:    _singleton_group = "task_time_reminder"
+228:    _order = 6
+240:    async def on_task_start(self, event: TaskStartEvent):
+245:    async def on_step_start(self, event: StepStartEvent):
+265:            msg = Message(role="user", content=warn)
+274:    async def on_task_end(self, event: TaskEndEvent):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+285:    """After context compaction, re-inject a fresh workspace snapshot from the
+293:    _singleton_group = "tb2_post_compaction_refresh"
+294:    _order = 11  # runs after CompactionProcessor (8)
+300:    async def on_task_start(self, event: TaskStartEvent):
+304:    async def on_step_start(self, event: StepStartEvent):
+340:        msg = Message(role="user", content=snapshot)
+347:    async def on_task_end(self, event: TaskEndEvent):
+400:class _StaticSystemPromptBuilder(BaseSystemPromptBuilder):
+426:    The agent injects the runtime slots at run time::

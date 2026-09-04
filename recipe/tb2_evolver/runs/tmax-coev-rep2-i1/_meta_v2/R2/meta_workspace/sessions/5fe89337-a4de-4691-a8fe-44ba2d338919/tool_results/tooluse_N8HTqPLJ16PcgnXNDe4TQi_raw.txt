@@ -1,0 +1,67 @@
+1	# Evolve Journal — tmax-coev-rep2-i1
+2	
+3	## Round 1 — de-prime max_tokens loop
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-17T17:45:00Z
+8	hypothesis_id: h_length_loop_deprime_v1
+9	levers: [control]
+10	predicted_affected: [task_000264_ab8c7253, task_000958_4bb2b05d, task_001818_b251e5ea, task_000118_3043e92d, task_001321_658ce4a8, task_001701_95e3bbcb]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=32/50; +3/-0 gained=task_000578_cebe85a5,task_000587_9862bb19,task_001090_c61c71f2; score 0.6400 >= incumbent(mean) 0.5800 - tol 0.0400
+14	expected_global_gain: "Break the self-priming max_tokens repetition loop that drains the 80-step budget on ~6 budget_exceeded tasks; plausibly flip the 2-3 where the model already named the real bug in its narration."
+15	regression_risk: "Over-collapsing a turn that was legitimately truncated mid-useful-work; but only tasks with >=2 consecutive no-tool length-truncations are ever touched — passing long-horizon tasks make tool calls each turn and never hit this signature."
+16	cost_shift: "Neutral-to-negative: de-priming shrinks persisted context inside loops, lowering per-call tokens; earlier loop-break saves steps."
+17	rollback_trigger: "Revert to stock LengthTruncationRecoveryProcessor if R2 net pass-rate drops OR any of the passing long-horizon tasks (001536/001652/001498/001031) regress T->F."
+18	-->
+19	
+20	### Why
+21	
+22	R0 = 29/50. A distinct `budget_exceeded`-at-80-steps cluster (010,
+23	118, 264, 958, 1321, 1701, 1818) shares one shape: the model emits a
+24	paragraph of narration with no tool call, hits `max_tokens`
+25	(`finish_reason=length`), the run loop appends a passive "continue"
+26	nudge, and the model re-emits the SAME narration. The stock
+27	`LengthTruncationRecoveryProcessor` fires correctly (corrective nudge +
+28	truncation marker seen 33-39x per looping task in JSONL) but does not
+29	break the loop: each truncated turn's full narration is persisted, so
+30	by step 50 the model sees its own repeated prose ~6x in context (verified
+31	in task 264) and re-primes the identical runaway generation. The nudge
+32	is not the missing piece — the persisted repeated narration is.
+33	
+34	### Changes
+35	
+36	- `processors/length_loop_deprime.py` — new `LengthLoopDeprimeProcessor`
+37	  (same singleton group `tmax_length_recovery`, same `_order=5`) that
+38	  replaces the stock recovery processor. On repeated consecutive
+39	  length-truncations (`>= deprime_after=2`) it drops the runaway
+40	  narration to a compact stub (history stops re-showing the loop text)
+41	  and escalates the user nudge to a hard "single Bash command, no prose"
+42	  directive. First truncation retains the stock head+tail collapse.
+43	- `config.yaml` — swap `recipe.tmax_eval.processors.length_recovery.
+44	  LengthTruncationRecoveryProcessor` for the `file://` authored
+45	  processor; add `deprime_after: 2`.
+46	
+47	### Evidence
+48	
+49	- `task_000264` / `task_000958` / `task_001818`: `exit_reason=budget_exceeded`,
+50	  ~70 messages, JSONL shows 33-39 length-truncation recovery firings — the
+51	  loop never converts to a tool call.
+52	- `task_000264` step-50 context: the same narration paragraph appears ~6x,
+53	  re-priming identical output. In 958 the narration already NAMED the real
+54	  bug ("near backups: syntax error") but never issued the fix command.
+55	- Pareto guard: passing tasks reach 40-98 messages (001536=98, 001652=88,
+56	  001498=76) — proving message-count threshold tuning would regress them.
+57	  The distinguishing signal is truncation-recurrence, not length, which is
+58	  exactly what this processor gates on. Threshold tuning explicitly rejected.
+59	
+60	### Uncertainty
+61	
+62	The de-prime reclaims budget and de-primes context, but whether the weak
+63	model then converts its (correct) diagnosis into the right command is a
+64	capability question — flips are plausible, not guaranteed. If R2 shows no
+65	flips in the cluster AND no regressions, the mechanism is safe but
+66	insufficient (consider pairing with a repeated-action breaker next round).
+67	If any passing long-horizon task regresses, revert immediately.

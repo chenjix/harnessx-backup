@@ -1,0 +1,41 @@
+fires only on `finish_reason=length`, but the agent emitted a tool call each
+turn, so it never fired. The one property stable across the loop — identical
+assistant reasoning content — had no processor watching it.
+
+### Changes
+
+- `processors/assistant_repeat_breaker.py` — new `AssistantReasoningRepeatBreaker`
+  `MultiHookProcessor`: fingerprints normalized assistant `content` in
+  `on_after_model`; injects an escalating redirect (`on_before_model`) at
+  `warn_threshold=3` consecutive identical responses; raises `LoopDetectedError`
+  at `break_threshold=5` as a hard safety net before the step cap. Compaction-
+  aware; guards short/empty content via `min_content_chars=40`.
+- `config.yaml` — register the processor at `_order=23` (right after
+  `CyclicLoopBreaker` at 22) so the tool-triple detector gets first crack and
+  this handles the residual assistant-content-only shape it misses.
+
+### Evidence
+
+- `task_000109_09ddd96b` result.json: `status=agent_error`,
+  `exit_reason=error`, `reward=0`; `final_pytest` fails 3/3 on
+  "Output file /home/user/embeddings.json is missing" / "anomaly.txt is
+  missing" — the required files were never written.
+- messages.json histogram: assistant content hash `e41eb308` appears 8×
+  (a verbatim reasoning block beginning "I keep making the same mistake. Let
+  me carefully read the debug output one more time:"). 15 tool outputs carry
+  the same "Error parsing WAV file: missing data chunk" error while their
+  fingerprints alternate — the varying heredoc bytes defeat the triple
+  detector.
+
+### Uncertainty
+
+The escalating nudge may not be enough for a model that ignores in-context
+corrections (the CyclicLoopBreaker warnings were already ignored here); the
+`break_threshold` hard-stop guarantees the run ends cleanly rather than
+burning to `error`, but on its own does not write the output files. The bet is
+that firing a strong redirect at repeat #3 (much earlier than the current
+pipeline's intermittent warnings) returns enough live budget for the agent to
+abandon the tangent. If the target still fails as `loop_detected` with no
+output, the next round should look upstream at why the agent could not parse
+the WAV header (possible capability gap, not a harness fix).
+=== CONTEXT ===

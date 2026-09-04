@@ -1,0 +1,71 @@
+                "passed": init["passed"],
+                "rc": init["rc"],
+                "output_tail": init["output"][-1500:],
+            }
+            if not init["passed"]:
+                # Still continue — some fixtures are agent-facing checks; but
+                # record the failure for diagnosis.
+                result["initial_pytest_failed"] = True
+
+        def _exec(cmd: str, timeout: float) -> tuple[int, str]:
+            return docker_env.exec_in(container, cmd, timeout=timeout)
+
+        if harness_config is not None:
+            # Full HarnessX path: processors + tool_registry + system prompt.
+            from . import harness_runner
+
+            agent = harness_runner.run_harness_agent(
+                harness_config=Path(harness_config),
+                container=container,
+                instruction=str(task["description"]),
+                api_base=api_base,
+                model=model,
+                max_steps=max_steps,
+                temperature=temperature,
+                api_key=os.environ.get("TB2_API_KEY", "EMPTY"),
+                journal_dir=out_dir / tid / "oh_runs",
+            )
+            result["agent"] = {
+                "steps": agent.steps,
+                "finished": agent.finished,
+                "error": agent.error,
+                "exit_reason": agent.exit_reason,
+                "backend": "harnessx",
+            }
+            messages = agent.messages
+        else:
+            # Legacy thin loop (prompt-only, fixed Bash tool). Kept for smoke /
+            # debug when no HarnessConfig is supplied.
+            raw_max = (os.environ.get("TMAX_MAX_TOKENS") or "4096").strip()
+            try:
+                thin_max_tokens = int(raw_max)
+            except ValueError:
+                thin_max_tokens = 4096
+            agent = agent_loop.run_agent(
+                api_base=api_base,
+                model=model,
+                instruction=str(task["description"]),
+                exec_fn=_exec,
+                max_steps=max_steps,
+                temperature=temperature,
+                api_key=os.environ.get("TB2_API_KEY", "EMPTY"),
+                system_prompt=system_prompt,
+                max_tokens=thin_max_tokens if thin_max_tokens > 0 else None,
+            )
+            result["agent"] = {
+                "steps": agent.steps,
+                "finished": agent.finished,
+                "error": agent.error,
+                "backend": "thin",
+            }
+            messages = agent.messages
+        # Persist transcript (truncate tool outputs already capped).
+        (out_dir / f"{tid}.messages.json").write_text(
+            json.dumps(messages, indent=2, ensure_ascii=False) + "\n"
+        )
+
+        final = docker_env.run_pytest(
+            container,
+            task["test_final_state"],
+            dest="/tmp/test_final_state.py",
+        )

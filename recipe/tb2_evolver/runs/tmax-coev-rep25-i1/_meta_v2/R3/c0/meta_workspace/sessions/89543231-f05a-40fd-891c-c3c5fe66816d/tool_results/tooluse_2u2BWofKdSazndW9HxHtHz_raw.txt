@@ -1,0 +1,279 @@
+1	# Evolve journal — tmax-coev-rep25-i1
+2	
+3	## Round 1 — add file-edit builtins
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-09-04T00:56:27Z
+8	hypothesis_id: h_file_tools_v1
+9	levers: [action, instruction]
+10	predicted_affected: [task_000118_3043e92d, task_000015_89886d8d, task_001032_1adaccb9]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=23/50; +5/-7 gained=task_000740_59416444,task_001264_9f4ca84a,task_001498_df8254c9,task_001673_86224c91 lost=task_000536_9c16e8ef,task_000684_1a33ef37,task_000912_770802f8,task_000956_7e92337f; score 0.4600 >= incumbent(mean) 0.5000 - tol 0.0400
+14	expected_global_gain: "Cuts heredoc whole-file-rewrite loops across software_engineering/file_operations clusters; gives a direct, gate-friendly write/edit path so file-authoring tasks stop burning toolcalls on shell quoting."
+15	regression_risk: "New tools shift the action distribution on tasks that already pass with Bash-only; agent could pick Write/Edit where a shell op was cleaner. Low — Bash stays available and the prompt note is soft guidance."
+16	cost_shift: "Expected net token DECREASE on file-heavy tasks (no repeated multi-line heredoc bodies); small prompt-token increase (+1 sentence) on all tasks."
+17	rollback_trigger: "If R2 pass_rate is flat/down AND dup-command counts or edit-warning counts do not fall vs R0, revert the tool-surface change."
+18	-->
+19	
+20	### Why
+21	
+22	R0 (reward 0.500) failure clusters are dominated by heredoc-based
+23	whole-file rewrites and duplicate-consecutive-command repetition
+24	loops. FAIL clusters showed 190 dup-commands / 28 EditDetection
+25	warnings vs 96 / 1 on PASS. The anchor `task_000118_3043e92d`
+26	(reward 0, 31 toolcalls, 8 heredocs) and `task_000015_89886d8d`
+27	(33 identical `tee ... << PYEOF` calls, a fully stuck loop) both
+28	manifest the same shape: the only file-authoring path is Bash
+29	heredoc, which is token-heavy, quoting-fragile, and trips the
+30	EditDetection guard on body tokens. The Tmax evolve path honors
+31	`tool_registry` from YAML (unlike pure-Harbor TB2), so we can give
+32	the agent real file tools.
+33	
+34	### Changes
+35	
+36	- `config.yaml` — add builtin `Write`, `Edit`, `Read` to
+37	  `tool_registry.builtin` (alongside existing `Bash`). All route
+38	  through the active sandbox's base64 `write_file`/`read_file`.
+39	- `system_prompt.txt` (sibling of config, read by
+40	  `SiblingSystemPromptBuilder`) — one general sentence steering the
+41	  agent to prefer Write for whole files / Edit for targeted changes
+42	  / Read for inspection over shell heredocs. General strategy, no
+43	  task-specific literals.
+44	
+45	### Evidence
+46	
+47	- `task_000118_3043e92d`: reward 0, 31 toolcalls, 8 heredocs;
+48	  EditDetection fired on garbage body tokens (`=`, `SIZE_THRESHOLD:`)
+49	  instead of the real target `/home/user/deployment_monitor.py`.
+50	- `task_000015_89886d8d` (software_engineering, FAIL): all 33
+51	  toolcalls identical `tee /tmp/ocr.py << 'PYEOF'`, 32 dups, 6 edit
+52	  warnings — stuck loop.
+53	- `task_001032_1adaccb9` (file_operations, FAIL): 10 heredocs, 2
+54	  warnings.
+55	- R0 config already contains `LengthTruncationRecoveryProcessor`
+56	  (repeat recovery) yet loops persisted → the missing mechanism is
+57	  the write ergonomics, not just loop nudging.
+58	
+59	### Uncertainty
+60	
+61	The direct tools address write ergonomics but may not fully break
+62	the repetition-loop failure mode (the stronger FAIL discriminator);
+63	the existing LengthTruncationRecoveryProcessor is the only loop
+64	guard and it did not prevent R0 loops. If dup-command counts stay
+65	high in R2 despite the new tools, the next round should target loop
+66	detection directly (a stuck-command interceptor) rather than tool
+67	surface. Validated: canonicalize ok, dry_fire ok (0 likely bugs),
+68	literals ok (0 findings).
+69	
+70	## Round 2 — stuck-command recovery guard
+71	
+72	<!-- journal:frontmatter
+73	round: 2
+74	timestamp: 2026-09-04T02:00:00Z
+75	hypothesis_id: h_stuck_cmd_recovery_v1
+76	levers: [control]
+77	predicted_affected: [task_001818_b251e5ea, task_001701_95e3bbcb, task_001673_86224c91]
+78	cited_candidates: [C-001]
+79	gating_outcome: accepted
+80	gating_attribution: score=29/50; +10/-4 gained=task_000329_a3ac56b0,task_000338_27d6a1be,task_000536_9c16e8ef,task_000684_1a33ef37 lost=task_000740_59416444,task_001089_220cc46b,task_001536_acfe6c35,task_001706_24462a09; score 0.5800 >= incumbent(mean) 0.5800 - tol 0.0400
+81	expected_global_gain: "Closes the same-command/same-error retry-loop cluster that dominates the highest-error failing trajectories (exit=error / budget_exceeded with 13-32 duplicate commands); surfaces the stuck command + recurring error in-context so the agent changes approach instead of burning budget. Generalises across domains (rust/C build loops, sqlite query loops, server bring-up loops)."
+82	regression_risk: "Nudge fires only on the Nth IDENTICAL (command,error) pair, never on success or a new error, capped at max_nudges=3/task; passing fast cluster (short steps, 0 non-zero exits) never trips it. Worst case: one extra user message on a task about to self-correct on its 3rd try."
+83	cost_shift: "Net token DECREASE on the loop cluster (cuts ~15-25 wasted repeat steps on 3+ tasks); ~+3 short messages only on tasks that actually loop; zero change on passing tasks."
+84	rollback_trigger: "If R3 pass_rate is flat/down AND duplicate-command / non-zero-exit counts on the predicted tasks do not fall vs R0, revert the processor."
+85	-->
+86	
+87	### Why
+88	
+89	Assigned focus: recovery from tool errors. Sweeping R0 fails (25/50)
+90	for non-zero-exit + duplicate-command co-occurrence surfaced a tight
+91	cluster where the agent re-issues a command that keeps failing the
+92	SAME way and never changes approach: task_001818 (12 non-zero exits,
+93	32 dups, exit=error), task_001701 (11 errors, 13 dups, budget), and
+94	task_001673 (7 errors, 18 dups, budget). The observable state is a
+95	same-normalised-command / same-error-fingerprint repetition. R0's
+96	existing guards do not cover it: CustomEditToolProcessor counts file
+97	over-edits (write-count, ignores exit status) and
+98	LengthTruncationRecoveryProcessor only handles finish_reason=length.
+99	The anchor task_000010 is partial evidence (its "recovery" was a
+100	requirement-violating file rename rather than a blind repeat), so the
+101	cluster stands on the three loop tasks.
+102	
+103	### Changes
+104	
+105	- `processors/stuck_command_recovery.py` — new MultiHookProcessor
+106	  StuckCommandRecoveryProcessor: tracks (normalised command, error
+107	  fingerprint) across tool results; after repeat_threshold consecutive
+108	  identical failures injects ONE legible loop-break note (names the
+109	  repeated command + recurring error, instructs inspect-inputs /
+110	  change-invocation / isolate-failing-piece), then arms a cooldown
+111	  until the command signature changes. Bounded by max_nudges.
+112	- `config.yaml` — register the processor (repeat_threshold=3,
+113	  max_nudges=3) just before CustomEditToolProcessor.
+114	- `system_prompt.txt` — copied byte-for-byte from R0 (SiblingSystemPromptBuilder).
+115	
+116	### Evidence
+117	
+118	- task_001818 steps 33-65: repeated heredoc write of the rust source +
+119	  `cargo build --release` producing cargo errors
+120	  E0282/E0308/E0277/E0425 each cycle; [EditDetection] fires at step
+121	  53/75 but is ignored (write-count based).
+122	- task_001673 steps 25-60: verbatim cycle (start flask server &, urllib
+123	  request returning {"cost":null}, sqlite recursive-CTE returning the
+124	  same A|A|0.0|A) re-run ~4x, budget exhausted.
+125	- task_001701 steps 2-45: jshon invocation on a nested JSON object
+126	  returning the same "parse error: type 'object' is not
+127	  simple/printable" re-issued at 2/4/6 and again 35/45 — invocation
+128	  never changes.
+129	
+130	### Uncertainty
+131	
+132	The nudge is advisory: a weak model may ignore it just as it ignored
+133	the EditDetection warning. Mitigation is specificity — it quotes the
+134	exact repeated command and recurring error rather than a generic
+135	"step back". If R3 shows the dup-command / non-zero-exit counts on the
+136	predicted tasks unchanged, the next round should escalate to a harder
+137	intervention (e.g. block the identical re-execution outright).
+138	
+139	## Round 2 — synthesis: verify-gate ⊕ exact-repeat loop guard
+140	
+141	<!-- journal:frontmatter
+142	round: 2
+143	timestamp: 2026-09-04T02:30:00Z
+144	hypothesis_id: h_synth_verifygate_exactloop_v1
+145	levers: [control, configuration]
+146	predicted_affected: [task_000740_59416444, task_001264_9f4ca84a, task_001498_df8254c9, task_001673_86224c91, task_001706_24462a09, task_000338_27d6a1be]
+147	cited_candidates: [C-001, C-002]
+148	gating_outcome: pending
+149	gating_attribution: pending
+150	expected_global_gain: "Combines the two live lineages on their COMPLEMENTARY real-outcome gains: c4's IterativeVerifyGate flips 5 R0 failures (740,1264,1498,1673,1706) via bounded work-aware verification; c1's exact-repeat loop guard flips 338 by breaking a byte-identical Bash loop. Both target orthogonal failure classes (premature unverified exit vs degenerate repetition), so the union should hold ~+5/+6 on real (status=ok) outcomes."
+151	regression_risk: "Verify-gate can over-nudge an already-correct solution into churn (c4's one real loss, 965) — bounded by max_nudges=2 and further guarded by the exact-repeat detector. Loop-raise could cut a task that legitimately repeats an identical call >=12x — threshold 12 sits above the max transient-recover run (11) AND above every c4 gain's max exact-identical run (<=9), so none are at risk. c1's own two real losses (1536,1652) came from the name-only Strategy-2 warn firing on normal Bash-only long-horizon work; that strategy is DISABLED here (name_warn_threshold=100000), repairing that regression."
+152	cost_shift: "Net roughly flat-to-down: exact-repeat loops are cut early (token DECREASE on stuck runs); verify-gate adds a bounded <=2-nudge INCREASE only on tasks that try to exit unverified. No per-step cost added by the loop guard (warning appended to an existing tool result)."
+153	rollback_trigger: "If R3 real (status=ok) pass_rate is below R0's status=ok baseline (25/50 minus infra errors) AND neither the exact-repeat loop cluster nor the verified-completion cluster flips as predicted, revert to the c4-only lineage (IterativeVerifyGate without LoopDetection)."
+154	-->
+155	
+156	### Why
+157	
+158	Assigned focus: complementary synthesis of the live pivots. The pivot
+159	table's headline scores (c4=0.46, c1=0.38 vs R0=0.50) are misleading: most
+160	reported "unique losses" are `status: error` docker container-name
+161	conflicts (parallel-scheduling infra flakes), NOT harness regressions.
+162	Re-reading every differing task's `result.json` `status` and filtering to
+163	`status: ok` (real agent outcomes) shows c4 is net **+4** (best lineage)
+164	and c1 net **+2**. The two lineages are genuinely complementary: c4's
+165	IterativeVerifyGate uniquely flips 1264 and 1706 and shares 740/1498/1673;
+166	c1's exact-repeat loop guard uniquely flips 338. This round keeps c4 as the
+167	base and grafts c1's *exact-repeat* mechanism, while neutralising the
+168	sub-mechanism (name-only warn) responsible for c1's only real regressions.
+169	
+170	### Changes
+171	
+172	- `config.yaml` — start from the c4 lineage (IterativeVerifyGate replaces
+173	  stock CustomSelfVerifyProcessor, max_nudges=2). Add stock
+174	  `LoopDetectionProcessor` (window=16, warn=4, threshold=12) with
+175	  `name_warn_threshold=100000` to DISABLE Strategy 2 (name-only warn),
+176	  which is noise on this Bash-only benchmark.
+177	- `processors/iterative_verify_gate.py` — copied from the c4 lineage into
+178	  this proposal's dir so the config is self-contained (own `file://` path).
+179	- `system_prompt.txt` — copied byte-for-byte from R0.
+180	
+181	### Evidence
+182	
+183	- task_000338 (c1 traj): tool result carries `[LoopDetection] ⚠️ The exact
+184	  same tool call(s) have been issued 10 times in a row (Bash)`; next
+185	  assistant turn stops looping and commits the correct kernel → reward 1.
+186	  R0 run ended on the repeated call with the wrong OCR result → reward 0.
+187	- task_000965 (c4 traj): R0 solved it (correct variance, 30 msgs); c4's
+188	  verify-gate re-nudged an already-correct solution, agent over-edited
+189	  Welford across 72 msgs and broke variance to 0.0 → the one real c4 loss.
+190	  max_nudges=2 + the exact-repeat guard bound this.
+191	- task_001536 / task_001652 (c1 traj): both carry the name-only warn
+192	  (`called Bash N times consecutively with different arguments`) on
+193	  legitimate multi-step work; agent then prematurely quit
+194	  (38/64 msgs vs R0's passing 76/88) → c1's two real losses. Disabling
+195	  Strategy 2 removes this failure mode.
+196	- c4 gains max exact-identical consecutive Bash run (verified by
+197	  reconstructing fingerprints): 740=1, 1264=1, 1498=1, 1673=7, 1706=9 —
+198	  all below the raise threshold 12, so the loop guard cannot cut them.
+199	
+200	### Uncertainty
+201	
+202	The two mechanisms have not been observed running together, so an
+203	interaction I can't see in single-lineage trajectories is possible (e.g.
+204	the verify-gate nudge inducing a re-edit loop that the raise cuts before
+205	completion). max_nudges=2 and threshold=12 are both conservative. If R3's
+206	status=ok pass_rate does not clear R0's status=ok baseline, revert to the
+207	c4-only lineage per the rollback trigger.
+208	
+209	## Round 3 — stuck-reasoning loop guard
+210	
+211	<!-- journal:frontmatter
+212	round: 3
+213	timestamp: 2026-09-04T04:20:00Z
+214	hypothesis_id: h_stuck_reasoning_recovery_v1
+215	levers: [control]
+216	predicted_affected: [task_001031_a8f0eb37, task_000015_89886d8d, task_000140_01c78b42, task_000329_a3ac56b0, task_001818_b251e5ea, task_001321_658ce4a8]
+217	cited_candidates: [C-001]
+218	gating_outcome: pending
+219	gating_attribution: pending
+220	expected_global_gain: "Closes the reasoning-repetition failure cluster (6 R0 fails, domain-diverse: MPI/numpy, OCR/tesseract, shell-pipeline, DB), where the agent emits byte-identical assistant narration 14-24 turns in a row even when the tool returns SUCCESS each turn (a shape the length- and error/command-fingerprint guards structurally miss). Two of the six exit agent_error, the hardest failure class."
+221	regression_risk: "Advisory user-message nudge, never blocks/rewrites tool calls, capped max_nudges=3/task, armed once per distinct stuck content. repeat_threshold=12 sits above every passing task's MID-TASK identical run (task_001591 run 11, task_001652 run 10). The only passing tasks with runs at/above 12 (task_000024 run 22, task_001781 run 20) loop AFTER work is banked (post-completion verify-tail) so a nudge there is harmless."
+222	cost_shift: "Net token DECREASE on the loop cluster (cuts 10-20 wasted repeat turns on the failing cluster plus the passing verify-tails); at most 3 short user messages only on tasks that loop 12-plus times; zero change on other passing tasks."
+223	rollback_trigger: "If R4 pass_rate is flat/down AND the longest identical-assistant-run on the six predicted tasks does not fall vs R0, revert the processor."
+224	-->
+225	
+226	### Why
+227	
+228	Assigned focus: recovery from tool errors. The anchor task_000010 is a
+229	1-task shape (self-created operator.py shadows stdlib operator giving an
+230	ImportError; its "recovery" renamed the required file away, violating the
+231	path requirement) — per the generalization contract that earns a no-op, not a
+232	special case. Tracing the anchor's observable failure ("agent hit an error
+233	and its recovery attempt did not change the outcome") led to a recurring,
+234	domain-diverse cluster: the agent emits the SAME assistant reasoning on
+235	consecutive turns — often explicitly narrating "I keep getting the same
+236	error / I've been stuck in a loop / let me try a fundamentally different
+237	approach" — yet reproduces the identical narration and action. The agent has
+238	recognised it is stuck but cannot self-break; its recovery IS the repeat.
+239	
+240	### Changes
+241	
+242	- `processors/stuck_reasoning_recovery.py` — new MultiHookProcessor
+243	  StuckReasoningRecoveryProcessor: tracks whitespace-normalised assistant
+244	  content; after repeat_threshold identical consecutive turns injects ONE
+245	  legible change-approach directive before the next model call, with a
+246	  cooldown until content changes and a max_nudges cap.
+247	- `config.yaml` — register it (repeat_threshold=12, max_nudges=3,
+248	  min_chars=24) just after LengthTruncationRecoveryProcessor. Distinct
+249	  trigger from that guard (finish_reason=length) and from any
+250	  error/command-fingerprint guard (keys on repeated reasoning even when the
+251	  tool result is a SUCCESS).
+252	- `system_prompt.txt` — copied byte-for-byte from R0 (SiblingSystemPromptBuilder).
+253	
+254	### Evidence
+255	
+256	- task_001031 msgs 87-94: assistant emits verbatim "I keep making the same
+257	  mistake. Let me try a completely different approach - use comm.Allgatherv
+258	  with a flat array..." 24 times; each tool reply is "Script created" (exit 0,
+259	  SUCCESS), Bash arg head identical across msgs 71-93; then exit_reason=error.
+260	- task_000015 (33 asst msgs, top repeat 28 times): "I keep getting the same
+261	  error. Let me try a fundamentally different approach - using a Python script
+262	  to call tesseract..."
+263	- task_000140 (top repeat 22 times): "I keep hitting the token limit when
+264	  trying to read the test_pipeline.sh file. Let me try a different approach..."
+265	- task_001321 (top repeat 14 times): "I've been stuck in a loop trying to run
+266	  the same command. The shell is not capturing output properly..."
+267	- Passing-cluster guard: task_001591 (pass) mid-task run 11 at fraction 0.47;
+268	  task_001652 (pass) run 10 at 0.39 — both below threshold 12. task_000024
+269	  (pass) run 22 and task_001781 (pass) run 20 are post-completion verify-tails
+270	  ("the task is complete, let me provide a final summary").
+271	
+272	### Uncertainty
+273	
+274	The nudge is advisory: a weak model may ignore it as it ignored its own
+275	stuck-state narration. Mitigation is specificity (names that the prior
+276	approach produced no change and demands one concrete different action).
+277	threshold=12 is conservative to protect passing tasks; if R4 shows the
+278	predicted tasks' identical-run lengths unchanged, escalate to blocking the
+279	identical re-execution outright rather than nudging.

@@ -1,0 +1,83 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	
+12	tool_registry:
+13	  builtin:
+14	  - Bash
+15	  custom: []
+16	tracer: null
+17	processors:
+18	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+19	  system_builder:
+20	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+21	  _hook_: '*'
+22	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+23	  working_dir: /home/user
+24	  constraints: {}
+25	  header: Environment
+26	  max_tree_lines: 20
+27	  non_interactive: true
+28	  inject_integrity_rules: true
+29	  show_project_dir: false
+30	  _hook_: '*'
+31	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+32	  tool_schemas: {}
+33	  _hook_: '*'
+34	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+35	  warn_at:
+36	  - 0.7
+37	  - 0.9
+38	  _hook_: '*'
+39	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep1-i2/_meta_v2/R3/processors/length_recovery.py::LengthTruncationRecoveryProcessor
+40	  repeat_threshold: 2
+41	  head_chars: 400
+42	  tail_chars: 0
+43	  content_char_threshold: 40000
+44	  _hook_: '*'
+45	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep1-i2/R0/assets/processors/repeat_break.py::RepeatedActionBreakProcessor
+46	  repeat_threshold: 5
+47	  escalate_threshold: 7
+48	  _hook_: '*'
+49	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+50	  token_threshold: 140000
+51	  message_threshold: 100
+52	  retention_window: 6
+53	  eviction_fraction: 0.5
+54	  summarize_key: summarize
+55	  preserve_first_message: true
+56	  _hook_: '*'
+57	- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+58	  window_size: 12
+59	  warn_threshold: 3
+60	  threshold: 10
+61	  name_warn_threshold: 8
+62	  compaction_drop_threshold: 5
+63	  _hook_: '*'
+64	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+65	  max_consecutive_errors: 1
+66	  _hook_: '*'
+67	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+68	  drop_threshold: 5
+69	  _hook_: '*'
+70	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+71	  _hook_: '*'
+72	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+73	  threshold: 7
+74	  _hook_: '*'
+75	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep1-i2/_meta_v2/R7/processors/process_lifecycle_verify.py::ProcessLifecycleSelfVerifyProcessor
+76	  _hook_: '*'
+77	workspace: null
+78	workspace_template: default
+79	init_workspace: false
+80	step_snapshots: true
+81	sandbox_provider: null
+82	sandbox_hint_id: null
+83	plugins: []

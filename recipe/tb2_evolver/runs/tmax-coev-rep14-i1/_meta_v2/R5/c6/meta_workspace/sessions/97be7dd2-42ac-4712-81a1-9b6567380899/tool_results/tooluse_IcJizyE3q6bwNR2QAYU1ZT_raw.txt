@@ -1,0 +1,42 @@
+755	If R2's `h_output_contract_verify_v1` lands and flips task_000264, this confirms
+756	the self-verify discipline was the right lever and no further action is needed. If
+757	R2 is reverted or leaves task_000264 F on the same two assertions, the residual is
+758	confirmed as a pure capability gap (SQL recurrence + sqlite plan-string knowledge)
+759	that no harness lever should chase — log and skip. NEEDS_FROM_HUMAN candidate: the
+760	`USING INDEX` grader assertion is arguably an over-strict test (rejects a correct
+761	covering-index optimization); if graders are tunable, relaxing to
+762	`"USING" and "INDEX"` or accepting `COVERING INDEX` would fix a false-negative.
+763	
+764	## Round 4 — computed-result plausibility + full-range compare
+765	
+766	<!-- journal:frontmatter
+767	round: 4
+768	timestamp: 2026-08-28T16:00:00Z
+769	hypothesis_id: h_computed_result_plausibility_v1
+770	levers: [instruction]
+771	predicted_affected: [task_000396_e56917e2, task_001653_c4cafa73, task_001937_ac874115]
+772	cited_candidates: [C-001]
+773	gating_outcome: pending
+774	gating_attribution: pending
+775	expected_global_gain: "Relieve the 'declared done on a glaringly wrong self-computed value' cluster (>=3 tasks across scientific_computing + data_science) by making magnitude-plausibility and full-range/tail comparison an explicit pre-exit discipline; generalizes to any reproduce/validate/optimize task."
+776	regression_risk: "Low - prompt-only append to the minimal R0 sidecar; removes no capability, changes no processor. Worst case a few extra comparison Bash calls on already-passing compute tasks (000338, 001088 extract/compute cleanly, so guidance only reinforces their habit). Append-only guidance cannot remove a mechanism."
+777	cost_shift: "Small positive - a handful of extra tail/edge comparison Bash calls on compute tasks; likely net-neutral-to-favourable by converting silent wrong-answer finishes into corrected or honestly-flagged work."
+778	rollback_trigger: "If next round is flat/down AND task_000396/001653/001937 stay F on the same value mismatches (residual is pure model numerical capability), OR any previously-passing compute task (000338, 001088, data_science 000578/000760/001498/001697) regresses to F - revert to the R0 minimal sidecar prompt."
+779	-->
+780	
+781	### Why
+782	
+783	Assigned focus `task_000396_e56917e2` (scientific_computing, reward=0,
+784	exit_reason=done, no_tool_calls, 30 steps). Task: fix a vendored RK45 lib's
+785	build + step-size bug, run the sim, compute the maximum absolute deviation of
+786	`output.dat` vs an analytical `reference.dat`, write it to
+787	`/home/user/validation.log`; verifier asserts `0.0 < max_dev < 0.1`. The agent
+788	fixed the two obvious bugs (`-lm`; exponent `-0.25 -> 0.25`), computed
+789	**max_dev = 0.607**, wrote it, and declared done. The vendored integrator is a
+790	forward-Euler step ("using Euler for demonstration"), unconditionally unstable
+791	for an oscillator: the reference stays on the unit circle (amp ~1.0) while the
+792	agent's output diverges to amp ~1.64 by t~10 - the sign fix was necessary but
+793	NOT sufficient (a stable RK4/RKF is needed). The agent had its own 0.607 metric
+794	in hand - the smoking gun - but "verified" by spot-checking only the first 4
+
+[Showing lines 755–794 of 1534 total. Use offset=794 to read the next section.]

@@ -1,0 +1,3 @@
+| id | score | config | trajectories | unique solves | unique losses | this proposal starts from |
+|----|------:|--------|--------------|---------------|---------------|---------------------------|
+| `n0_8743947a` | 0.500 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R0/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r0-traj` | — | — |  |

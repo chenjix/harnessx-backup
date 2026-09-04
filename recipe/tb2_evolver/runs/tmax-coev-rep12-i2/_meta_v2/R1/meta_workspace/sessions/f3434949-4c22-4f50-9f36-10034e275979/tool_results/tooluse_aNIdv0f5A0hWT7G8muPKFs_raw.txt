@@ -1,0 +1,35 @@
+243:def check_post_hook_invariants(
+334:# Named ordering phases for MultiHookProcessor._order.
+473:                check_post_hook_invariants(
+512:class MultiHookProcessor:
+520:      extra configuration — just set ``_singleton_group`` and ``_order``.
+530:            _singleton_group = "audit"
+531:            _order = 50
+536:            async def on_step_end(self, event: StepEndEvent):
+540:            async def on_task_end(self, event: TaskEndEvent):
+548:            _singleton_group = "cost_guard"
+549:            _order = 10
+589:        valid_hook_names = set(dispatch.values())
+595:                and name not in valid_hook_names
+600:                    f"Valid on_* names: {sorted(valid_hook_names)}. "
+607:    # _order:  use PRE / NORMAL / POST constants (or fine-grained int offsets).
+608:    # _after:  list of _singleton_group names that must run before this processor
+718:    async def on_task_start(self, event: TaskStartEvent) -> AsyncIterator[Event]:
+722:    async def on_step_start(self, event: StepStartEvent) -> AsyncIterator[Event]:
+726:    async def on_before_model(self, event: BeforeModelEvent) -> AsyncIterator[Event]:
+730:    async def on_after_model(self, event: ModelResponseEvent) -> AsyncIterator[Event]:
+734:    async def on_before_tool(self, event: ToolCallEvent) -> AsyncIterator[Event]:
+738:    async def on_after_tool(self, event: ToolResultEvent) -> AsyncIterator[Event]:
+742:    async def on_step_end(self, event: StepEndEvent) -> AsyncIterator[Event]:
+746:    async def on_task_end(self, event: TaskEndEvent) -> AsyncIterator[Event]:
+792:def _make_hook_processor(fn: Callable, event_type: type) -> Processor:
+809:    return _make_hook_processor(fn, TaskStartEvent)
+814:    return _make_hook_processor(fn, StepStartEvent)
+819:    return _make_hook_processor(fn, BeforeModelEvent)
+824:    return _make_hook_processor(fn, ModelResponseEvent)
+829:    return _make_hook_processor(fn, ToolCallEvent)
+834:    return _make_hook_processor(fn, ToolResultEvent)
+837:def on_step_end(fn: Callable) -> Processor:
+839:    return _make_hook_processor(fn, StepEndEvent)
+842:def on_task_end(fn: Callable) -> Processor:
+844:    return _make_hook_processor(fn, TaskEndEvent)

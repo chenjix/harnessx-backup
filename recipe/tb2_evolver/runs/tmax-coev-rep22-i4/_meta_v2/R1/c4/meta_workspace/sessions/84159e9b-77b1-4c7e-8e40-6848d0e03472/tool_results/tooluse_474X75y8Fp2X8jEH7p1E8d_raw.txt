@@ -1,0 +1,40 @@
+harnessx/core/processor.py:520:      extra configuration — just set ``_singleton_group`` and ``_order``.
+harnessx/core/processor.py:530:            _singleton_group = "audit"
+harnessx/core/processor.py:548:            _singleton_group = "cost_guard"
+harnessx/core/processor.py:608:    # _after:  list of _singleton_group names that must run before this processor
+harnessx/core/builder.py:103:        ``_singleton_group`` class attributes, they are used as defaults.
+harnessx/core/builder.py:128:        resolved_sg = singleton_group if singleton_group is not _UNSET else getattr(cls, "_singleton_group", None)
+harnessx/core/harness.py:1270:                    if getattr(type(proc), "_singleton_group", None) != "model_router":
+harnessx/core/processor.py:520:      extra configuration — just set ``_singleton_group`` and ``_order``.
+harnessx/core/processor.py:530:            _singleton_group = "audit"
+harnessx/core/processor.py:548:            _singleton_group = "cost_guard"
+---find where singleton is enforced---
+harnessx/core/builder.py:46:    singleton_group: str | None = None  # at most one entry per group across merged builders
+harnessx/core/builder.py:47:    after: tuple[str, ...] = ()  # soft ordering deps by singleton_group within same hook
+harnessx/core/builder.py:98:        singleton_group: Any = _UNSET,
+harnessx/core/builder.py:103:        ``_singleton_group`` class attributes, they are used as defaults.
+harnessx/core/builder.py:113:            singleton_group:  Conflict-detection group.  Pass ``None`` explicitly
+harnessx/core/builder.py:114:                              to disable singleton checking for this entry.
+harnessx/core/builder.py:128:        resolved_sg = singleton_group if singleton_group is not _UNSET else getattr(cls, "_singleton_group", None)
+harnessx/core/builder.py:385:    # 4. processors — singleton_group collision
+harnessx/core/builder.py:386:    used_groups = {e.singleton_group for e in target._entries if e.singleton_group}
+harnessx/core/builder.py:388:        if entry.singleton_group and entry.singleton_group in used_groups:
+harnessx/core/builder.py:390:            existing = next(e for e in target._entries if e.singleton_group == entry.singleton_group)
+harnessx/core/builder.py:392:                f"singleton_group='{entry.singleton_group}': "
+harnessx/core/builder.py:398:            if entry.singleton_group:
+harnessx/core/builder.py:399:                used_groups.add(entry.singleton_group)
+harnessx/core/builder.py:677:    Soft deps: ``_after`` references to unregistered singleton_groups are silently
+harnessx/core/builder.py:683:    # Build group → entry lookup (only entries that have a singleton_group)
+harnessx/core/builder.py:684:    group_map: dict[str, _ProcEntry] = {e.singleton_group: e for e in entries if e.singleton_group}
+harnessx/core/trajectory.py:429:                    group = getattr(p, "_singleton_group", "") or ""
+harnessx/core/harness.py:1270:                    if getattr(type(proc), "_singleton_group", None) != "model_router":
+harnessx/core/processor.py:520:      extra configuration — just set ``_singleton_group`` and ``_order``.
+
+STDERR: grep: harnessx/core/__pycache__/builder.cpython-312.pyc: binary file matches
+grep: harnessx/core/__pycache__/processor.cpython-310.pyc: binary file matches
+grep: harnessx/core/__pycache__/harness.cpython-312.pyc: binary file matches
+grep: harnessx/core/__pycache__/trajectory.cpython-310.pyc: binary file matches
+grep: harnessx/core/__pycache__/trajectory.cpython-312.pyc: binary file matches
+grep: harnessx/core/__pycache__/harness.cpython-310.pyc: binary file matches
+grep: harnessx/core/__pycache__/processor.cpython-312.pyc: binary file matches
+grep: harnessx/core/__pycache__/builder.cpython-310.pyc: binary file matches

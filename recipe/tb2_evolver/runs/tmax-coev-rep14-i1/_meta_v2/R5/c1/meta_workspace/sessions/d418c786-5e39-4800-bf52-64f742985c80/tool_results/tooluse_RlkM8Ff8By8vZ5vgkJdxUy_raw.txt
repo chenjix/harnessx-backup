@@ -1,0 +1,71 @@
+                name=_SELF_VERIFY_TOOL,
+                input={},
+            )
+            yield dataclasses.replace(event, tool_calls=(keepalive,))
+        else:
+            yield event
+
+    async def on_before_tool(self, event: ToolCallEvent):
+        if event.tool_name == _SELF_VERIFY_TOOL:
+            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+        else:
+            yield event
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._verified = False
+        self._pending_message = ""
+        yield event
+
+
+class CustomEditToolProcessor(MultiHookProcessor):
+    """Detect repeated Bash-based file edits and nudge the model to try a different approach.
+
+    TB2 only exposes Bash, so write operations are detected via command patterns
+    (redirects, sed -i, tee).  When the same file is edited more than
+    ``threshold`` times, a warning is appended to the tool result and the
+    per-file counter is reset.
+    """
+
+    _singleton_group = "bash_edit_detector"
+    _order = 30
+
+    def __init__(self, threshold: int = 7) -> None:
+        self.threshold = threshold
+        self._edit_counts: dict[str, int] = {}
+        self._pending: dict[str, list[str]] = {}
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._edit_counts.clear()
+        self._pending.clear()
+        yield event
+
+    async def on_before_tool(self, event: ToolCallEvent):
+        if event.tool_name == "Bash":
+            paths = _extract_written_files(event.tool_input.get("command", ""))
+            if paths:
+                self._pending[event.tool_call_id] = paths
+        yield event
+
+    async def on_after_tool(self, event: ToolResultEvent):
+        paths = self._pending.pop(event.tool_call_id, [])
+        injections: list[str] = []
+        for path in paths:
+            count = self._edit_counts.get(path, 0) + 1
+            self._edit_counts[path] = count
+            if count > self.threshold:
+                injections.append(_EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold))
+                self._edit_counts[path] = 0
+        if injections:
+            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+        else:
+            yield event
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._edit_counts.clear()
+        self._pending.clear()
+        yield event
+
+
+# ---------------------------------------------------------------------------
+# TaskTimeReminderProcessor
+# ---------------------------------------------------------------------------

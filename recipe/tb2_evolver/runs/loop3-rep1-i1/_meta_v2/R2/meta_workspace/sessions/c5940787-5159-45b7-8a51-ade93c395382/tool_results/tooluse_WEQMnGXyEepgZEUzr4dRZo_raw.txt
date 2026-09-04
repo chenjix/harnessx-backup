@@ -1,0 +1,87 @@
+1	# Evolve journal — loop3-rep1-i1
+2	
+3	## Round 1 — no-op (all failures model/env)
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-10T09:00:00Z
+8	hypothesis_id: h_noop_r1
+9	levers: []
+10	predicted_affected: []
+11	gating_outcome: accepted
+12	gating_attribution: score=22/28; +3/-3 gained=code-from-image,configure-git-webserver,portfolio-optimization lost=headless-terminal,largest-eigenval,query-optimize; score 0.7857 >= incumbent(mean) 0.7857 - tol 0.0667
+13	expected_global_gain: "0 flips; protects the long-passing-task cluster (cobol-modernization 90 steps, build-cython-ext 63 steps, sanitize-git-repo 41 steps) from a speculative loop/step-cap regression"
+14	regression_risk: "none — config is byte-identical to R0"
+15	cost_shift: "0 — no change"
+16	rollback_trigger: "n/a (no-op)"
+17	-->
+18	
+19	### Why
+20	
+21	R0 scored 22/28. The routed evidence attributes **0 defects to the
+22	harness/tool layer**: 5 failures routed to MODEL (SFT), 1 to ENV. The
+23	affordance-gap section confirms recovery was *reachable* in the current
+24	config — errors were surfaced in full and step budget remained — so the
+25	gaps are model capability, not harness mechanism. Per SOUL.md's
+26	evolution philosophy, these are not the harness's job.
+27	
+28	Failure triage (verified against trajectory bodies):
+29	
+30	- `cancel-async-tasks` (MODEL): agent got "Cancellation test PASSED" at
+31	  step 5, then step 6 spun ~2000 tokens of rumination ("let me try /
+32	  actually / OK I've been overthinking this" ×15) and emitted a
+33	  self-authored blocking test (`await asyncio.sleep(10)`) that hit the
+34	  Bash timeout (exit 124); the *next* model request then stalled
+35	  ~11 min until wall-clock interrupt (`input_tokens=0`,
+36	  `stop_reason=interrupted`). Verifier missed only 1/6 edge-case tests.
+37	- `code-from-image` (ENV/MODEL): `tesseract-ocr` unavailable (`E: Unable
+38	  to locate package`), `file` command missing (exit 127); then the next
+39	  model request stalled ~20 min until interrupt. `/app/output.txt` never
+40	  written. Routed ENV.
+41	- `custom-memory-heap-crash` (MODEL): release build SIGSEGVs
+42	  (returncode -11) while debug build passes 5/6 tests; model did not
+43	  diagnose the release-only memory bug.
+44	- `portfolio-optimization` (MODEL): C extension correct but speedup
+45	  1.12x < required 1.2x on N=5000/6000 — an optimization-depth gap.
+46	- `pytorch-model-cli` (MODEL): CLI predicts digit `2` and the agent
+47	  verified thoroughly (37 steps) against the one image present, but the
+48	  verifier uses a different unseen image → wrong prediction. Cannot be
+49	  inferred from the task description.
+50	- `configure-git-webserver` (MODEL): apt 404s + webserver returns 404;
+51	  model did not complete the serving config.
+52	
+53	### Changes
+54	
+55	- `config.yaml` — byte-identical copy of R0 (explicit no-op).
+56	
+57	### Evidence
+58	
+59	- `_ROUTED_EVIDENCE.md`: "attributed to the harness/tool layer (yours): **0**".
+60	- `cancel-async-tasks` episode: step-6 assistant message loops on
+61	  "let me try a different approach ... actually ... OK I've been
+62	  overthinking this"; final tool `(exit 124, no output captured)` then
+63	  `stop_reason: interrupted`, `usage.input_tokens: 0`.
+64	- `code-from-image` result.json: `n_input_tokens: 6064`, agent_execution
+65	  ran 07:53:28→08:13:28 (~20 min) though only 2 productive steps —
+66	  a stalled model request, not a config-addressable loop.
+67	- Passing long-task cluster: `cobol-modernization` 90 steps / `reward=1`,
+68	  `build-cython-ext` 63 steps / `reward=1`, `sanitize-git-repo` 41 steps
+69	  / `reward=1` — any step-cap tightening or loop-breaker to catch the
+70	  rumination in `cancel-async-tasks`/`pytorch-model-cli` would put these
+71	  at direct regression risk.
+72	
+73	### Uncertainty
+74	
+75	The only recurring *harness-adjacent* signal is semantic rumination /
+76	over-verification (`cancel-async-tasks` step 6, `pytorch-model-cli`
+77	37 steps). A mechanical loop-breaker can't distinguish it from
+78	legitimate long work (the 90/63/41-step passers) without high
+79	false-positive risk — so shipping one trades a speculative 1-2 task
+80	flip for a material regression on a larger passing cluster, which the
+81	Pareto rule forbids. The stalled-model-request deaths
+82	(`cancel-async-tasks`, `code-from-image`) are inference-infra, not
+83	config-editable (`request_timeout_sec` lives in agent kwargs). If a
+84	future round observes the rumination pattern recur on >=3 tasks with a
+85	clean separation from passing long tasks, revisit as a Control
+86	candidate (e.g. an `on_step_start` no-progress detector keyed on
+87	repeated identical tool commands, not step count).

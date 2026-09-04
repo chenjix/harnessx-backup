@@ -1,0 +1,73 @@
+1	## Round 1 — break max_tokens runaway loop
+2	
+3	<!-- journal:frontmatter
+4	round: 1
+5	timestamp: 2026-08-16T09:00:00Z
+6	hypothesis_id: h_length_recovery_v1
+7	levers: [control]
+8	predicted_affected: [task_000264_ab8c7253, task_000015_89886d8d, task_001818_b251e5ea, task_001031_a8f0eb37, task_001032_1adaccb9, task_001321_658ce4a8, task_001701_95e3bbcb, task_000010_644ab1c2]
+9	cited_candidates: [C-001]
+10	gating_outcome: accepted
+11	gating_attribution: score=29/50; +3/-3 gained=task_000587_9862bb19,task_001515_eed714e6,task_001701_95e3bbcb lost=task_001089_220cc46b,task_001536_acfe6c35,task_001653_c4cafa73; score 0.5800 >= incumbent(mean) 0.5800 - tol 0.0400
+12	expected_global_gain: "Flips up to 8 failing tasks across 7 domains — the single dominant failure shape (every exit_reason=error trajectory in R0)"
+13	regression_risk: "Very low: no R0 passing task has a max assistant turn in [14.8K,104K); 40K trigger cannot fire on any normal turn. Only touches 2 already-passing tasks that already tripped the loop expensively."
+14	cost_shift: "Strongly negative (savings): collapses 100K-330K-char blobs and breaks 400-960s loops early."
+15	rollback_trigger: "If R2 pass_rate is flat/down AND any of the 2 currently-passing loop-survivors (task_000338_27d6a1be, task_000818_315382d9) regress to F, revert."
+16	-->
+17	
+18	### Why
+19	
+20	R0 = 29/50 (0.58). The dominant failure mode is a max_tokens runaway
+21	loop: the small model (Qwen3.5-9B) emits an enormous no-tool-call
+22	narration turn (104K-329K chars) that hits the provider output cap.
+23	The runloop (harnessx/core/runloop.py:734) then appends a passive
+24	"Your previous response was cut off by the token limit. Please
+25	continue from where you left off." nudge, which re-primes the exact
+26	runaway generation while the 300KB blob pollutes the next context
+27	window. The cycle burns steps/wall-clock (up to 74 steps, 964s) and
+28	terminates in `exit_reason=error` with the required output file never
+29	written. All 11 `exit_reason=error` tasks in R0 exhibit >=1 cut-off
+30	nudge; 8 of them failed. Max assistant-turn size is cleanly bimodal:
+31	passing cluster tops out at ~14.8K chars, runaway cluster starts at
+32	104K — a 40K threshold sits in the empty band and cannot misfire.
+33	
+34	### Changes
+35	
+36	- `processors/length_recovery.py` — new `LengthTruncationRecoveryProcessor`
+37	  (`MultiHookProcessor`). `on_after_model`: detect a no-tool-call turn
+38	  with `finish_reason=="length"` OR `content>=40000` chars, collapse
+39	  the blob to head+tail excerpt, arm an escalating nudge, count
+40	  consecutive occurrences. `on_before_model`: inject exactly one user
+41	  message redirecting the model to a single concrete Bash command
+42	  (gentle first, forceful on repeat). Trigger keys only on structural
+43	  signals — benchmark-agnostic.
+44	- `config.yaml` — register the processor via absolute `file://` path,
+45	  inserted after `TaskTimeReminderProcessor` and before
+46	  `CompactionProcessor` (so the collapsed content reaches compaction).
+47	
+48	### Evidence
+49	
+50	- `task_001031_a8f0eb37`: 144.7K-char assistant turn; body "I keep
+51	  making the same mistake... stuck in a loop", then the cut-off nudge;
+52	  74 steps, 964s, exit=error, `/home/user/results.json` never written.
+53	- `task_000264_ab8c7253`: 328.9K-char turn re-deriving subordinate
+54	  counts, cut-off nudge x2, 20 steps, 485s, exit=error.
+55	- `task_000015_89886d8d`: 286.6K-char OCR-schema narration, cut-off
+56	  nudge x2, 14 steps, 435s, exit=error.
+57	- `task_001032_1adaccb9`: 128.4K-char tar-header hex-dump narration
+58	  loop, cut-off nudge x2, exit=error.
+59	- Bimodal check: passing max assistant turn = 14.8K chars
+60	  (task_001089_220cc46b) vs runaway min = 104.8K
+61	  (task_000818_315382d9, which passed but wasted 437s). No passing
+62	  task lands between 14.8K and 104K.
+63	
+64	### Uncertainty
+65	
+66	The nudge redirects the model to "one concrete Bash command"; if the
+67	underlying task genuinely needs the model to reason more before
+68	acting, the redirect could push a premature command. Mitigated
+69	because the streak resets on any normal turn, so the model regains
+70	freedom immediately after acting. Signal to watch: if the 2
+71	loop-survivor passes regress or overall pass_rate drops, revert.
+72	This exact processor lineage (tmax-ev9b50 R6) was built against the
+73	identical bimodal signature, giving prior evidence it lands.

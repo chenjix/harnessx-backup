@@ -1,0 +1,82 @@
+91	        return json.loads(resp.read().decode())
+92	
+93	
+94	def _parse_args(raw: Any) -> dict[str, Any]:
+95	    if isinstance(raw, dict):
+96	        return raw
+97	    if not raw:
+98	        return {}
+99	    try:
+100	        return json.loads(raw)
+101	    except Exception:
+102	        return {"command": str(raw)}
+103	
+104	
+105	def run_agent(
+106	    *,
+107	    api_base: str,
+108	    model: str,
+109	    instruction: str,
+110	    exec_fn: Callable[[str, float], tuple[int, str]],
+111	    max_steps: int = 80,
+112	    temperature: float = 0.0,
+113	    api_key: str = "EMPTY",
+114	    request_timeout: float = 180.0,
+115	    default_cmd_timeout: float = 60.0,
+116	    system_prompt: str | None = None,
+117	) -> AgentResult:
+118	    sys_prompt = (system_prompt or SYSTEM_PROMPT).strip() or SYSTEM_PROMPT
+119	    messages: list[dict[str, Any]] = [
+120	        {"role": "system", "content": sys_prompt},
+121	        {"role": "user", "content": instruction},
+122	    ]
+123	    log: list[StepLog] = []
+124	
+125	    for step in range(1, max_steps + 1):
+126	        try:
+127	            resp = _chat(
+128	                api_base,
+129	                model,
+130	                messages,
+131	                temperature=temperature,
+132	                api_key=api_key,
+133	                timeout=request_timeout,
+134	            )
+135	        except Exception as e:
+136	            return AgentResult(
+137	                steps=step - 1,
+138	                finished="error",
+139	                messages=messages,
+140	                log=log,
+141	                error=f"chat failed at step {step}: {e}",
+142	            )
+143	
+144	        choice = (resp.get("choices") or [{}])[0]
+145	        msg = choice.get("message") or {}
+146	        tool_calls = msg.get("tool_calls") or []
+147	        content = msg.get("content")
+148	
+149	        # Normalize assistant message for history.
+150	        asst: dict[str, Any] = {"role": "assistant", "content": content or ""}
+151	        if tool_calls:
+152	            asst["tool_calls"] = tool_calls
+153	        messages.append(asst)
+154	
+155	        entry = StepLog(step=step, role="assistant", content=content, tool_calls=tool_calls)
+156	        if not tool_calls:
+157	            log.append(entry)
+158	            return AgentResult(
+159	                steps=step, finished="no_tool_calls", messages=messages, log=log
+160	            )
+161	
+162	        for tc in tool_calls:
+163	            fn = (tc.get("function") or {})
+164	            name = fn.get("name") or ""
+165	            args = _parse_args(fn.get("arguments"))
+166	            tc_id = tc.get("id") or f"call_{step}"
+167	            if name.lower() not in ("bash",):
+168	                result = f"Error: unknown tool '{name}'. Only Bash is available."
+169	                rc = 1
+170	            else:
+
+[Showing lines 91–170 of 209 total. Use offset=170 to read the next section.]

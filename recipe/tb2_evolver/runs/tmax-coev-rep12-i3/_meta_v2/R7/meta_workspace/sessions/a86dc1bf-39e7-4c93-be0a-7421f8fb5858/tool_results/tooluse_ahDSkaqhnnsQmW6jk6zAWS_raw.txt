@@ -1,0 +1,62 @@
+281	            if not step_snapshots:
+282	                snapshot_before = FullStateSnapshot(
+283	                    step_id=step_id,
+284	                    messages=(),
+285	                    slots={
+286	                        k: StateSlotSnapshot(
+287	                            key=k,
+288	                            slot_type=v.slot_type,
+289	                            content=v.content,
+290	                            metadata=dict(v.metadata),
+291	                        )
+292	                        for k, v in state.slots.items()
+293	                    },
+294	                    cumulative_tokens=state.cumulative_tokens,
+295	                    cumulative_cost_usd=state.cumulative_cost_usd,
+296	                )
+297	            else:
+298	                snapshot_before = FullStateSnapshot.from_state(state, step_id=step_id)
+299	
+300	            # ── 1. step_start: context assembly (delegated to processors) ───
+301	            step_start_event = StepStartEvent(
+302	                run_id=state.run_id,
+303	                step_id=step_id,
+304	                raw_messages=tuple(state.raw_messages),
+305	                messages=tuple(state.messages),
+306	                task=task,
+307	                tools=_get_tools(),  # respects command-level allowed_tools restriction
+308	                context_window=context_window,
+309	                workspace=workspace,
+310	                system_prompt=task_system_prompt,  # frozen by on_task_start; never modified by on_step_start
+311	                token_count=rough_token_count(list(state.messages)),
+312	            )
+313	            # Snapshot history_hash before processors run so we can detect structural changes.
+314	            _pre_step_msgs = step_start_event.messages or tuple(state.messages)
+315	            _, _hist_before, _ = compute_windows(_pre_step_msgs)
+316	            _history_hash_before = compute_history_hash(_hist_before)
+317	
+318	            # pipe_all: collect SegmentBoundaryEvents
+319	            step_start_events = await pipe_all(
+320	                step_start_event,
+321	                get_procs("step_start"),
+322	                tracer=tracer,
+323	                hook="step_start",
+324	            )
+325	            boundary_events: list[SegmentBoundaryEvent] = [
+326	                e for e in step_start_events if isinstance(e, SegmentBoundaryEvent)
+327	            ]
+328	            step_start_event = next(
+329	                (e for e in reversed(step_start_events) if isinstance(e, StepStartEvent)),
+330	                step_start_event,
+331	            )
+332	
+333	            # Compute history_hash after step_start processors ran (needed for both
+334	            # invariant-7 check and auto-boundary generation).
+335	            _post_step_msgs = step_start_event.messages or _pre_step_msgs
+336	            _, _hist_after, _ = compute_windows(_post_step_msgs)
+337	            _history_hash_after = compute_history_hash(_hist_after)
+338	
+339	            # Invariant 7: spurious boundary detection (hash equal → no boundary allowed).
+340	            _enforce_boundary_invariant(boundary_events, _history_hash_before, _history_hash_after, step_id)
+
+[Showing lines 281–340 of 981 total. Use offset=340 to read the next section.]

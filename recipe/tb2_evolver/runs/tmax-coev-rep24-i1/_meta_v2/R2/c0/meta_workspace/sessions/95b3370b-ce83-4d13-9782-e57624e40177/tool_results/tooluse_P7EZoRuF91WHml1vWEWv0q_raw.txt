@@ -1,0 +1,62 @@
+556	    """
+557	
+558	    # Dispatch table: event type → method name.
+559	    # Subclasses that use @on() have their entries merged in by __init_subclass__.
+560	    _DISPATCH: dict[type, str] = {
+561	        TaskStartEvent: "on_task_start",
+562	        StepStartEvent: "on_step_start",
+563	        BeforeModelEvent: "on_before_model",
+564	        ModelResponseEvent: "on_after_model",
+565	        ToolCallEvent: "on_before_tool",
+566	        ToolResultEvent: "on_after_tool",
+567	        StepEndEvent: "on_step_end",
+568	        TaskEndEvent: "on_task_end",
+569	    }
+570	
+571	    def __init_subclass__(cls, **kwargs: Any) -> None:
+572	        """Merge @on() decorated methods into this subclass's _DISPATCH table.
+573	
+574	        Also validates that any method named ``on_*`` is either a recognised
+575	        hook name or decorated with ``@on(EventClass)``.  This catches typos
+576	        like ``on_tool_call`` (should be ``on_before_tool``) at import time
+577	        rather than silently never being called.
+578	        """
+579	        super().__init_subclass__(**kwargs)
+580	        dispatch: dict[type, str] = dict(cls._DISPATCH)  # inherit parent entries
+581	
+582	        # First pass: register @on()-decorated methods (they may use any name).
+583	        for name in vars(cls):
+584	            method = vars(cls)[name]  # use vars() to avoid MRO lookup
+585	            if callable(method) and hasattr(method, "_on_event_type"):
+586	                dispatch[method._on_event_type] = name
+587	
+588	        # Second pass: flag on_* methods that aren't valid hooks and aren't @on()-decorated.
+589	        valid_hook_names = set(dispatch.values())
+590	        for name in vars(cls):
+591	            method = vars(cls)[name]
+592	            if (
+593	                callable(method)
+594	                and name.startswith("on_")
+595	                and name not in valid_hook_names
+596	                and not hasattr(method, "_on_event_type")
+597	            ):
+598	                raise TypeError(
+599	                    f"{cls.__qualname__}.{name}: unrecognised hook method name. "
+600	                    f"Valid on_* names: {sorted(valid_hook_names)}. "
+601	                    f"Use @on(EventClass) to handle a custom event type under a free name."
+602	                )
+603	
+604	        cls._DISPATCH = dispatch
+605	
+606	    # Ordering hints — set on subclasses, read by HarnessBuilder.
+607	    # _order:  use PRE / NORMAL / POST constants (or fine-grained int offsets).
+608	    # _after:  list of _singleton_group names that must run before this processor
+609	    #          within the same hook.  Soft: unregistered groups are silently ignored.
+610	    _after: list[str] = []
+611	
+612	    # Sub-harness registry: populated at Harness.__init__() time via _bind_sub_harnesses().
+613	    # Each entry is a minimal Harness configured for that provider key.
+614	    _sub_harnesses: dict[str, Any] = {}
+615	
+
+[Showing lines 556–615 of 844 total. Use offset=615 to read the next section.]

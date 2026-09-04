@@ -1,0 +1,35 @@
+A researcher in our lab has been organizing a dataset of academic papers to build a co-authorship graph. They attempted to extract the co-authorship edges from our SQLite database but their SQL query contained an implicit cross join, resulting in a massive, incorrect list of edges where everyone appears to have co-authored with everyone else!
+
+You need to fix this and build a small API service that provides correct graph analytics. 
+
+Here is what you have:
+1. An SQLite database at `/home/user/dataset.db` with the following tables:
+   - `authors(author_id INTEGER, name TEXT)`
+   - `papers(paper_id INTEGER, title TEXT)`
+   - `paper_authors(paper_id INTEGER, author_id INTEGER)`
+
+2. A proprietary stripped binary at `/app/h_index_oracle`. When executed with an author ID as a command-line argument (e.g., `/app/h_index_oracle 42`), it outputs that author's proprietary H-index score (an integer) to standard output. 
+
+Your task:
+1. **Graph Materialization:** Write a correct SQL query to extract the true co-authorship graph. An edge exists between two authors if they have co-authored at least one paper. The graph should be undirected. The weight of the edge should be the number of distinct papers they have co-authored.
+2. **Graph Analytics:** Using Python (e.g., `networkx`), load this corrected graph and compute the PageRank for all authors. Use the default `networkx` PageRank parameters (alpha=0.85, weight='weight').
+3. **Data Serving:** Create a Python HTTP API (using Flask, FastAPI, or standard library) that listens on `127.0.0.1:8000`.
+   - It must implement a `GET /author/<author_id>` endpoint.
+   - The endpoint must return a JSON response with the following format:
+     ```json
+     {
+       "author_id": 42,
+       "name": "Jane Doe",
+       "pagerank": 0.01524,
+       "h_index": 18,
+       "coauthors": [
+         {"author_id": 15, "weight": 2},
+         {"author_id": 7, "weight": 1}
+       ]
+     }
+     ```
+   - The `coauthors` list should be sorted by `weight` descending, then by `author_id` ascending.
+   - The `h_index` must be retrieved by querying the `/app/h_index_oracle` binary.
+   - If an author does not exist in the database, return a 404 status code.
+
+Leave your API running in the background or foreground so that our automated integration tests can query it to verify your work.

@@ -1,0 +1,304 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""LengthTruncationRecoveryProcessor (v5 — mechanically break the reasoning-only spiral).
+4	
+5	Motivation (R2 trajectory evidence)
+6	-----------------------------------
+7	The R1 config already carried the v4 ``LengthTruncationRecoveryProcessor``
+8	(``tb2_length_recovery`` singleton group): on a length-truncated no-tool-call
+9	turn it collapses the runaway reasoning to a short head + a terminal
+10	"the rest was discarded, start with a command" marker, and rewrites the run
+11	loop's passive "continue from where you left off" nudge into an escalating
+12	actionable directive.
+13	
+14	R2 trajectories prove the v4 *text* escalation is still insufficient for a
+15	sub-cluster of runs. On four failing tasks the collapse fires correctly
+16	(assistant turns end with the v4 discard marker, ``tool_calls == 0``) yet the
+17	model keeps emitting pure chain-of-thought that hits the ``max_tokens`` cap
+18	turn after turn, never reaching a tool call:
+19	
+20	  * ``task_001032`` — 14 truncation events, budget consumed, tar parser never
+21	    fixed. Every truncated turn: content ends with the v4 marker, no tool call.
+22	  * ``task_000740`` — 9 truncation events, ``exit_reason=loop_detected``.
+23	  * ``task_000010`` — 4 truncation events, ``exit_reason=budget_exceeded``.
+24	  * ``task_000028`` — 4 truncation events (interleaved), never finished.
+25	
+26	The common shape is a *behaviour* gap the model cannot self-correct from text:
+27	told "write NO analysis, emit ONE command", it still narrates until the cap.
+28	A reminder the model narrates past is not a fix — the same lesson the
+29	lifecycle-snapshot processor learned. What breaks the momentum is **fresh tool
+30	output the model did not author**: once a real tool result lands in context,
+31	verbose models reliably switch from open-ended reasoning back to acting on the
+32	concrete output.
+33	
+34	v5 change (Control, same lever family, new evidence)
+35	----------------------------------------------------
+36	Keep everything v4 does (collapse + escalating text nudge) and add a
+37	**mechanical forced-action escalation**: once ``force_action_threshold``
+38	*consecutive* truncations have accumulated, ``on_after_model`` injects a real
+39	``Bash`` tool call — a short, fully generic workspace-state snapshot. The run
+40	loop executes it and feeds the output back, so the next turn has fresh ground
+41	truth to react to instead of re-priming the same unfinished thought. This is
+42	the injected-real-tool-call mechanism already proven to fire in this harness
+43	(the ``tb2_self_verify`` lifecycle processor), applied to the truncation
+44	spiral. It fires at most once per streak (the injected tool call clears the
+45	streak, exactly like any other tool-calling turn), so it adds no per-step
+46	regression surface and costs one bounded Bash round-trip only on runs that are
+47	already spiralling and would otherwise burn the whole budget.
+48	
+49	Generality
+50	----------
+51	The snapshot command contains **no task ids, paths, ports, process names, or
+52	any literal from any training task** — it enumerates the current working
+53	directory, recently-modified files, and running user processes. It is generic
+54	shell-state discipline, not domain knowledge, and keys purely on
+55	``finish_reason`` / ``tool_calls`` / ``content`` length plus the harness's own
+56	passive-nudge text — so it is benchmark-agnostic.
+57	
+58	Wiring
+59	------
+60	Reuses the stock singleton group ``tb2_length_recovery`` so it *replaces* the
+61	R1 v4 processor rather than firing a second, conflicting recovery layer.
+62	"""
+63	
+64	from __future__ import annotations
+65	
+66	import dataclasses
+67	import uuid
+68	
+69	from harnessx.core.events import (
+70	    BeforeModelEvent,
+71	    Message,
+72	    ModelResponseEvent,
+73	    TaskEndEvent,
+74	    TaskStartEvent,
+75	    ToolCall,
+76	)
+77	from harnessx.core.processor import MultiHookProcessor
+78	
+79	
+80	_HEAD_CHARS = 400
+81	_TAIL_CHARS = 0
+82	_CONTENT_CHAR_THRESHOLD = 40000
+83	
+84	# Substring of the run loop's passive continuation message. If the last user
+85	# message contains this, it is the re-priming nudge we want to overwrite.
+86	_PASSIVE_MARKER = "cut off by the token limit"
+87	
+88	# Replaces the discarded middle + tail of a runaway truncated turn. Terminal by
+89	# design: it tells the model the abandoned reasoning is gone so it does not try
+90	# to reconstruct it.
+91	_TRUNC_MARKER = (
+92	    "\n\n[the rest of this turn was a long reasoning spiral that hit the token "
+93	    "limit with no command; it has been discarded. Do NOT reconstruct or "
+94	    "continue it — start the next turn with a command.]"
+95	)
+96	
+97	# First occurrence: gentle but concrete redirect.
+98	_NUDGE_FIRST = (
+99	    "Your last turn was cut off by the token limit before you ran any command. "
+100	    "Do NOT continue or re-explain the previous narration — that is what caused "
+101	    "the cut-off. In your next turn write at most TWO short sentences of "
+102	    "reasoning, then issue exactly ONE concrete Bash command that makes forward "
+103	    "progress (inspect a file, run/compile a script, or write an output file). "
+104	    "Keep the whole response short so it is not truncated again."
+105	)
+106	
+107	# Repeated occurrence: hard reset. When a large file write keeps getting
+108	# truncated, a single big heredoc cannot fit under the output cap — steer the
+109	# model toward SMALL payloads: incremental appends, in-place edits (sed/patch),
+110	# or short inspection commands, never a full-file rewrite in one turn.
+111	_NUDGE_REPEAT = (
+112	    "STOP. Your last few turns were all cut off mid-response because the output "
+113	    "is larger than the per-turn token limit. Write NO analysis this turn — emit "
+114	    "exactly ONE Bash tool call and nothing else. Do NOT try to write or rewrite "
+115	    "a whole file in one command; that is what keeps getting truncated. Instead "
+116	    "make a SMALL change that fits: edit in place (`sed -i`), append a chunk "
+117	    "(`cat >> file <<'EOF' ... EOF` with only a few lines), or run ONE short "
+118	    "inspection command (ls, cat, or the failing script) so the next step has "
+119	    "fresh output to act on. One tool call. Zero prose."
+120	)
+121	
+122	# Message paired with the mechanically injected snapshot tool call. Tells the
+123	# model the reasoning loop was broken for it and that concrete state now follows.
+124	_FORCE_ACTION_MSG = (
+125	    "You were stuck emitting reasoning that repeatedly exceeded the output token "
+126	    "limit without ever running a command, so a workspace snapshot was run for "
+127	    "you. Above is real, current state — not your narration. React to THIS "
+128	    "output with one small concrete Bash command (a targeted edit or a single "
+129	    "inspection). Do not resume the abandoned reasoning."
+130	)
+131	
+132	# A fully generic workspace-state snapshot. No task ids/paths/process names.
+133	# `|| true` and `2>&1` keep it silent/successful even when nothing matches.
+134	_SNAPSHOT_CMD = (
+135	    "echo '=== WORKSPACE SNAPSHOT (auto) ==='; "
+136	    "echo '--- cwd + recent files under /home/user ---'; "
+137	    "pwd; "
+138	    "ls -lat /home/user 2>&1 | head -n 25 || true; "
+139	    "find /home/user -maxdepth 3 -type f -mmin -30 2>&1 | head -n 25 || true; "
+140	    "echo '--- running user processes ---'; "
+141	    "ps -eo pid,ppid,stat,comm --sort=pid 2>&1 "
+142	    "| awk 'NR==1 || ($2!=2 && $1!=2)' | head -n 30 || true; "
+143	    "echo '=== END SNAPSHOT ==='"
+144	)
+145	
+146	
+147	class LengthTruncationRecoveryProcessor(MultiHookProcessor):
+148	    """Break the max_tokens reasoning-spiral loop and redirect the model to act.
+149	
+150	    Parameters
+151	    ----------
+152	    repeat_threshold:
+153	        Number of *consecutive* truncations at (or above) which the escalated
+154	        text nudge is used instead of the gentle one. Default 2.
+155	    force_action_threshold:
+156	        Number of *consecutive* truncations at (or above) which the processor
+157	        stops nudging with text and mechanically injects a real Bash snapshot
+158	        tool call so fresh tool output lands in context. Must be >= 1; default
+159	        3. Fires at most once per streak (the injected tool call clears the
+160	        streak).
+161	    head_chars / tail_chars:
+162	        How much of a runaway content blob to keep when collapsing it. Default
+163	        keeps a small head and NO tail so the re-seeding mid-reasoning
+164	        continuation is discarded.
+165	    content_char_threshold:
+166	        Secondary trigger: assistant ``content`` length (chars) at or above
+167	        which a no-tool-call turn is treated as a runaway truncation even when
+168	        ``finish_reason`` is not reported as ``"length"``.
+169	    """
+170	
+171	    _singleton_group = "tb2_length_recovery"
+172	    _order = 5
+173	
+174	    def __init__(
+175	        self,
+176	        repeat_threshold: int = 2,
+177	        force_action_threshold: int = 3,
+178	        head_chars: int = _HEAD_CHARS,
+179	        tail_chars: int = _TAIL_CHARS,
+180	        content_char_threshold: int = _CONTENT_CHAR_THRESHOLD,
+181	    ) -> None:
+182	        self.repeat_threshold = max(1, int(repeat_threshold))
+183	        self.force_action_threshold = max(1, int(force_action_threshold))
+184	        self.head_chars = max(0, int(head_chars))
+185	        self.tail_chars = max(0, int(tail_chars))
+186	        self.content_char_threshold = max(1, int(content_char_threshold))
+187	        self._consecutive: int = 0
+188	        self._pending_nudge: str = ""
+189	        self._pending_force_msg: str = ""
+190	
+191	    async def on_task_start(self, event: TaskStartEvent):
+192	        self._consecutive = 0
+193	        self._pending_nudge = ""
+194	        self._pending_force_msg = ""
+195	        yield event
+196	
+197	    async def on_after_model(self, event: ModelResponseEvent):
+198	        content = event.content or ""
+199	        no_tool_call = not event.tool_calls
+200	        # Primary trigger: explicit length finish (reliable on this backend).
+201	        # Secondary: an oversized no-tool-call content blob (other backends).
+202	        length_truncated = no_tool_call and (
+203	            event.finish_reason == "length"
+204	            or len(content) >= self.content_char_threshold
+205	        )
+206	        if not length_truncated:
+207	            # Any normal / tool-calling turn clears the streak.
+208	            self._consecutive = 0
+209	            self._pending_nudge = ""
+210	            self._pending_force_msg = ""
+211	            yield event
+212	            return
+213	
+214	        self._consecutive += 1
+215	
+216	        # Escalation ladder:
+217	        #   >= force_action_threshold : mechanically inject a real Bash snapshot
+218	        #                               so fresh tool output breaks the spiral.
+219	        #   >= repeat_threshold       : hard text reset (small-payload strategy).
+220	        #   else                      : gentle text redirect.
+221	        if self._consecutive >= self.force_action_threshold:
+222	            # Collapse the runaway turn first (discard the re-seeding middle).
+223	            collapsed_event = self._maybe_collapse(event, content)
+224	            # Arm the paired user message for the next on_before_model, and
+225	            # inject a REAL Bash diagnostic tool call now. The run loop executes
+226	            # it; the injected tool call also clears the streak on the next
+227	            # on_after_model, so this fires at most once per spiral.
+228	            self._pending_nudge = ""
+229	            self._pending_force_msg = _FORCE_ACTION_MSG
+230	            snapshot = ToolCall(
+231	                id=f"lr-{uuid.uuid4().hex[:8]}",
+232	                name="Bash",
+233	                input={"command": _SNAPSHOT_CMD},
+234	            )
+235	            yield dataclasses.replace(
+236	                collapsed_event, tool_calls=(snapshot,)
+237	            )
+238	            return
+239	
+240	        self._pending_nudge = (
+241	            _NUDGE_REPEAT
+242	            if self._consecutive >= self.repeat_threshold
+243	            else _NUDGE_FIRST
+244	        )
+245	        yield self._maybe_collapse(event, content)
+246	
+247	    def _maybe_collapse(self, event: ModelResponseEvent, content: str):
+248	        """Collapse a runaway turn to a short head + terminal marker (no tail)."""
+249	        keep_budget = self.head_chars + self.tail_chars + len(_TRUNC_MARKER)
+250	        if len(content) > keep_budget:
+251	            collapsed = content[: self.head_chars] + _TRUNC_MARKER
+252	            if self.tail_chars:
+253	                collapsed = collapsed + content[-self.tail_chars :]
+254	            return dataclasses.replace(event, content=collapsed)
+255	        return event
+256	
+257	    async def on_before_model(self, event: BeforeModelEvent):
+258	        # Forced-action path: the snapshot tool call was injected on the prior
+259	        # on_after_model; its result is now in history. Append exactly one user
+260	        # message pointing the model at that fresh output. The last role here is
+261	        # a tool result, so a single append is contract-legal (+1).
+262	        if self._pending_force_msg:
+263	            msg = self._pending_force_msg
+264	            self._pending_force_msg = ""
+265	            yield dataclasses.replace(
+266	                event,
+267	                messages=event.messages + (Message(role="user", content=msg),),
+268	            )
+269	            return
+270	
+271	        if not self._pending_nudge:
+272	            yield event
+273	            return
+274	        nudge = self._pending_nudge
+275	        self._pending_nudge = ""
+276	
+277	        messages = event.messages
+278	        if messages and messages[-1].role == "user":
+279	            # Contract-safe path: rewrite ONLY the last user message's content
+280	            # (len_delta == 0). Overwrites the run loop's passive re-priming
+281	            # nudge with an actionable directive; history is otherwise untouched.
+282	            last = messages[-1]
+283	            existing = last.content or ""
+284	            if _PASSIVE_MARKER in existing:
+285	                new_content = nudge
+286	            else:
+287	                new_content = nudge + "\n\n" + existing
+288	            new_last = dataclasses.replace(last, content=new_content)
+289	            yield dataclasses.replace(
+290	                event, messages=messages[:-1] + (new_last,)
+291	            )
+292	        else:
+293	            # Last role is not user (e.g. a tool result) — append exactly one
+294	            # user message (+1, contract legal).
+295	            yield dataclasses.replace(
+296	                event,
+297	                messages=messages + (Message(role="user", content=nudge),),
+298	            )
+299	
+300	    async def on_task_end(self, event: TaskEndEvent):
+301	        self._consecutive = 0
+302	        self._pending_nudge = ""
+303	        self._pending_force_msg = ""
+304	        yield event

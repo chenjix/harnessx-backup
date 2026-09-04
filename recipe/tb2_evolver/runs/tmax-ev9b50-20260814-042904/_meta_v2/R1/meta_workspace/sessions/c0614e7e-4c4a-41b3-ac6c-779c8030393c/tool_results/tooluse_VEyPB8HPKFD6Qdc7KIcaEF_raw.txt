@@ -1,0 +1,72 @@
+985	    harness_config,
+986	    model_config,
+987	    max_steps: int,
+988	    resume_run_id: str | None = None,
+989	    verbose: bool = False,
+990	    initial_task: str | None = None,
+991	) -> None:
+992	    import signal
+993	    import time
+994	    import json as _json
+995	    import uuid as _uuid
+996	
+997	    from harnessx import BaseTask
+998	    from harnessx.tracing.journal import HarnessJournal
+999	    from harnessx.plugins import plugin_registry
+1000	    from harnessx.plugins.builtins.session import SessionPlugin
+1001	    from harnessx.plugins.builtins.agent_ctx import AgentContextPlugin
+1002	    from harnessx.plugins.builtins.slash_processor import SlashCommandProcessor
+1003	
+1004	    _install_loop_exception_filter(asyncio.get_running_loop())
+1005	
+1006	    _print_banner("interactive", "/help  /new  /compact  /agent  /project  /home  /model  /quit")
+1007	    _has_key_cfg = _check_api_key(model_config)
+1008	
+1009	    # Show current model + config hints (TTY only)
+1010	    if sys.stderr.isatty():
+1011	        DIM = "\033[2m"
+1012	        NC = "\033[0m"
+1013	        _mem_backend = _detect_memory_backend(harness_config)
+1014	
+1015	        sys.stderr.write(
+1016	            f"{DIM}  status bar: model shown in bottom toolbar\n"
+1017	            f"  memory backend: {_mem_backend}\n"
+1018	            f"  routes: multi-model · ProviderGroup · judge/compact roles → harnessx lab{NC}\n\n"
+1019	        )
+1020	
+1021	    # Register built-in plugins so /help shows all commands (idempotent)
+1022	    plugin_registry.register(SessionPlugin())
+1023	    plugin_registry.register(AgentContextPlugin())
+1024	
+1025	    # Wire SlashCommandProcessor + CLIToolPrinter into the harness.
+1026	    # SlashCommandProcessor goes at PRE phase ("*") to intercept before model.
+1027	    # CLIToolPrinter goes on before_tool / after_tool to display real-time summaries.
+1028	    from harnessx.core.processor import MultiHookProcessor as _MHP
+1029	    from harnessx.core.events import ToolCallEvent, ToolResultEvent
+1030	
+1031	    # ── Streaming state (shared between stream_cb and CLIToolPrinter) ─────────
+1032	    _at_line_start = [True]  # True = stdout is at start of a new line
+1033	    _streamed = [False]  # True = at least one delta was printed this turn
+1034	
+1035	    def _stream_cb(delta: str) -> None:
+1036	        sys.stdout.write(delta)
+1037	        sys.stdout.flush()
+1038	        _at_line_start[0] = delta.endswith("\n")
+1039	        _streamed[0] = True
+1040	
+1041	    def _ensure_line_start() -> None:
+1042	        """Ensure stdout is at the start of a new line before printing tool output."""
+1043	        if not _at_line_start[0]:
+1044	            sys.stdout.write("\n")
+1045	            sys.stdout.flush()
+1046	            _at_line_start[0] = True
+1047	
+1048	    class _CLIToolPrinter(_MHP):
+1049	        async def on_before_tool(self, event: ToolCallEvent):  # type: ignore[override]
+1050	            _ensure_line_start()
+1051	            sys.stdout.write(_fmt_tool_start(event.tool_name, event.tool_input))
+1052	            sys.stdout.flush()
+1053	            _at_line_start[0] = True
+1054	            yield event
+
+[Showing lines 985–1054 of 2152 total. Use offset=1054 to read the next section.]

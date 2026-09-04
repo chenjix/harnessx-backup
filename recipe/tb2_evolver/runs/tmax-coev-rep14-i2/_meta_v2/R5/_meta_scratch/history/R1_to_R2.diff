@@ -1,0 +1,31 @@
+--- R1
++++ R2
+@@ -49,17 +49,2 @@
+   _hook_: '*'
+-# Break ACTION-level repetition loops (identical Bash calls repeated with no
+-# state progress). Complements LengthTruncationRecoveryProcessor, which only
+-# catches finish_reason=length narration loops. Strategy 1 (exact name+inputs)
+-# warns at 3 identical consecutive calls and raises LoopDetectedError at 5,
+-# yielding a clean `loop_detected` exit instead of wasting the whole budget.
+-# Strategy 2 (name-only) is disabled here (threshold set very high) because the
+-# agent has only the Bash tool, so >=8 consecutive Bash calls is normal and
+-# would produce constant false-positive warnings.
+-- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+-  window_size: 12
+-  warn_threshold: 3
+-  threshold: 5
+-  name_warn_threshold: 999
+-  compaction_drop_threshold: 5
+-  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor
+@@ -85,2 +70,10 @@
+   _hook_: '*'
++# Append an independent-recompute nudge to the self-verify ACK on numeric-
++# computation tasks (regression/bootstrap/clustering/matrix/optimisation/…).
++# Rides on top of CustomSelfVerifyProcessor (_order=90); this runs at _order=95
++# so the ACK result exists to append to. Mutates only the tool-result string
++# (contract-safe), fires <=1x/task, arms by generic compute keywords.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep14-i2/_meta_v2/R2/c4/processors/compute_crosscheck_reminder.py::ComputeCrossCheckReminder
++  min_result_terms: 1
++  _hook_: '*'
+ workspace: null

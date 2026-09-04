@@ -1,0 +1,75 @@
+281	## Round 4 — synthesis: adopt best live lineage (guard is inert)
+282	
+283	<!-- journal:frontmatter
+284	round: 4
+285	timestamp: 2026-09-04T06:00:00Z
+286	hypothesis_id: h_synth_adopt_stuck_reasoning_lineage_v1
+287	levers: [control]
+288	predicted_affected: [task_000118_3043e92d, task_000015_89886d8d, task_001031_a8f0eb37, task_001818_b251e5ea]
+289	cited_candidates: [C-001]
+290	gating_outcome: pending
+291	gating_attribution: pending
+292	expected_global_gain: "Holds the 0.580 incumbent lineage (29 of 50) instead of reverting to R0's 0.500-labelled baseline, in a self-contained config. No new flips claimed - honest reading is the reasoning-loop guard is INERT on this batch (fired 0 of 50), so realistic gain is parity-with-best-live-lineage plus no regressions introduced."
+293	regression_risk: "Effectively zero vs the incumbent: config is functionally identical to n1/n2 (same StuckReasoningRecoveryProcessor, same threshold 12, same sibling prompt), relocated to a self-owned file path. Because the guard never fires on this batch it cannot change any task outcome vs the incumbent."
+294	cost_shift: "Zero vs incumbent (identical pipeline; guard adds no per-step cost and fires zero times)."
+295	rollback_trigger: "If R5 pass_rate falls below R0's 25 of 50 status=ok baseline AND the reasoning-loop guard still fires 0 times, revert to R0 (drop the inert guard)."
+296	-->
+297	
+298	### Why
+299	
+300	Assigned focus: complementary synthesis of the live pivots. Reading every
+301	pivot: n1 (R2/c0) and n2 (R2) config.yaml are BYTE-IDENTICAL and share one
+302	trajectory dir, so there are only two distinct harnesses, R0 and
+303	"R0 plus StuckReasoningRecoveryProcessor". current_config points at R0. The
+304	per-task diff is R0=25/50 vs r1-fe-c0=29/50 (all status=ok): +6 gains, -2
+305	losses (net +4). The decisive attribution finding: the StuckReasoning nudge
+306	("LOOP DETECTED" / "STILL LOOPING") fired ZERO times across all 50 tasks in the
+307	r1-fe-c0 run, including on every gained and every lost task. So the +6/-2 swing
+308	is entirely run-to-run variance, not a mechanism effect; the guard's
+309	repeat_threshold=12 is never reached because LengthTruncationRecovery
+310	(threshold=2) breaks the common loops first. The synthesis focus (graft a
+311	complementary mechanism to repair the winning lineage's unique losses) is
+312	therefore unsupported: the two losses (1089, 1536) are stochastic correctness
+313	differences the inert guard did not cause and no harness lever attributably
+314	repairs. Per the generalization contract, that earns adopting the best live
+315	lineage as-is rather than inventing a special case.
+316	
+317	### Changes
+318	
+319	- config.yaml - adopt the incumbent 0.580 lineage: R0 pipeline plus
+320	  StuckReasoningRecoveryProcessor (repeat_threshold=12, max_nudges=3,
+321	  min_chars=24). Repointed the processor's file path to a LOCAL copy so the
+322	  config is self-contained.
+323	- processors/stuck_reasoning_recovery.py - copied verbatim from the R2/c0
+324	  lineage into this proposal's dir.
+325	- system_prompt.txt - copied byte-for-byte from R0 (SiblingSystemPromptBuilder
+326	  reads the sibling next to the active config).
+327	
+328	### Evidence
+329	
+330	- n1 (R2/c0) and n2 (R2) config.yaml read in full: identical; only structural
+331	  delta vs R0 is the StuckReasoning processor at threshold=12.
+332	- Zero-fire attribution: grep count of "LOOP DETECTED / STILL LOOPING" = 0 on
+333	  all 50 r1-fe-c0 message logs, incl. gains (329,338,1032,1264,1498,1673) and
+334	  losses (1089,1536).
+335	- task_001089 (lost, stochastic): r1-fe-c0 ran to clean completion (exit 0,
+336	  full summary) yet verifier scored 0; R0 actually looped ("cut off by token
+337	  limit", identical narration) but banked reward 1. Nudge inert both runs.
+338	- task_001536 (lost, stochastic): r1-fe-c0 ended mid-debugging cyclic-symlink
+339	  logic (65 msgs, still failing); R0 finished correctly (76 msgs). Nudge inert.
+340	- Threshold-lowering rejected: observed max identical-assistant run = 12; the
+341	  two PASSING tasks with long runs, task_000344 (run 12 at frac 0.45) and
+342	  task_001591 (run 11 at frac 0.76), loop MID-TASK then self-recover to reward
+343	  1, so a lower threshold would nudge them at real 2-task regression risk for an
+344	  advisory-only, low-yield upside. Pareto-negative on current evidence.
+345	
+346	### Uncertainty
+347	
+348	The guard is inert on the current batch, so this round is essentially a
+349	self-contained promotion of the best live lineage; its benchmark value over R0
+350	rests on stochastic variance and cannot be claimed as causal. If a future round
+351	wants to actually engage the real failing loop cluster (6 tasks with long
+352	identical-runs), it should gate a threshold sweep as its own bet with the two
+353	passing long-loop tasks (000344, 001591) as the explicit regression probe, not
+354	fold it into a synthesis slot. If R5 shows the guard still fires 0 times and
+355	pass_rate does not clear R0's baseline, drop the inert guard entirely.

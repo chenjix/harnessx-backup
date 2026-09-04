@@ -1,0 +1,36 @@
+You are a Machine Learning Engineer preparing a spatial statistics data generation service. You need to write a C program that performs mesh domain decomposition and refinement to synthesize training data chunks on-demand.
+
+Please write a C program and save it to `/home/user/mesh_server.c`. Compile it to an executable named `/home/user/mesh_server`.
+
+The program must act as a simple TCP server listening on `127.0.0.1:9090` and run in the background. 
+
+**Task Details:**
+1. The server stores a hardcoded 4x4 low-resolution float grid (the master domain):
+   Row 0: 1.0, 2.0, 3.0, 4.0
+   Row 1: 5.0, 6.0, 7.0, 8.0
+   Row 2: 9.0, 10.0, 11.0, 12.0
+   Row 3: 13.0, 14.0, 15.0, 16.0
+
+2. The server accepts TCP connections. Upon connection, the client will send a single ascii digit (`0`, `1`, `2`, or `3`) followed by a newline (`\n`). 
+
+3. This digit represents the quadrant to extract (domain decomposition):
+   - `0`: Top-Left 2x2 (Rows 0-1, Cols 0-1)
+   - `1`: Top-Right 2x2 (Rows 0-1, Cols 2-3)
+   - `2`: Bottom-Left 2x2 (Rows 2-3, Cols 0-1)
+   - `3`: Bottom-Right 2x2 (Rows 2-3, Cols 2-3)
+
+4. The server extracts the chosen 2x2 quadrant and performs **mesh refinement** to scale it up to a 4x4 grid using nearest-neighbor interpolation. (Every original scalar value becomes a 2x2 block of identical values).
+
+5. The server compares the refined 4x4 grid against a hardcoded reference dataset for that quadrant. The reference datasets (in row-major order, 16 elements each) are:
+   - Ref `0`: 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 5.0, 0.0, 6.0, 0.0, 0.0, 5.0, 0.0, 6.0
+   - Ref `1`: 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0, 7.0, 0.0, 8.0, 0.0, 0.0, 7.0, 0.0, 8.0
+   - Ref `2`: 9.0, 0.0, 10.0, 0.0, 0.0, 9.0, 0.0, 10.0, 13.0, 0.0, 14.0, 0.0, 0.0, 13.0, 0.0, 14.0
+   - Ref `3`: 11.0, 0.0, 12.0, 0.0, 0.0, 11.0, 0.0, 12.0, 15.0, 0.0, 16.0, 0.0, 0.0, 15.0, 0.0, 16.0
+
+6. The server calculates the Mean Squared Error (MSE) between the refined grid and the reference dataset: `Sum( (refined_i - ref_i)^2 ) / 16.0`.
+
+7. The server sends the calculated MSE back to the client as an ascii string formatted to exactly two decimal places, followed by a newline (e.g., `12.34\n`).
+
+8. After sending the response, the server should close the client socket and wait for the next connection.
+
+Compile your code, start the server in the background, and verify it is listening on port 9090.

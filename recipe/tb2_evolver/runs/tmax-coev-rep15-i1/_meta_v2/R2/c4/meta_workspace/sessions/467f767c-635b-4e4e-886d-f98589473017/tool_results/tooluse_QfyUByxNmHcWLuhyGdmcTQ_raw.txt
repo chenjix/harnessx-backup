@@ -1,0 +1,27 @@
+be impossible.
+
+
+## Round 3 — identical-command loop breaker (c4)
+
+<!-- journal:frontmatter
+round: 3
+timestamp: 2026-08-30T07:30:00Z
+hypothesis_id: h_repeated_command_loop_breaker_v2
+levers: [control]
+predicted_affected: [task_000264_ab8c7253, task_001031_a8f0eb37, task_001321_658ce4a8]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+retry_rationale: "The R1/c5 sibling h_repeated_command_loop_breaker_v1 was a parallel proposal that never merged into the accepted R1/c2 -> R2 config lineage (outcome pending, not reverted), so this mechanism has never actually run against the benchmark. task_000264 is STILL failing budget_exceeded in the r1 trajectories with the exact 23x-identical-command loop the c5 processor was designed for, and the current config has no guard for tool-calling loops (only finish_reason=length). Re-scoped raise_threshold 5->6 for more recovery headroom before reclaiming budget."
+expected_global_gain: "Closes the identical-Bash-command budget_exceeded cluster (task_000264 recursive-CTE 23x-identical, task_001031 mpi4py 33x-identical, task_001321 extractor 19x-identical). warn redirect gives recovery headroom to actually write required outputs; raise reclaims wasted steps on unrecoverable loops. Generalizes to any verbatim-command loop, content-agnostic."
+regression_risk: "Low. Fingerprints only substantive Bash commands (non-empty, above min length); empty/trivial/non-Bash calls are neutral interludes that neither count nor reset, specifically protecting the passing many-empty-call recovery task_001089_220cc46b. warn precedes raise by 3 turns. New singleton group tmax_repeated_command_breaker; additive; contract-clean."
+cost_shift: "Net negative — looping tasks exit early instead of burning full 80-step budget; ~0 added cost on non-looping tasks (one appended sentence per warn, only inside an active verbatim loop)."
+rollback_trigger: "If R4 shows task_000264 still budget_exceeded (loop unbroken) AND none of the 3 predicted tasks flip, OR any previously-passing task regresses to loop_detected via the breaker firing (esp. task_001089_220cc46b), revert the RepeatedCommandLoopBreaker entry."
+-->
+
+### Why
+
+Assigned focus task_000264_ab8c7253 fails exit_reason=budget_exceeded at the
+full 80-step cap, reward=0, with ALL THREE required output files missing
+=== final canonicalize ===
+{"ok": true, "checked_templates": 0}

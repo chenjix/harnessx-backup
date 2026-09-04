@@ -1,0 +1,160 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""LengthLoopDeprimeProcessor — break self-priming max_tokens repetition loops.
+4	
+5	Systemic failure mode observed on the weak-model Tmax eval: the model emits a
+6	paragraph of narration (no tool call), hits ``max_tokens`` (``finish_reason ==
+7	"length"``), the run loop appends a passive "please continue" nudge, and the
+8	model re-emits *the same* narration next turn. Because each truncated turn's
+9	full narration is persisted to history, the model sees its own repeated prose
+10	5-6 times in context, which re-primes the exact same runaway generation. The
+11	cycle burns the entire step budget on one task (observed: 15-17 consecutive
+12	length-truncations across tasks 264 / 958 / 1818, all ``budget_exceeded``).
+13	
+14	The stock ``LengthTruncationRecoveryProcessor`` collapses only the *current*
+15	turn (head+tail) and nudges. That mitigates but does not break the loop: the
+16	collapsed-but-still-substantial narration keeps accumulating and re-priming.
+17	
+18	This processor keeps the first-truncation behaviour (collapse head+tail, gentle
+19	nudge) but, once truncations recur consecutively, **de-primes** the loop:
+20	
+21	* it collapses the current runaway turn to a tiny marker stub (dropping the
+22	  repeated narration entirely, not just its middle) so the persisted history
+23	  stops re-showing the model its own loop text, and
+24	* it replaces the passive continuation with an escalating hard directive that
+25	  forbids prose and demands exactly one concrete Bash command.
+26	
+27	Contract-safe: mutates only the current ``ModelResponseEvent.content`` in
+28	``on_after_model`` (no ``messages`` field there) and, in ``on_before_model``,
+29	either replaces the last user message (when the run loop already appended its
+30	passive nudge) or appends exactly one user message when the tail is not a user
+31	turn — never removes or reorders history.
+32	"""
+33	
+34	from __future__ import annotations
+35	
+36	import dataclasses
+37	
+38	from harnessx.core.events import (
+39	    BeforeModelEvent,
+40	    Message,
+41	    ModelResponseEvent,
+42	    TaskEndEvent,
+43	    TaskStartEvent,
+44	)
+45	from harnessx.core.processor import MultiHookProcessor
+46	
+47	_TRUNC_MARKER = (
+48	    "\n\n[response truncated by harness: the model hit the output token limit "
+49	    "without issuing a tool call; the omitted middle was discarded to prevent a "
+50	    "repetition loop]\n\n"
+51	)
+52	
+53	# On a *repeated* truncation the whole narration is dropped: leaving it in
+54	# history is what re-primes the loop. Only this compact stub is persisted.
+55	_DEPRIME_STUB = (
+56	    "[prior turn discarded by harness: the model produced only narration and hit "
+57	    "the output token limit again — repeated no-op narration was removed to break "
+58	    "a repetition loop]"
+59	)
+60	
+61	_NUDGE_FIRST = (
+62	    "Your last turn ran into the output token limit without running any command. "
+63	    "Do NOT re-explain or continue the previous narration. In your next turn write "
+64	    "at most two sentences of reasoning, then issue exactly ONE concrete Bash "
+65	    "command that makes progress (inspect a file, run a script, or write output). "
+66	    "Keep the response short."
+67	)
+68	
+69	_NUDGE_REPEAT = (
+70	    "STOP. You have hit the output token limit several turns in a row — you are "
+71	    "repeating narration instead of acting, and that prior narration has now been "
+72	    "discarded from the conversation. Do not restate your plan or analysis. Your "
+73	    "entire next reply must be a SINGLE short Bash tool call and nothing else: "
+74	    "either (a) run one quick command to inspect the current concrete state "
+75	    "(e.g. `ls`, `cat`, a status check), or (b) write one required output file. "
+76	    "No prose. One command."
+77	)
+78	
+79	
+80	class LengthLoopDeprimeProcessor(MultiHookProcessor):
+81	    """Break the max_tokens repetition loop by de-priming history and hard-nudging."""
+82	
+83	    _singleton_group = "tmax_length_recovery"  # same group: replaces the stock one
+84	    _order = 5
+85	
+86	    def __init__(
+87	        self,
+88	        repeat_threshold: int = 2,
+89	        head_chars: int = 1200,
+90	        tail_chars: int = 600,
+91	        deprime_after: int = 2,
+92	    ) -> None:
+93	        self.repeat_threshold = max(1, int(repeat_threshold))
+94	        # Once consecutive truncations reach ``deprime_after`` we stop keeping
+95	        # any of the runaway narration in history.
+96	        self.deprime_after = max(1, int(deprime_after))
+97	        self.head_chars = max(0, int(head_chars))
+98	        self.tail_chars = max(0, int(tail_chars))
+99	        self._consecutive: int = 0
+100	        self._pending_nudge: str = ""
+101	
+102	    async def on_task_start(self, event: TaskStartEvent):
+103	        self._consecutive = 0
+104	        self._pending_nudge = ""
+105	        yield event
+106	
+107	    async def on_after_model(self, event: ModelResponseEvent):
+108	        length_truncated = event.finish_reason == "length" and not event.tool_calls
+109	        if not length_truncated:
+110	            self._consecutive = 0
+111	            self._pending_nudge = ""
+112	            yield event
+113	            return
+114	
+115	        self._consecutive += 1
+116	        self._pending_nudge = (
+117	            _NUDGE_REPEAT if self._consecutive >= self.repeat_threshold else _NUDGE_FIRST
+118	        )
+119	
+120	        content = event.content or ""
+121	
+122	        # Repeated truncation → drop the narration entirely (de-prime the loop).
+123	        if self._consecutive >= self.deprime_after:
+124	            yield dataclasses.replace(event, content=_DEPRIME_STUB)
+125	            return
+126	
+127	        # First truncation → keep head+tail so useful early reasoning survives.
+128	        if len(content) > (self.head_chars + self.tail_chars + len(_TRUNC_MARKER)):
+129	            collapsed = (
+130	                content[: self.head_chars]
+131	                + _TRUNC_MARKER
+132	                + (content[-self.tail_chars :] if self.tail_chars else "")
+133	            )
+134	            yield dataclasses.replace(event, content=collapsed)
+135	        else:
+136	            yield event
+137	
+138	    async def on_before_model(self, event: BeforeModelEvent):
+139	        if not self._pending_nudge:
+140	            yield event
+141	            return
+142	        nudge = self._pending_nudge
+143	        self._pending_nudge = ""
+144	        msgs = list(event.messages)
+145	        # Run loop may already have appended a passive "continue" user message
+146	        # for finish_reason=length. Replace it (do not add a second) to respect
+147	        # the before_model +1/last-role-user contract.
+148	        if msgs and getattr(msgs[-1], "role", None) == "user":
+149	            msgs[-1] = Message(role="user", content=nudge)
+150	            yield dataclasses.replace(event, messages=tuple(msgs))
+151	        else:
+152	            yield dataclasses.replace(
+153	                event,
+154	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+155	            )
+156	
+157	    async def on_task_end(self, event: TaskEndEvent):
+158	        self._consecutive = 0
+159	        self._pending_nudge = ""
+160	        yield event

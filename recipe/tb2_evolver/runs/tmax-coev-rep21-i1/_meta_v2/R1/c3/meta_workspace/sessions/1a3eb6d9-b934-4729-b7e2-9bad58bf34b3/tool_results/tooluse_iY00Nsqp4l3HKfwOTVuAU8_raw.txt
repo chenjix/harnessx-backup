@@ -1,0 +1,69 @@
+79:_SELF_VERIFY_TOOL = "_tb2_self_verify"
+80:_SELF_VERIFY_ACK = "Verification check initiated. See the message above for instructions."
+81:_SELF_VERIFY_MSG = """\
+137:            self._pending_message = _SELF_VERIFY_MSG
+140:                name=_SELF_VERIFY_TOOL,
+148:        if event.tool_name == _SELF_VERIFY_TOOL:
+149:            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+---
+from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+from harnessx.processors.context.strategies.system_prompt.base import (
+    BaseSystemPromptBuilder,
+)
+from harnessx.processors.context.system_prompt import SystemPromptProcessor
+from harnessx.processors.control.bg_install_guard import BgInstallGuard
+from harnessx.processors.control.compaction import CompactionProcessor
+from harnessx.processors.control.parse_retry import ParseRetryProcessor
+from harnessx.processors.control.tool_call_correction import ToolCallCorrectionLayer
+from harnessx.tools.builtin import bash_tool
+from harnessx.tools.inmemory import InMemoryToolRegistry
+
+from .defaults import OUTPUT_LIMIT, WORKSPACE_PATH
+
+_REDIRECT_WRITE_RE = re.compile(r"(?<![<>2&\d])>{1,2}\s*([^\s;&|><\n'\"]+)")
+_SED_INPLACE_RE = re.compile(r"\bsed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|-i\S*)\s+\S+\s+([^\s;&|><\n'\"]+)")
+_TEE_WRITE_RE = re.compile(r"\btee\s+(?:-\S+\s+)*([^\s;&|><\n'\"]+)")
+_SKIP_PATH_RE = re.compile(r"^(/dev/|/proc/|/sys/|-|\d+$)")
+
+
+def _extract_written_files(cmd: str) -> list[str]:
+    """Return deduplicated file paths that a bash command writes to."""
+    if ">" not in cmd and "sed" not in cmd and "tee" not in cmd:
+        return []
+    paths: set[str] = set()
+    for pattern in (_REDIRECT_WRITE_RE, _SED_INPLACE_RE, _TEE_WRITE_RE):
+        for m in pattern.finditer(cmd):
+            p = m.group(1).strip("'\"")
+            if p and not _SKIP_PATH_RE.match(p):
+                paths.add(p)
+    return list(paths)
+
+
+_EDIT_LIMIT_WARN = (
+    "\n\n[EditDetection] File `{path}` has been modified more than {threshold} times. "
+    "You are over-editing this file — step back and try a fundamentally different approach."
+)
+
+
+_SELF_VERIFY_TOOL = "_tb2_self_verify"
+_SELF_VERIFY_ACK = "Verification check initiated. See the message above for instructions."
+_SELF_VERIFY_MSG = """\
+Before finishing, run through this checklist — do not skip any step even if you already verified:
+
+1. **Re-read the task description now.** Does your solution address every requirement, including edge cases, accuracy thresholds, and exact output format?
+
+2. **Check every required output file exists at its exact path:**
+```bash
+ls -lh /path/to/each/required/output/file
+```
+A script that ran without errors does NOT guarantee the file was written. Run `ls` explicitly for each required file.
+
+3. **Inspect the actual file contents** — `cat` or `head` each output file and confirm the values are semantically correct, not just that the file exists or is non-empty.
+
+4. **Validate your verification method.** Did your test actually exercise the real behavior? Tests that only check syntax, importability, or exit code 0 on a trivial case are NOT valid — they can pass even on a broken implementation.
+
+5. **For running services:** confirm they are still alive and reachable right now, not just that they started earlier.
+
+Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+**SUCCESS: task complete. Output files confirmed at [list each required path].**\
+"""

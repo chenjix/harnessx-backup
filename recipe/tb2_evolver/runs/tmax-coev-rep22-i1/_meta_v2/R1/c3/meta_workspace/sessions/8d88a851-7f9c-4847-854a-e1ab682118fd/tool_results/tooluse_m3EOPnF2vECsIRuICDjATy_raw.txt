@@ -1,0 +1,86 @@
+# Named ordering phases for MultiHookProcessor._order.
+# Use these instead of magic integers; fine-grained values are still accepted
+# (e.g. PRE + 5 runs just after PRE processors).
+PRE = 0  # Interceptors, guards, setup — run before main logic
+NORMAL = 50  # Main processing logic (default)
+POST = 100  # Cleanup, export, finalization
+
+
+@runtime_checkable
+class Processor(Protocol):
+    """
+    Consumes an Event, can:
+    - yield the same event (pass-through)
+    - yield a modified event (transform)
+    - yield multiple events (split, for multi-agent fork)
+    - yield nothing (intercept/block)
+    - raise an exception (interrupt)
+    """
+
+    async def process(self, event: Event) -> AsyncIterator[Event]: ...
+
+
+def _diff_primary(
+    prev_events: "list[Event]",
+    curr_events: "list[Event]",
+    event_type: type,
+) -> "str | None":
+=== post hook invariants ===
+def check_post_hook_invariants(
+    hook: str,
+    initial_msgs: "tuple",
+    final_msgs: "tuple",
+    *,
+    step_id: int = -1,
+    raw_msgs: "tuple | None" = None,
+) -> None:
+    """Check all post-hook-chain invariants (草案 §Post-hook 不变量).
+
+    Called once after the **entire** hook-chain completes.  Enforces structural
+    guarantees that must hold regardless of how many processors ran.
+
+    Invariants checked:
+    1. system count ≤ 1 and at position 0 when present.
+    2. ``len(raw_track) == len(effective_track)`` (when ``raw_msgs`` provided).
+    3. Same-index role match between raw and effective tracks.
+    4. Same-index ``tool_call_id`` for ``role=tool`` messages.
+    5. ``before_model`` net length change only 0 or +1.
+    6. Non-authorized hooks must have net length change == 0.
+    7. boundary consistency is handled by RunLoop (hash-based); not rechecked here.
+    """
+    # Invariant 1: system constraint (only meaningful when final_msgs non-empty)
+    sys_count = sum(1 for m in final_msgs if m.role == "system") if final_msgs else 0
+    if sys_count > 1:
+        _handle_violation(
+            f"post-hook: {sys_count} system messages in final messages (max 1 allowed)",
+            hook=hook,
+            violation_type="invariant_system_count",
+            step_id=step_id,
+        )
+    if sys_count == 1 and final_msgs and final_msgs[0].role != "system":
+        _handle_violation(
+            "post-hook: system message exists but is not at position 0",
+            hook=hook,
+            violation_type="invariant_system_position",
+            step_id=step_id,
+        )
+
+    # Invariants 2-4: raw/effective track alignment (when raw provided)
+    if raw_msgs is not None:
+        if len(raw_msgs) != len(final_msgs):
+            _handle_violation(
+                f"post-hook: raw_track len={len(raw_msgs)} != effective_track len={len(final_msgs)}",
+                hook=hook,
+                violation_type="invariant_track_length",
+                step_id=step_id,
+            )
+        else:
+            for i, (r, e) in enumerate(zip(raw_msgs, final_msgs)):
+                if r.role != e.role:
+                    _handle_violation(
+                        f"post-hook: role mismatch at index {i}: raw={r.role!r} eff={e.role!r}",
+                        hook=hook,
+                        violation_type="invariant_role_mismatch",
+                        step_id=step_id,
+                    )
+                    break

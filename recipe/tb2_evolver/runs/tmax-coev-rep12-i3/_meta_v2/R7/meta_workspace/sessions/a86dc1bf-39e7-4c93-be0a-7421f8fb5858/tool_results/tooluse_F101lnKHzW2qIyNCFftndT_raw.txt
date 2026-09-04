@@ -1,0 +1,62 @@
+92	    _order = 8  # after context.env (5), before token_budget (10)
+93	
+94	    def _bind_model_config(self, model_config: Any) -> None:
+95	        super()._bind_model_config(model_config)
+96	        if self._summarize_key not in self._sub_harnesses and model_config is not None:
+97	            from ...core.harness import Harness as _Harness, HarnessConfig
+98	            from ...tracing.null_tracer import NullTracer as _NullTracer
+99	            from ...core.model_config import ModelConfig as _MC
+100	
+101	            provider = model_config.get(self._summarize_key)  # falls back to "main" if key absent
+102	            self._sub_harnesses = {
+103	                **self._sub_harnesses,
+104	                self._summarize_key: _Harness(_MC(main=provider), HarnessConfig(tracer=_NullTracer())),
+105	            }
+106	
+107	    def _maybe_rebuild_sub_harness(self) -> None:
+108	        """Rebuild the summarize sub-harness with a nested HarnessJournal when the parent uses one.
+109	
+110	        Called from on_task_start once session_id is known. The child journal is nested at
+111	        {parent.base_dir}/{session_id}/subharnesses/ mirroring how spawn_subagent nests
+112	        child agents under {parent.base_dir}/{session_id}/subagents/.
+113	        """
+114	        if not self._session_id:
+115	            return
+116	        rt = getattr(self, "_harness_runtime", None)
+117	        if rt is None:
+118	            return
+119	        from ...tracing.journal import HarnessJournal as _HJ
+120	
+121	        tracer = rt.tracer
+122	        if not isinstance(tracer, _HJ):
+123	            return
+124	        import os
+125	        from ...core.harness import Harness as _Harness, HarnessConfig
+126	        from ...core.config_schema import TracerConfig as _TC
+127	        from ...core.model_config import ModelConfig as _MC
+128	
+129	        model_config = getattr(self, "_model_config", None)
+130	        if model_config is None:
+131	            return
+132	        provider = model_config.get(self._summarize_key)
+133	        child_base_dir = os.path.join(tracer.base_dir, self._session_id, "subharnesses")
+134	        child_tracer = _TC(
+135	            base_dir=child_base_dir,
+136	            export_jsonl=tracer.export_jsonl,
+137	            silent=tracer.silent,
+138	        )
+139	        self._sub_harnesses = {
+140	            **self._sub_harnesses,
+141	            self._summarize_key: _Harness(_MC(main=provider), HarnessConfig(tracer=child_tracer)),
+142	        }
+143	
+144	    def __init__(
+145	        self,
+146	        token_threshold: int = 140_000,
+147	        message_threshold: int = 100,
+148	        retention_window: int = 6,
+149	        eviction_fraction: float = 0.5,
+150	        summarize_key: str = "summarize",
+151	        summarize_fn: Callable[[list[Message]], Coroutine[Any, Any, str]] | None = None,
+
+[Showing lines 92–151 of 317 total. Use offset=151 to read the next section.]

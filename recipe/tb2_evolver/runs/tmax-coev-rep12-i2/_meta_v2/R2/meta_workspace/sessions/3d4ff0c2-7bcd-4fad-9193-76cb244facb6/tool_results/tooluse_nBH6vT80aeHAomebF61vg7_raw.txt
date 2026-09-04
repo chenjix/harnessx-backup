@@ -1,0 +1,580 @@
+===== task_000164_ee3fd873 =====
+reward: 0
+exit_reason: done steps: 12
+--- output_tail ---
+ test_output_json_exists_and_valid():
+        path = '/home/user/output.json'
+        assert os.path.exists(path), f"Missing output file: {path}"
+        assert os.path.isfile(path), f"{path} is not a file"
+    
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            pytest.fail(f"Could not parse {path} as JSON: {e}")
+    
+        assert "alpha" in data, "Missing 'alpha' in output.json"
+        assert "beta" in data, "Missing 'beta' in output.json"
+        assert "y_pred" in data, "Missing 'y_pred' in output.json"
+    
+        expected_alpha = 2.5
+        expected_beta = 0.5
+        expected_y_pred = 3.195079
+    
+        alpha_diff = abs(data['alpha'] - expected_alpha)
+        beta_diff = abs(data['beta'] - expected_beta)
+        ypred_diff = abs(data['y_pred'] - expected_y_pred)
+    
+        assert alpha_diff < 1e-3, f"Expected alpha ~ {expected_alpha}, got {data['alpha']}"
+        assert beta_diff < 1e-3, f"Expected beta ~ {expected_beta}, got {data['beta']}"
+>       assert ypred_diff < 1e-3, f"Expected y_pred ~ {expected_y_pred}, got {data['y_pred']}"
+E       AssertionError: Expected y_pred ~ 3.195079, got 3.4418448840589697
+E       assert 0.24676588405896993 < 0.001
+
+/tmp/test_final_state.py:41: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_output_json_exists_and_valid - Ass...
+1 failed, 2 passed in 0.01s
+
+===== task_000785_b727c84b =====
+reward: 0
+exit_reason: done steps: 13
+--- output_tail ---
+ionErr...
+1 failed, 2 passed in 0.02s
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+___________________________ test_ks_test_report_json ___________________________
+
+    def test_ks_test_report_json():
+        report_path = "/home/user/ks_test_report.json"
+        assert os.path.isfile(report_path), f"Missing report file: {report_path}"
+    
+        with open(report_path, 'r') as f:
+            try:
+                report = json.load(f)
+            except json.JSONDecodeError:
+                pytest.fail(f"File {report_path} is not valid JSON.")
+    
+        assert "ks_statistic" in report, "Missing 'ks_statistic' in JSON report."
+        assert "p_value" in report, "Missing 'p_value' in JSON report."
+        assert "regression_pass" in report, "Missing 'regression_pass' in JSON report."
+    
+        # Check values with a small tolerance for floats
+>       assert abs(report["ks_statistic"] - 0.3000) < 1e-4, f"Expected ks_statistic ~ 0.3000, got {report['ks_statistic']}"
+E       AssertionError: Expected ks_statistic ~ 0.3000, got 0.2
+E       assert 0.09999999999999998 < 0.0001
+E        +  where 0.09999999999999998 = abs((0.2 - 0.3))
+
+/tmp/test_final_state.py:33: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_ks_test_report_json - AssertionErr...
+1 failed, 2 passed in 0.01s
+
+===== task_000348_31fb8c8a =====
+reward: 0
+exit_reason: done steps: 60
+--- output_tail ---
+  # Generate test data
+        N = 64
+        time_series = [math.sin(2 * math.pi * 10 * i / N) for i in range(N)]
+    
+        payload = {
+            "time_series": time_series,
+            "molecular_graph": {
+                "num_nodes": 6,
+                "edges": [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 2], [2, 5]]
+            },
+            "max_iterations": 100,
+            "tolerance": 1e-5
+        }
+    
+        try:
+            resp = requests.post("http://127.0.0.1:9090/api/v1/process_spectrum", json=payload, timeout=5)
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"Failed to connect to the server or send request: {e}")
+    
+        assert resp.status_code == 200, f"Expected status code 200, got {resp.status_code}. Response: {resp.text}"
+    
+        try:
+            data = resp.json()
+        except ValueError:
+            pytest.fail(f"Response is not valid JSON: {resp.text}")
+    
+        # Verify graph shortest path (0 -> 2 -> 5 = 2 edges)
+        assert "graph_shortest_path" in data, "Missing 'graph_shortest_path' in response"
+>       assert data["graph_shortest_path"] == 2, f"Expected path 2, got {data['graph_shortest_path']}"
+E       AssertionError: Expected path 2, got -1
+E       assert -1 == 2
+
+/tmp/test_final_state.py:37: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_api_process_spectrum - AssertionEr...
+1 failed in 0.07s
+
+===== task_000885_d1c1007b =====
+reward: 0
+exit_reason: done steps: 61
+--- output_tail ---
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+            Reduced version of X. This will always be a dense array.
+        """
+        X = validate_data(self, X, accept_sparse=["csr", "csc"], ensure_min_features=2)
+        random_state = check_random_state(self.random_state)
+    
+        if self.algorithm == "arpack":
+            v0 = _init_arpack_v0(min(X.shape), random_state)
+            U, Sigma, VT = svds(X, k=self.n_components, tol=self.tol, v0=v0)
+            # svds doesn't abide by scipy.linalg.svd/randomized_svd
+            # conventions, so reverse its outputs.
+            Sigma = Sigma[::-1]
+            # u_based_decision=False is needed to be consistent with PCA.
+            U, VT = svd_flip(U[:, ::-1], VT[::-1], u_based_decision=False)
+    
+        elif self.algorithm == "randomized":
+            if self.n_components > X.shape[1]:
+>               raise ValueError(
+                    f"n_components({self.n_components}) must be <="
+                    f" n_features({X.shape[1]})."
+                )
+E               ValueError: n_components(50) must be <= n_features(14).
+
+/usr/local/lib/python3.10/dist-packages/sklearn/decomposition/_truncated_svd.py:240: ValueError
+=========================== short test summary info ============================
+ERROR ../../tmp/test_final_state.py::test_stats_endpoint - ValueError: n_comp...
+ERROR ../../tmp/test_final_state.py::test_predict_endpoint - ValueError: n_co...
+2 errors in 0.84s
+
+===== task_001465_aa3ed3f8 =====
+reward: 0
+exit_reason: done steps: 72
+--- output_tail ---
+D_LOG)
+        if os.path.exists(ACCEPTED_LOG):
+            os.remove(ACCEPTED_LOG)
+    
+        # Run binary on evil corpus
+        subprocess.run([BINARY_PATH, EVIL_CORPUS_DIR], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+        # Run binary on clean corpus
+        subprocess.run([BINARY_PATH, CLEAN_CORPUS_DIR], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+        # Read logs
+        rejected_ids = set()
+        if os.path.exists(REJECTED_LOG):
+            with open(REJECTED_LOG, "r") as f:
+                rejected_ids = set(line.strip() for line in f if line.strip())
+    
+        accepted_ids = set()
+        if os.path.exists(ACCEPTED_LOG):
+            with open(ACCEPTED_LOG, "r") as f:
+                accepted_ids = set(line.strip() for line in f if line.strip())
+    
+        # Get expected IDs
+        evil_ids = get_ids_from_jsonl_dir(EVIL_CORPUS_DIR)
+        clean_ids = get_ids_from_jsonl_dir(CLEAN_CORPUS_DIR)
+    
+        # Check evil corpus
+        missed_evil = evil_ids - rejected_ids
+>       assert not missed_evil, f"{len(missed_evil)} of {len(evil_ids)} evil bypassed. Bypassed IDs: {', '.join(list(missed_evil)[:5])}"
+E       AssertionError: 2 of 2 evil bypassed. Bypassed IDs: evil2, evil1
+E       assert not {'evil1', 'evil2'}
+
+/tmp/test_final_state.py:66: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_eval_corpus_processing - Assertion...
+1 failed in 0.19s
+
+===== task_000908_170e5e4e =====
+reward: 0
+exit_reason: done steps: 21
+--- output_tail ---
+  with open(json_path, 'r') as f:
+            try:
+                results = json.load(f)
+            except json.JSONDecodeError:
+                pytest.fail(f"File {json_path} does not contain valid JSON.")
+    
+        assert isinstance(results, list), f"JSON output must be a list of dictionaries."
+    
+        expected_results = [
+            {"author_A": "Grace", "author_B": "Heidi", "citation_count": 3},
+            {"author_A": "Alice", "author_B": "Bob", "citation_count": 2},
+            {"author_A": "Diana", "author_B": "Eve", "citation_count": 2}
+        ]
+    
+>       assert len(results) == len(expected_results), f"Expected {len(expected_results)} results, but got {len(results)}."
+E       AssertionError: Expected 3 results, but got 4.
+E       assert 4 == 3
+E        +  where 4 = len([{'author_A': 'Diana', 'author_B': 'Eve', 'citation_count': 2}, {'author_A': 'Grace', 'author_B': 'Heidi', 'citation_c..._A': 'Alice', 'author_B': 'Bob', 'citation_count': 1}, {'author_A': 'Alice', 'author_B': 'Heidi', 'citation_count': 1}])
+E        +  and   3 = len([{'author_A': 'Grace', 'author_B': 'Heidi', 'citation_count': 3}, {'author_A': 'Alice', 'author_B': 'Bob', 'citation_count': 2}, {'author_A': 'Diana', 'author_B': 'Eve', 'citation_count': 2}])
+
+/tmp/test_final_state.py:27: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_optimized_results_json - Assertion...
+1 failed, 3 passed in 0.04s
+
+===== task_000311_82f9e3ba =====
+reward: 0
+exit_reason: done steps: 45
+--- output_tail ---
+horships:
+            paper_authors[paper].append(auth)
+    
+        collaborators = defaultdict(set)
+        for authors in paper_authors.values():
+            for a1 in authors:
+                for a2 in authors:
+                    if a1 != a2:
+                        collaborators[a1].add(a2)
+    
+        # Sort by collaborator_count DESC, then author_id ASC
+        author_counts = [(auth, len(collabs)) for auth, collabs in collaborators.items()]
+        author_counts.sort(key=lambda x: (-x[1], x[0]))
+    
+        expected_top_5 = author_counts[:5]
+    
+        for i in range(5):
+            item = result[i]
+            assert isinstance(item, dict), "Each item in the JSON list must be an object (dict)."
+            assert "author_id" in item, "Missing 'author_id' key in JSON object."
+            assert "collaborator_count" in item, "Missing 'collaborator_count' key in JSON object."
+    
+            expected_id, expected_count = expected_top_5[i]
+>           assert item["author_id"] == expected_id, f"Rank {i+1} expected author_id {expected_id}, got {item['author_id']}."
+E           AssertionError: Rank 1 expected author_id 34, got 1.
+E           assert 1 == 34
+
+/tmp/test_final_state.py:111: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_author_collaborations_table - Asse...
+FAILED ../../tmp/test_final_state.py::test_top_collaborators_json - Assertion...
+2 failed, 1 passed in 0.03s
+
+===== task_000506_c13429e7 =====
+reward: 0
+exit_reason: done steps: 77
+--- output_tail ---
+ 25 19
+E           24 21 19
+E           10 25 20
+E           2 19 9
+E           27 23 8
+E           11 10 14
+E           11 10 7
+E           11 24 20
+E           16 21 3
+E           9 29 8
+E           17 15 7
+E           24 22 13
+E           18 11 4
+E           18 10 15
+E           26 29 19
+E           19 28 18
+E           21 10 16
+E           18 17 18
+E           25 24 14
+E           29 23 9
+E           9 21 3
+E           6 9 13
+E           20 3 1
+E           28 28 7
+E           18 3 8
+E           4 14 3
+E           30 30 5
+E           22 6 17
+E           25 7 6
+E           21 20 8
+E           20 3 7
+E           28 16 12
+E           7 25 16
+E           2 19 6
+E           13 26 2
+E           25 13 13
+E           8 18 20
+E           9 8 8
+E           15 24 20
+E           16 19 10
+E           4 7 11
+E           21 25 7
+E           19 6 8
+E           22 6 10
+E           6 29 18
+E           11 15 14
+E           27 12 17
+E           19 16 3
+E           2 28 6
+E           6 26 9
+E           28 11 11
+E           12 28 18
+E           10 21 6
+E           10 23 10
+E           2 24 9
+E           1 9 9
+E           30 19 3
+E           14 18 15
+E           7 17 1
+E           21 28 18
+E           
+E           Oracle Output: None
+E           Agent Output:  1,9,29: 17
+
+/tmp/test_final_state.py:82: Failed
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_fuzz_equivalence - Failed: Output ...
+1 failed, 1 passed in 21.23s
+
+===== task_000197_1460b736 =====
+reward: 0
+exit_reason: done steps: 25
+--- output_tail ---
+'.join(failed_files)}"
+E       AssertionError: 1 of 4 clean files were incorrectly rejected (exit code != 0): test4.txt
+E       assert not ['test4.txt']
+
+/tmp/test_final_state.py:23: AssertionError
+________________________ test_sanitizer_on_evil_corpus _________________________
+
+    def test_sanitizer_on_evil_corpus():
+        evil_dir = "/app/corpus/evil/"
+        assert os.path.isdir(evil_dir), "Evil corpus directory missing."
+    
+        evil_files = [f for f in os.listdir(evil_dir) if f.endswith(".txt")]
+        assert len(evil_files) > 0, "No files found in evil corpus."
+    
+        failed_files = []
+        for f in evil_files:
+            file_path = os.path.join(evil_dir, f)
+            result = subprocess.run(["python3", "/home/user/sanitizer.py", file_path], capture_output=True)
+            if result.returncode != 1:
+                failed_files.append(f)
+    
+>       assert not failed_files, f"{len(failed_files)} of {len(evil_files)} evil files bypassed the filter (exit code != 1): {', '.join(failed_files)}"
+E       AssertionError: 2 of 4 evil files bypassed the filter (exit code != 1): test3.txt, test2.txt
+E       assert not ['test3.txt', 'test2.txt']
+
+/tmp/test_final_state.py:39: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_sanitizer_on_clean_corpus - Assert...
+FAILED ../../tmp/test_final_state.py::test_sanitizer_on_evil_corpus - Asserti...
+2 failed, 1 passed in 0.16s
+
+===== task_000438_fee5a792 =====
+reward: 0
+exit_reason: done steps: 27
+--- output_tail ---
+        inputs = [line.strip() for line in f if line.strip()]
+    
+                if not os.path.exists(output_path):
+                    pytest.fail(f"Output file not created for {filename}")
+    
+                with open(output_path, 'r') as f:
+                    outputs = [line.strip() for line in f if line.strip()]
+    
+                if len(inputs) != len(outputs):
+                    pytest.fail(f"Line count mismatch in {filename}: expected {len(inputs)}, got {len(outputs)}")
+    
+                file_modified = 0
+                for orig, out in zip(inputs, outputs):
+                    total_clean += 1
+                    expected_redacted = get_redacted_expected(orig)
+                    expected_out = f"CLEAN: {expected_redacted}"
+    
+                    if out != expected_out:
+                        file_modified += 1
+                        modified_count += 1
+    
+                if file_modified > 0:
+                    modified_files.append(filename)
+    
+        if modified_count > 0:
+>           pytest.fail(f"{modified_count} of {total_clean} clean URLs incorrectly modified or rejected. Offending files: {', '.join(modified_files)}")
+E           Failed: 1 of 1 clean URLs incorrectly modified or rejected. Offending files: log1.txt
+
+/tmp/test_final_state.py:130: Failed
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_clean_corpus - Failed: 1 of 1 clea...
+1 failed, 1 passed in 0.06s
+
+===== task_000669_0ef2d04d =====
+reward: 0
+exit_reason: done steps: 17
+--- output_tail ---
+ert 0 > 0
+E        +  where 0 = len([])
+
+/tmp/test_final_state.py:22: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_adversarial_corpus - AssertionErro...
+1 failed, 1 passed in 0.02s
+.F                                                                       [100%]
+=================================== FAILURES ===================================
+___________________________ test_adversarial_corpus ____________________________
+
+    def test_adversarial_corpus():
+        """Verify the script correctly classifies evil and clean binaries."""
+        assert os.path.isfile(SCRIPT_PATH), "Enforcer script is missing, cannot run corpus test."
+    
+        evil_files = [os.path.join(EVIL_CORPUS_DIR, f) for f in os.listdir(EVIL_CORPUS_DIR) if os.path.isfile(os.path.join(EVIL_CORPUS_DIR, f))]
+        clean_files = [os.path.join(CLEAN_CORPUS_DIR, f) for f in os.listdir(CLEAN_CORPUS_DIR) if os.path.isfile(os.path.join(CLEAN_CORPUS_DIR, f))]
+    
+>       assert len(evil_files) > 0, f"No files found in evil corpus directory: {EVIL_CORPUS_DIR}"
+E       AssertionError: No files found in evil corpus directory: /app/corpus/evil/
+E       assert 0 > 0
+E        +  where 0 = len([])
+
+/tmp/test_final_state.py:22: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_adversarial_corpus - AssertionErro...
+1 failed, 1 passed in 0.01s
+
+===== task_000763_7713d5ae =====
+reward: 0
+exit_reason: done steps: 11
+--- output_tail ---
+ent = f.read().strip()
+    
+>       assert content == "2394", f"Expected PIN '2394' in {path}, but found '{content}'."
+E       AssertionError: Expected PIN '2394' in /home/user/vuln_pin.txt, but found '2778'.
+E       assert '2778' == '2394'
+E         
+E         - 2394
+E         + 2778
+
+/tmp/test_final_state.py:13: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_step1_vuln_pin - AssertionError: E...
+1 failed, 2 passed in 0.02s
+F..                                                                      [100%]
+=================================== FAILURES ===================================
+_____________________________ test_step1_vuln_pin ______________________________
+
+    def test_step1_vuln_pin():
+        path = "/home/user/vuln_pin.txt"
+        assert os.path.isfile(path), f"File {path} does not exist. Step 1 incomplete."
+    
+        with open(path, "r") as f:
+            content = f.read().strip()
+    
+>       assert content == "2394", f"Expected PIN '2394' in {path}, but found '{content}'."
+E       AssertionError: Expected PIN '2394' in /home/user/vuln_pin.txt, but found '2778'.
+E       assert '2778' == '2394'
+E         
+E         - 2394
+E         + 2778
+
+/tmp/test_final_state.py:13: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_step1_vuln_pin - AssertionError: E...
+1 failed, 2 passed in 0.02s
+
+===== task_001674_125bb961 =====
+reward: 0
+exit_reason: done steps: 17
+--- output_tail ---
+log_path = "/home/user/clean_results.log"
+    
+        assert os.path.exists(log_path), f"Log file {log_path} does not exist."
+    
+        expected_files = [f for f in os.listdir(clean_dir) if f.endswith('.diff')]
+        assert len(expected_files) > 0, "No clean corpus files found to test."
+    
+        log_results = parse_log_file(log_path)
+    
+        modified = []
+        missing = []
+    
+        for filename in expected_files:
+            if filename not in log_results:
+                missing.append(filename)
+            elif log_results[filename] != "ACCEPTED":
+                modified.append(filename)
+    
+        error_msg = []
+        if modified:
+            error_msg.append(f"{len(modified)} of {len(expected_files)} clean modified (expected ACCEPTED): {', '.join(modified)}")
+        if missing:
+            error_msg.append(f"{len(missing)} of {len(expected_files)} clean files missing from log: {', '.join(missing)}")
+    
+>       assert not modified and not missing, " | ".join(error_msg)
+E       AssertionError: 2 of 2 clean files missing from log: create_table.diff, add_index.diff
+E       assert (not [] and not ['create_table.diff', 'add_index.diff'])
+
+/tmp/test_final_state.py:87: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_evil_corpus_rejected - AssertionEr...
+FAILED ../../tmp/test_final_state.py::test_clean_corpus_accepted - AssertionE...
+2 failed, 1 passed in 0.09s
+
+===== task_000998_4d9c7852 =====
+reward: 0
+exit_reason: done steps: 16
+--- output_tail ---
+y", line 3, in <module>
+    import re
+  File "/usr/lib/python3.10/re.py", line 127, in <module>
+    import functools
+  File "/usr/lib/python3.10/functools.py", line 18, in <module>
+    from collections import namedtuple
+ImportError: cannot import name 'namedtuple' from partially initialized module 'collections' (most likely due to a circular import) (/usr/lib/python3.10/collections/__init__.py)
+Could not import runpy module
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 15, in <module>
+    import importlib.util
+  File "/usr/lib/python3.10/importlib/util.py", line 14, in <module>
+    from contextlib import contextmanager
+  File "/usr/lib/python3.10/contextlib.py", line 5, in <module>
+    from collections import deque
+  File "/usr/lib/python3.10/collections/__init__.py", line 36, in <module>
+    from operator import eq as _eq
+  File "/home/user/operator.py", line 6, in <module>
+    import json
+  File "/usr/lib/python3.10/json/__init__.py", line 106, in <module>
+    from .decoder import JSONDecoder, JSONDecodeError
+  File "/usr/lib/python3.10/json/decoder.py", line 3, in <module>
+    import re
+  File "/usr/lib/python3.10/re.py", line 127, in <module>
+    import functools
+  File "/usr/lib/python3.10/functools.py", line 18, in <module>
+    from collections import namedtuple
+ImportError: cannot import name 'namedtuple' from partially initialized module 'collections' (most likely due to a circular import) (/usr/lib/python3.10/collections/__init__.py)
+
+===== task_002146_0bc2994c =====
+reward: 0
+exit_reason: done steps: 35
+--- output_tail ---
+ "Missing binary.bin.part_aa"
+E       AssertionError: Missing binary.bin.part_aa
+E       assert 404 == 200
+E        +  where 404 = <Response [404]>.status_code
+
+/tmp/test_final_state.py:65: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_good_tar_accepted_and_chunked - As...
+1 failed, 1 passed in 1.60s
+.F                                                                       [100%]
+=================================== FAILURES ===================================
+______________________ test_good_tar_accepted_and_chunked ______________________
+
+    def test_good_tar_accepted_and_chunked():
+        good_tar_data = create_good_tar()
+        files = {'file': ('good.tar', good_tar_data)}
+        resp = requests.post(UPLOAD_URL, files=files)
+        assert resp.status_code == 200, "Failed to upload good.tar"
+    
+        poll_status("good.status", "ACCEPTED", timeout=15)
+    
+        # Check chunks
+        part_aa = requests.get(f"{DOWNLOAD_URL}/binary.bin.part_aa")
+>       assert part_aa.status_code == 200, "Missing binary.bin.part_aa"
+E       AssertionError: Missing binary.bin.part_aa
+E       assert 404 == 200
+E        +  where 404 = <Response [404]>.status_code
+
+/tmp/test_final_state.py:65: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_good_tar_accepted_and_chunked - As...
+1 failed, 1 passed in 0.09s
+

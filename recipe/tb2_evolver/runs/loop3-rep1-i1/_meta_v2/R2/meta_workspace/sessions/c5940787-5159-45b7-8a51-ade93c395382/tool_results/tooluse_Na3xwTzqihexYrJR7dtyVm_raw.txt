@@ -1,0 +1,72 @@
+256	            # Check budget before each step
+257	            if state.budget_exceeded():
+258	                exit_reason = "budget_exceeded"
+259	                break
+260	
+261	            step_id = state.step
+262	            step_start_ts = time.monotonic()
+263	            active_model_provider = model_provider
+264	            if model_selector is not None:
+265	                try:
+266	                    selected = model_selector(state)
+267	                    if selected is not None:
+268	                        active_model_provider = selected
+269	                except Exception:
+270	                    _logger.warning(
+271	                        "run_loop: model_selector failed, falling back to main provider",
+272	                        exc_info=True,
+273	                    )
+274	            context_window: int = getattr(active_model_provider, "context_window", 64_000)
+275	
+276	            # ── 0. Capture pre-step state snapshot z_t ─────────────────────
+277	            # step_snapshots=False: skip copying the full message history — it grows
+278	            # O(t) at step t, giving O(n²) total allocations across n steps.
+279	            # reward_func() never reads TrajectoryStep.state_snapshot.messages;
+280	            # only .diff() uses slots, which are still copied for StateDelta.
+281	            if not step_snapshots:
+282	                snapshot_before = FullStateSnapshot(
+283	                    step_id=step_id,
+284	                    messages=(),
+285	                    slots={
+286	                        k: StateSlotSnapshot(
+287	                            key=k,
+288	                            slot_type=v.slot_type,
+289	                            content=v.content,
+290	                            metadata=dict(v.metadata),
+291	                        )
+292	                        for k, v in state.slots.items()
+293	                    },
+294	                    cumulative_tokens=state.cumulative_tokens,
+295	                    cumulative_cost_usd=state.cumulative_cost_usd,
+296	                )
+297	            else:
+298	                snapshot_before = FullStateSnapshot.from_state(state, step_id=step_id)
+299	
+300	            # ── 1. step_start: context assembly (delegated to processors) ───
+301	            step_start_event = StepStartEvent(
+302	                run_id=state.run_id,
+303	                step_id=step_id,
+304	                raw_messages=tuple(state.raw_messages),
+305	                messages=tuple(state.messages),
+306	                task=task,
+307	                tools=_get_tools(),  # respects command-level allowed_tools restriction
+308	                context_window=context_window,
+309	                workspace=workspace,
+310	                system_prompt=task_system_prompt,  # frozen by on_task_start; never modified by on_step_start
+311	                token_count=rough_token_count(list(state.messages)),
+312	            )
+313	            # Snapshot history_hash before processors run so we can detect structural changes.
+314	            _pre_step_msgs = step_start_event.messages or tuple(state.messages)
+315	            _, _hist_before, _ = compute_windows(_pre_step_msgs)
+316	            _history_hash_before = compute_history_hash(_hist_before)
+317	
+318	            # pipe_all: collect SegmentBoundaryEvents
+319	            step_start_events = await pipe_all(
+320	                step_start_event,
+321	                get_procs("step_start"),
+322	                tracer=tracer,
+323	                hook="step_start",
+324	            )
+325	            boundary_events: list[SegmentBoundaryEvent] = [
+
+[Showing lines 256–325 of 981 total. Use offset=325 to read the next section.]

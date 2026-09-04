@@ -1,0 +1,278 @@
+1	# Evolve journal — tmax-coev-rep10-i1
+2	
+3	## Round 1 — step-budget deadline nudge
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-01-01T00:00:00Z
+8	hypothesis_id: h_step_budget_deadline_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_000118_3043e92d, task_000264_ab8c7253, task_000958_4bb2b05d, task_001031_a8f0eb37, task_001321_658ce4a8]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=30/50; +3/-2 gained=task_000587_9862bb19,task_001032_1adaccb9,task_001515_eed714e6 lost=task_001536_acfe6c35,task_001701_95e3bbcb; score 0.6000 >= incumbent(mean) 0.5800 - tol 0.0400
+14	expected_global_gain: "Flip part of the 6-task budget_exceeded cluster (4 domains) that ends at step 80 with no deliverable on disk; also trims extreme-tail runtimes"
+15	regression_risk: "Low — appends up to 2 user reminders only past 65% of the 80-step budget; passing tasks finish in 8-52 steps and never see it"
+16	cost_shift: "Negligible-to-negative: two ~60-token injections only on long tasks; curbs late thrash so tail-task tokens should drop"
+17	rollback_trigger: "If pass_rate flat/down AND any previously-passing task with steps>52 regresses, revert"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 29/50 (58%). Of 21 failures, 6 hit `exit_reason=budget_exceeded`
+23	at the full 80-step budget, spanning system_administration, data_querying,
+24	scientific_computing, and data_processing. Every one failed the verifier on
+25	a "required output file missing" assertion — the agent explored/thrashed the
+26	whole budget and left **nothing on disk**. task_000264's own words: "I've
+27	been stuck in a loop trying the same query"; then three "Your previous
+28	response was cut off... continue" turns with no file write, ending at step 80
+29	with `top_managers.csv` / `query_plan.txt` missing. The pipeline ships a
+30	`TaskTimeReminderProcessor` but the recipe runner never sets its
+31	`timeout_seconds`, so its `on_step_start` returns early every step — the
+32	deadline nudge is inert. The budget actually enforced is *steps* (max_steps=80),
+33	which nothing tracks.
+34	
+35	### Changes
+36	
+37	- `processors/step_budget_deadline.py` — new `StepBudgetDeadlineProcessor`
+38	  (`MultiHookProcessor`). On `on_step_start`, computes `step_id / task.max_steps`
+39	  and injects escalating user-role reminders at 65% (early) and 85%
+40	  (critical) telling the agent to commit its best-effort deliverable to the
+41	  required paths NOW and `ls`-verify. Task-agnostic — names no paths/domains.
+42	- `config.yaml` — register the processor at `_order=7` (right after the inert
+43	  time reminder) via absolute `file://` path, `warn_at: [0.65, 0.85]`.
+44	
+45	### Evidence
+46	
+47	- task_000264_ab8c7253: `exit_reason=budget_exceeded`, steps=80, 953s;
+48	  verifier `top_managers.csv missing` + `query_plan.txt missing` + no index.
+49	  Body last msgs: "I keep getting the same result" / "stuck in a loop".
+50	- task_001031_a8f0eb37: `budget_exceeded`, 80 steps, 2336s; verifier
+51	  `Results file missing at /home/user/results.json`.
+52	- task_000010_644ab1c2: `budget_exceeded`, 80 steps; verifier `operator.py
+53	  does not exist` + `api_success.log does not exist`.
+54	- task_000118_3043e92d / task_000958_4bb2b05d / task_001321_658ce4a8: all
+55	  `budget_exceeded` at 80 steps (same shape).
+56	- Root-cause harness fact: harness.py:246 — `TaskTimeReminderProcessor`
+57	  early-returns when `timeout_seconds` is unset, which the runner never sets.
+58	
+59	### Uncertainty
+60	
+61	The reminder helps only if a runnable-but-imperfect deliverable exists in the
+62	model's head by ~step 52; on tasks where the agent is genuinely lost (no valid
+63	approach at all) it won't produce a passing file. Watch attribution: if
+64	predicted tasks stay `still_F` while a slow passing task regresses, the nudge
+65	is disrupting more than it helps — revert per trigger above.
+66	
+67	## Round 2 — no-op: remaining failures are capability gaps
+68	
+69	<!-- journal:frontmatter
+70	round: 2
+71	timestamp: 2026-01-02T00:00:00Z
+72	hypothesis_id: h_r2_noop_capability_wall_v1
+73	levers: []
+74	predicted_affected: []
+75	gating_outcome: accepted
+76	gating_attribution: score=32/50; +5/-3 gained=task_001031_a8f0eb37,task_001090_c61c71f2,task_001536_acfe6c35,task_001701_95e3bbcb lost=task_000587_9862bb19,task_001032_1adaccb9,task_001264_9f4ca84a; score 0.6400 >= incumbent(mean) 0.6200 - tol 0.0400
+77	expected_global_gain: "None — no config change. R1 step-budget nudge already accepted (29->30) and is clean (never touches passing tasks, which top out at 38 steps < the 52-step 65% threshold)."
+78	regression_risk: "None — byte-identical config copy."
+79	cost_shift: "Zero."
+80	rollback_trigger: "N/A (no change). Next round: if a NEW recurring harness-addressable shape appears (missing-file / wrong-path / recoverable-loop cluster of 2+ tasks), act on it."
+81	-->
+82	
+83	### Why
+84	
+85	R1 (step-budget deadline nudge) was ACCEPTED: 29/50 -> 30/50 (60%). It got
+86	3 of its 6 predicted budget_exceeded tasks (000118, 000958, 001321) to exit
+87	`done` instead of running out the step budget — i.e. the agent now commits a
+88	deliverable — but those tasks still fail the verifier on *content correctness*.
+89	The nudge did its job (commit-on-disk); the wall it hit next is capability.
+90	
+91	I read all 20 R1 failures via final_pytest assertions + trajectory bodies.
+92	The failure landscape splits cleanly and none of it is harness-addressable:
+93	
+94	- **14 `done`-fail (agent thought it finished, verifier disagreed):** every
+95	  one is a genuine correctness/capability gap. Examples — accuracy 0.336 vs
+96	  0.98 threshold (000015), F1 0.005 (001321), wrong centroid 36.37 vs 42.01
+97	  (001653), grid 60 vs expected 50 (001937), max deviation 1.0 vs <0.1
+98	  (000396), lingering processes not killed (000140), process name 'bash' vs
+99	  'monitor' (001090), adversarial corpus bypassed (000505). The existing
+100	  CustomSelfVerifyProcessor checklist DID fire on these (confirmed
+101	  "Verification check initiated" + re-verify turns in bodies) — files exist,
+102	  format is right, but the *computed values are wrong*. No processor/prompt
+103	  fixes wrong math or wrong logic.
+104	- **2 `done`-fail environment issues:** 000028, 000958 — verifier phase errors
+105	  with `ModuleNotFoundError: No module named 'requests'` during test
+106	  *collection*. initial_pytest PASSED (requests present pre-agent); final fails.
+107	  Agent never touched pip/venv (grepped commands). This is a verifier/env
+108	  Python mismatch outside config control (internet blocked, can't install).
+109	- **6 budget_exceeded (000010, 000264, 001031, 001536, 001701, 001818):**
+110	  genuinely hard multi-step tasks — audio transcription+DB load (001818),
+111	  parallel matrix decomposition (001031), forensic token classifier (001701),
+112	  recursive-CTE hierarchy w/ sqlite locking (000264, agent self-reports "stuck
+113	  in a loop"). The step-nudge already fires here; the gap is no valid approach,
+114	  not commitment or a recoverable loop.
+115	
+116	I checked the two candidate harness levers the playbook flags and DROPPED both:
+117	- **Plan-block instruction (preservative-transfer):** dropped. Both passing AND
+118	  failing multi-part tasks already emit a "Let me break down this task: 1... 2..."
+119	  plan in step 1 (compared 000024 pass vs 001937/001090 fail — all plan).
+120	  Variant-C second end fails: failing tasks DO plan; gap is execution, not
+121	  planning. This is the "encoding a habit that was already free" pitfall.
+122	- **Stronger self-verify:** dropped. The existing checklist is comprehensive
+123	  (re-read task, ls each output, cat contents for semantic correctness, validate
+124	  test method, confirm services alive) and already fires. It can't detect that a
+125	  correct-format value is numerically wrong.
+126	
+127	Shipping a timid threshold tweak or embedding task-specific domain knowledge
+128	(the forbidden move) would carry higher regression risk than expected gain.
+129	Per SOUL.md, capability gaps get logged, not patched. Explicit no-op is the
+130	Pareto-correct decision this round.
+131	
+132	### Changes
+133	
+134	- `config.yaml` — byte-identical copy of R1 config (verified `cmp`; canonicalizes
+135	  `{"ok": true, "checked_templates": 0}`). No new processors/tools/templates.
+136	
+137	### Evidence
+138	
+139	- Score: summary.json n_passed=30/50 (up from R0 29). by_domain worst:
+140	  system_administration 0/5, software_engineering 2/5, scientific_computing 2/5.
+141	- 000264 body: assistant "I've been stuck in a loop... recursive CTE is creating
+142	  a full Cartesian product"; final_pytest "database is locked (5)" — reasoning gap.
+143	- 001937 final_pytest: "Expected Optimal Grid to be 50, but got 60"; body shows
+144	  self-verify fired ("Verification check initiated") and agent re-confirmed its
+145	  own wrong value 60 — capability, not commitment.
+146	- 000028/000958 final_pytest: `ModuleNotFoundError: No module named 'requests'`
+147	  at collection; initial_pytest passed — verifier-env mismatch, not agent action.
+148	- Passing-cluster protection: max passing step count = 38 (000578) < 52-step
+149	  (0.65*80) R1 nudge threshold, so the accepted R1 change is confirmed
+150	  non-regressive on the passing set.
+151	
+152	### Uncertainty
+153	
+154	The `requests` ModuleNotFoundError on 000028/000958 could in principle be
+155	worked around if the agent proactively `pip install`ed common test deps — but
+156	internet is blocked and it's only 2 tasks, below the systemic threshold. If a
+157	future round shows a 2+-task cluster of verifier-import failures for the same
+158	module, a Control processor that nudges "ensure the system python used by tests
+159	has required libs" might be worth an evidence-backed try. Watch R2 attribution:
+160	if any predicted R1 task regresses T->F, revisit the nudge thresholds.
+161	
+162	## Round 3 — no-op: failures split capability vs verifier-env; incumbent at noisy optimum
+163	
+164	<!-- journal:frontmatter
+165	round: 3
+166	timestamp: 2026-01-03T00:00:00Z
+167	hypothesis_id: h_r3_noop_capability_and_verifier_env_v1
+168	levers: []
+169	predicted_affected: []
+170	gating_outcome: accepted
+171	gating_attribution: score=34/50; +2/-0 gained=task_000587_9862bb19,task_001264_9f4ca84a; score 0.6800 >= incumbent(mean) 0.6400 - tol 0.0400
+172	expected_global_gain: "None — no config change. Every R2 failure is a model capability gap (wrong computed value / wrong logic) or a verifier-phase env issue outside config.yaml control; no candidate passes its retroactive check with net-positive Pareto value in a ±2-task noise regime."
+173	regression_risk: "None — byte-identical config copy (cmp verified; canonicalizes {\"ok\": true, \"checked_templates\": 0})."
+174	cost_shift: "Zero."
+175	rollback_trigger: "N/A (no change). Next round: act only if a NEW harness-addressable shape recurs across >=2 tasks whose Variant-A check is 'yes' — e.g. a tool-return-shape gap, a recoverable-loop that a guard can break before the agent commits a WRONG artifact, or a genuinely config-controllable env fix."
+176	-->
+177	
+178	### Why
+179	
+180	R2 measured 32/50 (64%) on the R1==R2 config. History shows this config
+181	swings 30↔32 across repeats — an 8-task flip set on IDENTICAL config
+182	(R1→R2: gained 001031,001090,001536,001701,001818; lost 000587,001032,001264).
+183	So the true signal is ~31±1 and several "failures" (001264,001032,000587)
+184	are FRAGILE (pass on some draws), not hard walls. In a ±2-task noise regime,
+185	adding config surface area risks regressing the fragile passing cluster for
+186	speculative gain — the Pareto math favors restraint unless a candidate has a
+187	clean Variant-A "yes".
+188	
+189	I read all 17 R2 failures (result.json final_pytest + trajectory bodies). The
+190	landscape splits three ways and NONE is a net-positive harness fix:
+191	
+192	- **12 capability gaps (wrong value / wrong logic):** 001653 (centroid
+193	  36.37 vs 42.01), 001937 (grid 60 vs 50), 000396 (max_dev 0.27 vs <0.1),
+194	  001321 (F1 0.0001 vs 0.95), 000015 (accuracy 0.0 vs 0.98), 000587 (C++
+195	  csv parser NaN handling), 000264 (query plan missing USING INDEX),
+196	  000505 (adversarial corpus bypassed 2/2), 000140 (lingering vm_service
+197	  procs not killed), 001781 (Rust deadlock not fixed), 000933 (build didn't
+198	  emit bin/graph_math_double), 000118 (log dir 209MB vs <45MB threshold).
+199	  CustomSelfVerifyProcessor fired on these (per R2's confirmed re-verify
+200	  turns) — files exist, format right, computed values/logic wrong. No
+201	  processor/prompt fixes wrong math.
+202	
+203	- **3 verifier-phase env issues outside config control:** 000010 — task
+204	  MANDATES `/home/user/operator.py`; the verifier's python runs with cwd on
+205	  sys.path so stdlib `import operator` (via `collections`) resolves to the
+206	  agent's file → `namedtuple` circular ImportError kills the whole
+207	  interpreter incl. test collection. 000028 & 000958 — C++ HTTP microservices
+208	  verified by python `requests`; initial_pytest PASSED (requests present),
+209	  final_pytest ERROR `ModuleNotFoundError: requests` at collection. Grepped
+210	  all Bash cmds: agent NEVER touched pip/venv/python/PYTHONPATH and created
+211	  NO requests-shadowing file (000958 created httplib.h/req.h/sqlite3.h/
+212	  server.cpp only). So the two pytest phases run different python contexts —
+213	  a verifier-infra mismatch config.yaml cannot reach.
+214	
+215	- **2 fragile budget_exceeded thrash (001264, 001032):** genuinely hard —
+216	  001264 thrashes writing a concurrent curation script (curate.sh edited 16×,
+217	  edit-warn fired ~65×, agent DID switch to xargs approach as nudged);
+218	  001032 manually parses a corrupt-tar binary header (zero size field).
+219	  Both PASSED in R1. The R1 step-nudge + CustomEditToolProcessor already
+220	  fire. Variant-A check = NO: committing sooner commits a still-WRONG
+221	  artifact; the gap is "no valid approach", not commitment or a breakable
+222	  loop.
+223	
+224	Candidates considered and DROPPED (all fail Variant-A or lose the Pareto
+225	tradeoff):
+226	- **Lower CustomEditToolProcessor.threshold (Configuration):** dropped. It
+227	  already fired ~65× on 001264 without helping; lowering it fires MORE on
+228	  the many passing tasks that legitimately edit a file 3-6× → higher
+229	  regression risk than gain.
+230	- **requests-dep Control nudge (from R2's watch-item):** dropped. Confirmed
+231	  the agent's python is fine and it's the VERIFIER's python that lacks
+232	  requests; a prompt/processor nudge in the agent phase can't change the
+233	  verifier's interpreter. Not config-addressable.
+234	- **operator.py shadow guard:** dropped. The offending filename is
+235	  task-MANDATED (`/home/user/operator.py`); the agent can't rename it, and
+236	  the verifier cwd/path is fixed by infra. 1 task, non-actionable.
+237	- **Stronger self-verify / plan-block (Instruction):** already dropped in R2
+238	  (both already fire; gap is execution/values, not planning/commitment).
+239	
+240	Per SOUL.md, capability gaps get logged not patched, and the analyze skill's
+241	rule — "a lever tried on the same cluster without flipping is a signal to look
+242	elsewhere" — applies to the capability cluster. Explicit no-op is the
+243	Pareto-correct decision.
+244	
+245	### Changes
+246	
+247	- `config.yaml` — byte-identical copy of R1/R2 config (`cmp` clean;
+248	  canonicalizes `{"ok": true, "checked_templates": 0}`). No new
+249	  processors/tools/templates.
+250	
+251	### Evidence
+252	
+253	- Score: summary.json n_passed=32/50. Worst by_domain: system_administration
+254	  1/5, software_engineering 2/5.
+255	- Noise regime: R1_per_task vs R2_per_task on the SAME config diff = 8 flips
+256	  (4 gained / 4 lost), incl. 001264 T→F, 001032 T→F, 000587 T→F — fragile,
+257	  not hard.
+258	- 000010 final_pytest: `ImportError: cannot import name 'namedtuple' ...
+259	  circular import` traced through `/home/user/operator.py` (task-mandated path).
+260	- 000028/000958 final_pytest: `ModuleNotFoundError: No module named 'requests'`
+261	  at collection; initial_pytest passed; agent Bash log shows zero pip/venv/
+262	  python edits and no requests-shadowing file created.
+263	- 001937 final_pytest: "Expected Optimal Grid to be 50, but got 60" (wrong value).
+264	- 001321 final_pytest: "F1 Score 0.0001 ... required 0.95" (wrong logic).
+265	- 001264 body: "I'm over-editing the file. Let me try a fundamentally different
+266	  approach - use xargs with -P" — edit-warn fired and agent complied, still hit
+267	  budget on a still-wrong script (capability, not commitment).
+268	
+269	### Uncertainty
+270	
+271	If R3's remeasure of this same config lands at 30 rather than 32, that's the
+272	known ±2 noise, not a regression. The one plausible future harness lever is a
+273	loop-breaker that fires EARLIER than the current edit-warn AND forces a pivot
+274	to a demonstrably-simpler correct baseline on the two fragile thrash tasks —
+275	but that needs body evidence that a simpler correct approach exists and was
+276	within reach (Variant-A "yes"), which R2's bodies do not show (001032's
+277	corrupt-tar is genuinely hard; 001264's concurrency logic never reached a
+278	passing form). Revisit only with that evidence.

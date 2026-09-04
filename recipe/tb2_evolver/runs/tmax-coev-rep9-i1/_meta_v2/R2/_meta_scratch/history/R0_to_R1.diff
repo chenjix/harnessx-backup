@@ -1,0 +1,23 @@
+--- R0
++++ R1
+@@ -49,2 +49,20 @@
+   _hook_: '*'
++# R1 (C-001): hard-terminate byte-identical tool-call stalls.
++# R0 exposed a 98-min exit_reason=error runaway (task_001031: same Bash
++# command issued 38x consecutively, each timing out at 120s) plus two
++# budget_exceeded loops (task_000863: 33x, task_001321: 20x identical calls).
++# The existing CustomEditToolProcessor only WARNS and was ignored in every
++# case. LoopDetectionProcessor Strategy-1 (exact name+inputs fingerprint)
++# raises LoopDetectedError -> clean exit_reason=loop_detected. Thresholds
++# tuned wide: the only passing task that reaches >=3 consecutive identical
++# calls maxes at 3 (task_001089), so warn=4/raise=6 never touches legit work
++# while catching the 20-38x loops. Strategy-2 (name-only, warn-only) left at
++# a high threshold so multi-Bash exploration is not flagged.
++- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
++  window_size: 12
++  warn_threshold: 4
++  threshold: 6
++  name_warn_threshold: 10
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

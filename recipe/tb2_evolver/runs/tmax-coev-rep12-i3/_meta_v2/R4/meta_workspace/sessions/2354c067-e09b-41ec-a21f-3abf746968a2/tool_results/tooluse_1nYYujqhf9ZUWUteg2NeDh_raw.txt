@@ -1,0 +1,102 @@
+109	def _validate_messages_contract(
+110	    hook: str,
+111	    before_msgs: "tuple",
+112	    after_msgs: "tuple",
+113	    processor_name: str = "",
+114	    step_id: int = -1,
+115	    *,
+116	    chain_user_additions: int = 0,
+117	) -> int:
+118	    """Validate per-processor message mutation against hook contract rules.
+119	
+120	    Returns the updated ``chain_user_additions`` counter (only meaningful for
+121	    ``before_model``; callers should pass the returned value into the next call
+122	    so cross-processor constraints are cumulative within the chain).
+123	    """
+124	    if hook == "step_start":
+125	        # system_window must not change
+126	        before_sys = (before_msgs[0],) if before_msgs and before_msgs[0].role == "system" else ()
+127	        after_sys = (after_msgs[0],) if after_msgs and after_msgs[0].role == "system" else ()
+128	        if before_sys and after_sys and before_sys != after_sys:
+129	            _handle_violation(
+130	                "step_start processor modified system_window",
+131	                processor=processor_name,
+132	                hook=hook,
+133	                violation_type=_VT_SYSTEM_MUTATED,
+134	                step_id=step_id,
+135	            )
+136	        # Cannot ONLY modify the last message without structural history change
+137	        if (
+138	            before_msgs
+139	            and after_msgs
+140	            and len(before_msgs) == len(after_msgs)
+141	            and before_msgs[:-1] == after_msgs[:-1]
+142	            and before_msgs[-1] != after_msgs[-1]
+143	        ):
+144	            _handle_violation(
+145	                "step_start processor modified only last message without any structural change to history",
+146	                processor=processor_name,
+147	                hook=hook,
+148	                violation_type=_VT_LAST_MSG_ONLY,
+149	                step_id=step_id,
+150	            )
+151	
+152	    elif hook == "before_model":
+153	        if not after_msgs:
+154	            _handle_violation(
+155	                "before_model: messages became empty after processor — fail fast",
+156	                processor=processor_name,
+157	                hook=hook,
+158	                violation_type=_VT_EMPTY_MESSAGES,
+159	                step_id=step_id,
+160	            )
+161	            return chain_user_additions
+162	
+163	        len_delta = len(after_msgs) - len(before_msgs)
+164	
+165	        if len_delta < 0:
+166	            _handle_violation(
+167	                f"before_model: processor removed {-len_delta} message(s)",
+168	                processor=processor_name,
+169	                hook=hook,
+170	                violation_type=_VT_LENGTH_EXCEEDED,
+171	                step_id=step_id,
+172	            )
+173	        elif len_delta > 1:
+174	            _handle_violation(
+175	                f"before_model: processor added {len_delta} messages in a single step (max +1)",
+176	                processor=processor_name,
+177	                hook=hook,
+178	                violation_type=_VT_LENGTH_EXCEEDED,
+179	                step_id=step_id,
+180	            )
+181	        elif len_delta == 1:
+182	            # Adding a message is only allowed when the original last role is NOT user
+183	            if before_msgs and before_msgs[-1].role == "user":
+184	                _handle_violation(
+185	                    "before_model: processor added a message when last role is already 'user' "
+186	                    "(only content modification of the last user is allowed in that case)",
+187	                    processor=processor_name,
+188	                    hook=hook,
+189	                    violation_type=_VT_LENGTH_EXCEEDED,
+190	                    step_id=step_id,
+191	                )
+192	            # Cross-processor constraint: only one insertion per chain
+193	            if chain_user_additions >= 1:
+194	                _handle_violation(
+195	                    "before_model: second processor attempted to add user message "
+196	                    "(chain already has +1 user insertion)",
+197	                    processor=processor_name,
+198	                    hook=hook,
+199	                    violation_type=_VT_LENGTH_EXCEEDED,
+200	                    step_id=step_id,
+201	                )
+202	            new_msg = after_msgs[-1]
+203	            if new_msg.role != "user":
+204	                _handle_violation(
+205	                    f"before_model: new tail message has role={new_msg.role!r} (must be 'user')",
+206	                    processor=processor_name,
+207	                    hook=hook,
+208	                    violation_type=_VT_FORBIDDEN_ROLE_MUTATION,
+
+[Showing lines 109–208 of 844 total. Use offset=208 to read the next section.]

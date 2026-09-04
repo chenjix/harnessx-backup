@@ -1,0 +1,105 @@
+# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+#
+# Live surfaces MetaAgent may edit:
+#   - processors (this file)
+#   - tool_registry (this file)
+#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+#
+# Runtime-only slots (sandbox_provider, tracer) are injected by
+# recipe.tmax_eval.harness_runner — do not put them here.
+#
+# Per-call output cap is NOT in this YAML: harness_runner sets
+# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+# runaway generation cannot burn an hour of wall-clock on one task.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /home/user
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  show_project_dir: false
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at:
+  - 0.7
+  - 0.9
+  _hook_: '*'
+# Break max_tokens repetition loops (finish_reason=length, no tool call).
+# Without this, one stuck task can block an entire evolve round.
+- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+  repeat_threshold: 2
+  head_chars: 1200
+  tail_chars: 600
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+# Network-service verifier-dependency guard. On tasks where the agent stands up
+# or probes an HTTP/socket service, the external verifier's test module often
+# `import requests` at collection time; if that library is absent the whole
+# verification crashes (ModuleNotFoundError) and scores 0 even for a correct
+# service. This one-shot, exit-time reminder (keyed off the agent's own Bash
+# activity, never off task ids) nudges the agent to make the HTTP client
+# importable via an idempotent check-then-install. Runs after the self-verify
+# processor so the two exit-intent hooks serialize.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep15-i1/_meta_v2/R1/c2/processors/service_deps_reminder.py::ServiceDepsReminderProcessor
+  _hook_: '*'
+# Final PROCESS-state audit. On tasks where the agent has stood up a
+# BACKGROUNDED service (& / nohup / listen / .pid / bound port), the external
+# verifier commonly asserts on the container's final PROCESS state (e.g.
+# `pgrep -f <svc>` must be empty after a "start it, hit it, then gracefully
+# stop it" pipeline). The file/format-oriented self-verify checklist never
+# probes process/socket state, so lingering (often multiple, racily-killed)
+# service processes survive into the verifier phase and score the task 0.
+# This one-shot, exit-time processor (keyed off the agent's own Bash activity,
+# never off task ids) injects ONE REAL `Bash` snapshot of live processes /
+# listening sockets / jobs so the ground truth lands in context, then appends a
+# single reconcile instruction: match running processes and bound ports against
+# the task's required END state (stop all matching instances by pattern if the
+# task asked for a graceful shutdown; leave them running if it asked for a
+# persistent daemon). It never kills anything itself. Runs last among the
+# exit-intent hooks (order 96) so it defers to self-verify (90) and svc-deps
+# (91) and fires only on a genuine no-tool-call exit turn.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep15-i1/_meta_v2/R2/c3/processors/final_process_state_audit.py::FinalProcessStateAuditProcessor
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

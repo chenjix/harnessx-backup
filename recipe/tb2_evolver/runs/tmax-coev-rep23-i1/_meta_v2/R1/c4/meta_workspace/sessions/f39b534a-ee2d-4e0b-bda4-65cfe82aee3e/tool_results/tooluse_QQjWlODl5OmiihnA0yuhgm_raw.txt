@@ -1,0 +1,68 @@
+## Round 2 — identical-call loop guard
+
+<!-- journal:frontmatter
+round: 2
+timestamp: 2026-09-01T19:00:00Z
+hypothesis_id: h_loop_detection_pipeline_v1
+levers: [configuration]
+predicted_affected: [task_000010_644ab1c2]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Closes the identical-Bash-call repetition-loop -> budget_exceeded failure class benchmark-wide by registering the already-implemented LoopDetectionProcessor; early warning returns recovery budget, backstop raise caps runaway compute"
+regression_risk: "Low — warn-first (append text to tool result); raise only after 8 consecutive byte-identical (call, output) pairs; any interleaved different call resets the counter; compaction-aware so post-compaction drops clear stale fingerprints. No passing cluster relies on repeating one command 8x"
+cost_shift: "Net negative — early warning shortens loops; backstop caps stuck tasks at ~8 steps vs full 80-step budget; per-step overhead is one sha256 of the tool-call summary"
+rollback_trigger: "If R3 shows task_000010 still fails AND any previously-passing task regresses to loop_detected (false-positive termination of legitimate repeated work), revert"
+-->
+
+### Why
+
+Assigned focus task_000010_644ab1c2 (system_administration, k8s operator
+script) failed with exit_reason=budget_exceeded at 80 steps. messages.json
+steps 2–59 are the *exact same* assistant turn ("The zombie processes are
+still there. Let me try a different approach…") emitting the *identical* Bash
+command (`ps aux | grep -E "python|socat" ... xargs -r kill -9 ...; sleep 2;
+...`) and receiving *identical* tool output (defunct PIDs 115/130/139) ~27
+times in a row. The model even narrates "I've been repeating the same command
+many times" (step 56) and "I've been stuck in a loop" (step 58) — it
+recognises the loop but the passive run-loop continuation never forces it out.
+Only at step 60 does it abandon the loop, write the operator script, run it,
+create the backup and port-forward — but ~20 steps of budget remain and the
+run ends with only one of two manifests applied. This is a benchmark-wide
+failure class: an identical-tool-call-with-identical-output loop that neither
+LengthTruncationRecovery (fires only on finish_reason=length with NO tool
+call) nor ParseRetry (parse errors only) can catch. The pipeline simply lacks
+the guard that would break it.
+
+### Changes
+
+- `config.yaml` — register the existing, contract-clean
+  `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+  (_order=20, compaction-aware) into the pipeline with `warn_threshold=3`,
+  `threshold=8` (raise). Warn appends a corrective "you are stuck in a loop,
+  try something fundamentally different" nudge into the tool result at 3
+  consecutive identical calls so the agent recovers early and spends its
+  remaining budget productively; the raise at 8 is a compute backstop that
+  turns a full-budget burn into a clean loop_detected exit. No new code
+  authored — the deficiency was that this component was absent from the
+  recipe pipeline, not that it needed to be written.
+
+### Evidence
+
+- result.json: `agent.exit_reason="budget_exceeded"`, `steps=80`,
+  `reward=0`, final_pytest fails on `operator.py` missing (renamed to
+  k8s_operator.py) and deploy-v2.yaml not in the API success log.
+- messages.json steps 2,4,6,9,…,59: byte-identical assistant content AND
+  byte-identical tool output (three `[python3] <defunct>` lines).
+- step 60 onward: loop abandoned, script written and run, backup + port
+  forward created — proof the agent makes real progress once unstuck.
+
+### Uncertainty
+
+Whether the warn nudge alone flips this specific task to pass depends on the
+model using the freed ~50 steps to (a) rename operator.py correctly and (b)
+apply BOTH manifests. If it flips: strong signal. If task_000010 stays
+`loop_detected`/fail but no regressions: the guard is still a net-positive
+compute cap and the residual failure is a model capability gap (the agent
+must fix the `import operator` naming collision and iterate both manifests) —
+note as capability gap next round rather than re-shipping.

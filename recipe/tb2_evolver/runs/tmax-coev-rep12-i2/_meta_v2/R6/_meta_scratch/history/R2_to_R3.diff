@@ -1,0 +1,60 @@
+--- R2
++++ R3
+@@ -56,14 +56,7 @@
+ # R2 (meta): break the *normal-finish* narration repetition loop that
+-# LengthTruncationRecoveryProcessor cannot see. Trajectory evidence: several
+-# budget_exceeded tasks emit 4-15 near-identical assistant turns in a row
+-# ("I keep getting the same error, let me try a different approach") while never
+-# actually changing tactic, burning the entire step budget and exiting with the
+-# required output file never written. The length-recovery guard only fires on
+-# finish_reason=length; the edit-loop guard only watches file-write commands;
+-# neither catches a diagnostic/compile narration loop with a normal finish.
+-# This processor fingerprints assistant content and, after N consecutive
+-# look-alike turns, injects an escalating corrective nudge (change tactic /
+-# write the required output to its exact path). Mutates messages by at most +1
+-# user turn per chain; no task-specific literals.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R2/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
++# LengthTruncationRecoveryProcessor cannot see. Fingerprints assistant content
++# and, after N consecutive look-alike turns, injects an escalating corrective
++# nudge. Mutates messages by at most +1 user turn per chain; no task-specific
++# literals. Carried forward from R2 byte-for-byte (repointed to R3-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R3/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
+   repeat_threshold: 3
+@@ -72,2 +65,21 @@
+   min_content_chars: 40
++  _hook_: '*'
++# R3 (meta): break the *repeated-Bash-command* loop that all three prior loop
++# guards miss. Trajectory evidence: the entire budget_exceeded cluster re-issues
++# the SAME shell command 10x-34x within one 80-step task (e.g. task_001028 ran
++# one identical `echo ... | ...` 33/33 times; task_000032 ran one identical
++# probe 34/34 times; task_000348 recompiled 10x; task_001465 curled 13x) while
++# producing no new state and never writing the required output. LengthRecovery
++# fires only on finish_reason=length; CustomEditToolProcessor counts only
++# file-write commands; the R2 content fingerprint missed these because the
++# narration was long and re-worded each turn. This processor keys on the
++# NORMALIZED Bash command string over a rolling window — orthogonal to the
++# content fingerprint — and after repeat_threshold occurrences injects an
++# escalating nudge (gather new evidence / write the required output to its exact
++# path). +1 user turn per armed streak; no task-specific literals.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R3/processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
++  repeat_threshold: 4
++  escalate_threshold: 7
++  window: 12
++  min_cmd_chars: 3
+   _hook_: '*'
+@@ -96,11 +108,6 @@
+ # reader / numeric+data libs / config parser) are importable in the container
+-# Python. TB2 verifiers frequently `import requests` / `import imageio` / etc.
+-# to probe a running server or inspect output; when the base image lacks the
+-# module the verifier aborts at pytest collection time (ModuleNotFoundError)
+-# and a correct solution scores 0. Revised from the prior exit-only guard:
+-# it now fires ONCE EARLY (first model response) instead of only on clean
+-# exit, closing the gap where tasks ending via budget_exceeded/error never
+-# triggered the install. No-op when modules already present; single Bash
+-# round-trip; no task-specific literals.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R2/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
++# Python. Fires ONCE EARLY (first model response); no-op when modules already
++# present; single Bash round-trip; no task-specific literals. Carried forward
++# from R2 byte-for-byte (repointed to R3-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R3/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+   _hook_: '*'

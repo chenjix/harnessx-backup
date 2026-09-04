@@ -1,0 +1,17 @@
+--- R0
++++ R1
+@@ -55,4 +55,13 @@
+   _hook_: '*'
++# R1: token_threshold lowered 140000 -> 40000. The eval model's true context
++# window is 65536 tokens and harness_runner reserves 4096 for output, leaving a
++# ~61440-token input ceiling. Above it the server returns a hard 400 (context
++# length) that surfaces as exit_reason=error and crashes the whole task. The old
++# 140000 threshold was calibrated for a 128k+ model, so compaction NEVER fired
++# on this model and long tasks overflowed. rough_token_count (cl100k) also
++# under-counts the real request by ~9-10k (system prompt + Bash tool schema +
++# tokenizer skew), so we fire at 40000 rough tokens (~50k real) to keep every
++# request safely under the 61440 ceiling with margin for retention-window growth.
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor
+-  token_threshold: 140000
++  token_threshold: 40000
+   message_threshold: 100

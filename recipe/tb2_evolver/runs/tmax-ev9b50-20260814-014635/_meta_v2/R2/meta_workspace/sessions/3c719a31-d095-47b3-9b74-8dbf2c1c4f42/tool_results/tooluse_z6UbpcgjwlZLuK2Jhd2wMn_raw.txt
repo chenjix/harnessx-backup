@@ -1,0 +1,53 @@
+recipe/tmax_eval/agent_loop.py:141:                error=f"chat failed at step {step}: {e}",
+=== model_config retry area ===
+            if len(model_ids) <= 1:
+                providers[role_name] = _instantiate_provider(specs[default_id])
+            else:
+                from ..providers.group import ProviderGroup
+
+                entries: list[dict] = []
+                for mid in model_ids:
+                    sp = specs.get(mid, {})
+                    target = sp.get("_target_", "")
+                    ptype = "anthropic" if "Anthropic" in target else "litellm"
+                    ekw: dict = {
+                        "type": ptype,
+                        "models": [{"model": sp.get("model", ""), "default": mid == default_id}],
+                    }
+                    if sp.get("api_key"):
+                        ekw["api_key"] = sp["api_key"]
+                    if sp.get("api_base"):
+                        ekw["api_base"] = sp["api_base"]
+                    entries.append(ekw)
+                pg_kwargs: dict = {
+                    "entries": entries,
+                    "max_retries": int(rcfg.get("max_retries", 5)),
+                }
+                if strategy == "round_robin":
+                    pg_kwargs["strategy"] = "round_robin"
+                providers[role_name] = ProviderGroup(**pg_kwargs)
+
+        return cls(providers, fallback_key=fallback_key)
+
+    @classmethod
+    def from_yaml(cls, yaml_str: str) -> "ModelConfig":
+        """Parse a YAML string into a ModelConfig (supports current v0.1 and legacy pre-release formats)."""
+        from omegaconf import OmegaConf
+
+        d = OmegaConf.to_container(OmegaConf.create(yaml_str), resolve=True) or {}
+        return cls.from_dict(d)
+
+    @classmethod
+    def from_yaml_file(cls, path: Any) -> "ModelConfig":
+        """Load a ModelConfig from a YAML file."""
+        from pathlib import Path
+
+        return cls.from_yaml(Path(path).read_text(encoding="utf-8"))
+
+    # ── Repr ──────────────────────────────────────────────────────────────────
+
+    def __repr__(self) -> str:
+        keys = list(self.models.keys())
+        main_model = getattr(self.main, "model", type(self.main).__name__)
+        return f"ModelConfig(main={main_model!r}, keys={keys})"
+

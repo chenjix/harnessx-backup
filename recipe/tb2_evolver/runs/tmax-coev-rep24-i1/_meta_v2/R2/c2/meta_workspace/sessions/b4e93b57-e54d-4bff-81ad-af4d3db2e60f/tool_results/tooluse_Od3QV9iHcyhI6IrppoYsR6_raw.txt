@@ -1,0 +1,80 @@
+1	"""Behavioral self-verify processor for TB2 / tmax.
+2	
+3	Extends the stock ``CustomSelfVerifyProcessor`` (which injects a one-shot
+4	verification checklist when the model tries to exit) with an additional
+5	step that targets *dynamic / behavioral* tasks: daemons, services, resource
+6	monitors, and process-lifecycle tasks.
+7	
+8	Root-cause motivation (harness deficiency, not domain knowledge):
+9	On tmax `system_administration` tasks the agent repeatedly declares success
+10	after checking a convenient *final* snapshot (e.g. an empty log dir, a
+11	running process listing) that does NOT correspond to the invariant the
+12	external verifier actually measures (peak resource usage, absence of
+13	lingering processes, a service still answering at grade time). The agent
+14	also tends to "verify" from a dirty state left over from its own earlier
+15	tinkering rather than reproducing the grader's clean-start end-to-end run.
+16	
+17	This is a mechanical verification-discipline gap that recurs across a whole
+18	class of tasks, so it belongs in the self-verify hook, not in the system
+19	prompt as task-specific knowledge. The added checklist step is phrased as a
+20	general strategy ("reproduce the grader's setup from a clean state and check
+21	the runtime invariant, not a leftover snapshot") and contains no task IDs,
+22	paths, thresholds, or identifiers lifted from any trajectory.
+23	"""
+24	
+25	from __future__ import annotations
+26	
+27	from benchmarks.terminal_bench_2.harness import CustomSelfVerifyProcessor
+28	
+29	
+30	# General strategy guidance for dynamic / behavioral tasks. No task-specific
+31	# literals — this must help an agent on a task it has never seen before.
+32	_BEHAVIORAL_STEP = """\
+33	
+34	6. **Dynamic / behavioral tasks (daemons, services, monitors, resource limits, process cleanup):**
+35	   A convenient after-the-fact snapshot is NOT proof. The grader re-runs your
+36	   solution from a clean state and measures the *runtime* invariant, not the
+37	   state you happened to leave behind.
+38	   - Reset to a clean starting state first (kill leftover background processes
+39	     from your own earlier testing, clear any files your tinkering created),
+40	     then reproduce the intended workflow end to end exactly as the task
+41	     describes it.
+42	   - Verify the invariant the task actually specifies, at the moment it matters
+43	     — e.g. the *peak* resource usage during the run (not the final size after
+44	     things settle), that no required process is still lingering after
+45	     completion, or that a service is still responding right now.
+46	   - If the task asks a process to stay under a limit "at any point", sample
+47	     repeatedly *while the workload runs*; a low reading taken after everything
+48	     has exited tells you nothing about the peak.
+49	"""
+50	
+51	
+52	def _augmented_message() -> str:
+53	    """Insert the behavioral step before the final SUCCESS line of the base msg."""
+54	    # Import here so we always track the current base message text.
+55	    from benchmarks.terminal_bench_2 import harness as _h
+56	
+57	    base = _h._SELF_VERIFY_MSG
+58	    marker = "Fix anything that looks wrong before exiting."
+59	    if marker in base:
+60	        return base.replace(marker, _BEHAVIORAL_STEP + "\n" + marker, 1)
+61	    # Fallback: append if the base message shape changed upstream.
+62	    return base + _BEHAVIORAL_STEP
+63	
+64	
+65	class BehavioralSelfVerifyProcessor(CustomSelfVerifyProcessor):
+66	    """Same one-shot exit-gate mechanism, richer checklist for behavioral tasks."""
+67	
+68	    # Keep the same singleton group so it still occupies the single
+69	    # self-verify slot (never double-fires alongside the stock processor).
+70	    _singleton_group = "tb2_self_verify"
+71	    _order = 90
+72	
+73	    async def on_after_model(self, event):  # type: ignore[override]
+74	        # Delegate to the base logic (handles the exit-intent detection and the
+75	        # keepalive tool-call injection), then swap the pending message for our
+76	        # augmented version if the base decided to fire.
+77	        async for out in super().on_after_model(event):
+78	            if self._pending_message:
+79	                self._pending_message = _augmented_message()
+80	            yield out

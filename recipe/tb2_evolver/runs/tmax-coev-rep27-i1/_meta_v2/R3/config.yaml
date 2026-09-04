@@ -1,0 +1,90 @@
+# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+#
+# Live surfaces MetaAgent may edit:
+#   - processors (this file)
+#   - tool_registry (this file)
+#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+#
+# Runtime-only slots (sandbox_provider, tracer) are injected by
+# recipe.tmax_eval.harness_runner — do not put them here.
+#
+# Per-call output cap is NOT in this YAML: harness_runner sets
+# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+# runaway generation cannot burn an hour of wall-clock on one task.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /home/user
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  show_project_dir: false
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at:
+  - 0.7
+  - 0.9
+  _hook_: '*'
+# Break max_tokens repetition loops (finish_reason=length, no tool call).
+# Without this, one stuck task can block an entire evolve round.
+- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+  repeat_threshold: 2
+  head_chars: 1200
+  tail_chars: 600
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+# Self-verify variant: same one-shot checklist mechanism as the stock
+# CustomSelfVerifyProcessor, plus (R1) an item reminding the agent to make
+# the verifier's likely Python runtime deps (e.g. `requests`) importable for
+# network-service tasks, and (R3, superseding R2) an item on orphan/zombie
+# background-process hygiene. R2 told the agent to "kill the parent PID" of a
+# zombie, but the trajectory showed the parent was PID 1 (init) — unkillable —
+# so the target task stayed F. R3 replaces that with the correct general
+# mechanism: reap background test processes in the SAME shell via `wait`, and
+# never make a fresh service launch one of the last actions (run pipelines
+# early, end with a `pgrep` clean-state check). Closes the
+# ModuleNotFoundError:'requests' verifier-collection failures and the
+# lingering-service-process ("no lingering <svc> processes") final-state
+# assertions seen on service/daemon-building tasks.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep27-i1/_meta_v2/R3/processors/service_verify.py::ServiceVerifyDepsProcessor
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

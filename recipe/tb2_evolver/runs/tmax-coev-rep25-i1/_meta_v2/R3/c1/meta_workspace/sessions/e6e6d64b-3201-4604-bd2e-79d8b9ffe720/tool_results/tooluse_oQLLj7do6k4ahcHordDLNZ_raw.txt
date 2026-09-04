@@ -1,0 +1,167 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""StuckReasoningRecoveryProcessor — break degenerate *reasoning* loops.
+4	
+5	Failure class (observable, task-agnostic):
+6	    The agent emits the SAME assistant message content on consecutive
+7	    turns — often explicitly narrating "I keep getting the same error /
+8	    I am stuck in a loop / let me try a fundamentally different approach"
+9	    — yet the next turn reproduces that identical narration and the same
+10	    action. The agent has recognised it is stuck but cannot self-recover:
+11	    its recovery attempt is itself the repeat.
+12	
+13	Why this is distinct from the existing guards:
+14	    * ``LengthTruncationRecoveryProcessor`` only fires on
+15	      ``finish_reason == "length"`` (output-cap runaway with no tool call).
+16	    * Error/command-fingerprint guards key on a *failing* tool result or a
+17	      byte-identical *tool call*. This processor keys on the repeated
+18	      *assistant content* and therefore also catches loops where every tool
+19	      call returns SUCCESS (e.g. "Script created", exit 0) while the agent's
+20	      reasoning never actually changes — a shape those guards miss.
+21	
+22	Mechanism:
+23	    * Track the last non-empty assistant message content.
+24	    * When the current turn's content is (near-)identical to the previous
+25	      turn's, increment a run counter; any genuinely different turn resets it.
+26	    * Once ``repeat_threshold`` consecutive identical turns are seen, arm a
+27	      single legible loop-break directive that is injected before the next
+28	      model call. It names that the previous approach produced no change and
+29	      requires a *concrete different* action (inspect inputs / isolate the
+30	      failing piece / change the invocation / re-read the task), not more
+31	      narration.
+32	    * A cooldown prevents re-nudging until the agent actually changes its
+33	      content, and ``max_nudges`` bounds total interventions per task.
+34	
+35	The nudge is advisory (a user message); it never blocks or rewrites the
+36	agent's tool calls, so it cannot break a task that was about to self-correct.
+37	"""
+38	
+39	from __future__ import annotations
+40	
+41	import dataclasses
+42	import re
+43	
+44	from harnessx.core.events import (
+45	    BeforeModelEvent,
+46	    Message,
+47	    ModelResponseEvent,
+48	    TaskEndEvent,
+49	    TaskStartEvent,
+50	)
+51	from harnessx.core.processor import MultiHookProcessor
+52	
+53	
+54	_NUDGE_FIRST = (
+55	    "LOOP DETECTED: your last several turns produced the SAME reasoning and the "
+56	    "same action, so nothing in the environment is changing. Repeating it again "
+57	    "will not help. Do NOT restate your previous plan. Instead, in your next turn: "
+58	    "(1) run ONE command that inspects the ACTUAL current state or the exact error "
+59	    "output you keep hitting, then (2) change something concrete about your "
+60	    "approach — a different invocation, isolate the smallest failing piece, or "
+61	    "re-read the task to check you are solving the right problem. One concrete step."
+62	)
+63	
+64	_NUDGE_REPEAT = (
+65	    "STILL LOOPING. You are again repeating an approach that has already failed to "
+66	    "change the outcome. STOP describing the same plan. Abandon this line entirely. "
+67	    "Pick a DIFFERENT strategy: if a file/command keeps failing the same way, read "
+68	    "its full error, verify your assumptions about inputs and paths from scratch, or "
+69	    "solve a reduced version first. Emit at most two sentences of NEW reasoning, "
+70	    "then exactly one command that is materially different from what you just tried."
+71	)
+72	
+73	
+74	def _norm(text: str) -> str:
+75	    """Whitespace-normalise so trivial formatting jitter is not 'different'."""
+76	    return re.sub(r"\s+", " ", (text or "")).strip()
+77	
+78	
+79	class StuckReasoningRecoveryProcessor(MultiHookProcessor):
+80	    """Detect consecutive identical assistant reasoning and force a change."""
+81	
+82	    _singleton_group = "tmax_stuck_reasoning_recovery"
+83	    _order = 6
+84	
+85	    def __init__(
+86	        self,
+87	        repeat_threshold: int = 12,
+88	        max_nudges: int = 3,
+89	        min_chars: int = 24,
+90	    ) -> None:
+91	        # repeat_threshold=12 sits ABOVE the longest identical-reasoning run seen
+92	        # on any passing trajectory where the loop occurs MID-TASK (10-11 on the
+93	        # sampled batch), and BELOW the failing cluster's runs (14-24), so doomed
+94	        # loops are broken while productive-but-repetitive work is not touched.
+95	        # The only passing runs above 12 are post-completion verify-tails, where
+96	        # an advisory nudge is at worst harmless (work already banked).
+97	        self.repeat_threshold = max(2, int(repeat_threshold))
+98	        self.max_nudges = max(1, int(max_nudges))
+99	        self.min_chars = max(0, int(min_chars))
+100	        self._prev: str = ""
+101	        self._run: int = 1
+102	        self._nudges: int = 0
+103	        self._pending_nudge: str = ""
+104	        self._armed_for: str = ""
+105	
+106	    async def on_task_start(self, event: TaskStartEvent):
+107	        self._prev = ""
+108	        self._run = 1
+109	        self._nudges = 0
+110	        self._pending_nudge = ""
+111	        self._armed_for = ""
+112	        yield event
+113	
+114	    async def on_after_model(self, event: ModelResponseEvent):
+115	        cur = _norm(event.content)
+116	
+117	        # Only meaningful narration counts; ignore empty/trivial turns so a
+118	        # normal short tool-only turn cannot accumulate a false loop.
+119	        if len(cur) < self.min_chars:
+120	            yield event
+121	            return
+122	
+123	        if cur == self._prev:
+124	            self._run += 1
+125	        else:
+126	            self._run = 1
+127	            self._prev = cur
+128	            self._armed_for = ""  # content changed -> loop broken, reset cooldown
+129	
+130	        if (
+131	            self._run >= self.repeat_threshold
+132	            and self._nudges < self.max_nudges
+133	            and self._armed_for != cur  # don't re-arm for the same stuck content
+134	        ):
+135	            self._pending_nudge = (
+136	                _NUDGE_REPEAT if self._nudges >= 1 else _NUDGE_FIRST
+137	            )
+138	            self._armed_for = cur
+139	            self._nudges += 1
+140	
+141	        yield event
+142	
+143	    async def on_before_model(self, event: BeforeModelEvent):
+144	        if not self._pending_nudge:
+145	            yield event
+146	            return
+147	        nudge = self._pending_nudge
+148	        self._pending_nudge = ""
+149	        msgs = list(event.messages)
+150	        # Contract: never create a +2 user insertion. If the run loop already
+151	        # appended a trailing user message, replace it; otherwise append one.
+152	        if msgs and getattr(msgs[-1], "role", None) == "user":
+153	            msgs[-1] = Message(role="user", content=nudge)
+154	            yield dataclasses.replace(event, messages=tuple(msgs))
+155	        else:
+156	            yield dataclasses.replace(
+157	                event,
+158	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+159	            )
+160	
+161	    async def on_task_end(self, event: TaskEndEvent):
+162	        self._prev = ""
+163	        self._run = 1
+164	        self._nudges = 0
+165	        self._pending_nudge = ""
+166	        self._armed_for = ""
+167	        yield event

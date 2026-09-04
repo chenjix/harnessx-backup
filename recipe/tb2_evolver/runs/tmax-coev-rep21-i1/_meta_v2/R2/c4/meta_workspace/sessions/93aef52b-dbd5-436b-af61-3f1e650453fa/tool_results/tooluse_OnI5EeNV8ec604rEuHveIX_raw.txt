@@ -1,0 +1,72 @@
+1	# Evolve Journal — tmax-coev-rep21-i1
+2	
+3	## Round 1 — lingering process guard
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_lingering_process_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_000140_01c78b42]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=17/50; +4/-12 gained=task_000740_59416444,task_001032_1adaccb9,task_001089_220cc46b,task_001781_529727cf lost=task_000329_a3ac56b0,task_000344_e265c898,task_000396_e56917e2,task_000536_9c16e8ef; gating disabled (tolerance < 0)
+14	expected_global_gain: "Flips task_000140 and protects the system_administration cluster (0/5 in R0) whose verifiers check for lingering/duplicate service processes from re-run orphans"
+15	regression_risk: "Extra keepalive turn near exit could interact with CustomSelfVerifyProcessor; mitigated by ordering (92 > 90) and fire-once-only + duplicates-only gating"
+16	cost_shift: "Negligible: one ps call + one short message + one model turn, only on the rare duplicate-orphan path"
+17	rollback_trigger: "If R2 pass_rate is flat/down AND any previously-passing background-service task regresses (T->F), revert"
+18	-->
+19	
+20	### Why
+21	
+22	`task_000140_01c78b42` (system_administration) fails on
+23	`test_no_lingering_service_processes`, which asserts no `vm_service`
+24	processes remain after the agent exits (final pytest lists lingering PIDs
+25	`['347','572','849','1061']`). The agent actually solved the task — main.go,
+26	start_service.sh, and test_pipeline.sh were all correct — but it re-ran
+27	`test_pipeline.sh` multiple times to verify it (the log ends with the
+28	`PROVISIONED_VM_FOR: admin_alice` line written twice). Each run started a
+29	fresh `./vm_service &`; the pipeline's shutdown only killed the single PID in
+30	`service.pid` (the last one), orphaning the rest. The agent had no visibility
+31	into the cumulative side effects of its own iterative testing — every Bash
+32	call is stateless from its perspective. This is a harness deficiency
+33	(runtime awareness gap), not a capability gap.
+34	
+35	### Changes
+36	
+37	- `processors/lingering_process_guard.py` — new `LingeringProcessGuard`
+38	  MultiHookProcessor. Passively tracks background launches (`&`/`nohup`/
+39	  `setsid`/`disown`); at exit intent, if background work was launched, reads
+40	  the live `ps` table and, only when it finds >=2 instances of the same
+41	  command signature (re-run orphan fingerprint), injects one informational
+42	  warning listing the duplicate PIDs and asks the agent to clean up
+43	  deliberately. Never kills anything. Ordered 92 (after self-verify's 90).
+44	- `config.yaml` — register `LingeringProcessGuard` at the end of the
+45	  processor pipeline via absolute `file://` path.
+46	- `system_prompt.txt` — copied byte-for-byte from R0 (unchanged).
+47	
+48	### Evidence
+49	
+50	- `task_000140_01c78b42` final_pytest: `AssertionError: Lingering vm_service
+51	  processes found: ['347','572','849','1061']`; `agent.finished=no_tool_calls`.
+52	- `task_000140_01c78b42` messages step ~10 (`chatcmpl-tool-bd6c9799`): runs
+53	  `bash /home/user/test_pipeline.sh` (exit 127); `vm_setup.log` = 1 line.
+54	- `task_000140_01c78b42` messages step ~14 (`chatcmpl-tool-ac013bcf`): edits
+55	  pipeline and runs it AGAIN; `vm_setup.log` = 2 lines → a second service
+56	  instance started, only the last PID killed.
+57	- Batch context: background launches are structural — >=2 launches on ~36 of
+58	  50 tasks (7 on task_000140), so accidental re-run orphans are a recurring
+59	  hazard, not a one-off. `task_001090_c61c71f2` also asserts on process state
+60	  but its bug is exec-vs-bash-wrapper (a distinct knowledge gap), so it is
+61	  NOT claimed as a flip here.
+62	
+63	### Uncertainty
+64	
+65	The guard depends on the agent acting on the injected warning within its
+66	remaining turn budget; a very-late exit could leave no room to `kill`. It is
+67	strictly informational to avoid regressing tasks that must keep a single
+68	service alive (system prompt explicitly instructs that), and it fires only on
+69	duplicates, so false positives on legitimate single-service tasks are
+70	unit-test-confirmed to be zero. If R2 shows a background-service task
+71	flipping T->F, the ordering/keepalive interaction with self-verify is the
+72	first suspect — revert.

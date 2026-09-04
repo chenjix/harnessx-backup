@@ -1,0 +1,35 @@
+41:    **Strategy 1 — exact** (name + inputs): high-precision, two-phase
+44:    **Strategy 2 — name-only** (tool names, inputs ignored): catches semantic
+47:    Warn-only — never raises, because name-only matching is noisier and
+55:    message-count drop of ≥ ``compaction_drop_threshold`` is detected in
+62:        warn_threshold:            Strategy 1 consecutive-repeat count that
+64:        threshold:                 Strategy 1 consecutive-repeat count that
+66:        name_warn_threshold:       Strategy 2 consecutive-repeat count that
+68:        compaction_drop_threshold: Message-count drop that signals compaction
+75:    def __init__(
+78:        warn_threshold: int = 3,
+79:        threshold: int = 5,
+80:        name_warn_threshold: int = 8,
+81:        compaction_drop_threshold: int = 5,
+84:        self.warn_threshold = warn_threshold
+85:        self.threshold = threshold
+86:        self.name_warn_threshold = name_warn_threshold
+87:        self.compaction_drop_threshold = compaction_drop_threshold
+90:        self._name_fingerprints: deque[str] = deque(maxlen=window_size)
+120:        self._name_fingerprints.clear()
+143:        if self._prev_message_count > 0 and self._prev_message_count - current_count >= self.compaction_drop_threshold:
+145:            self._name_fingerprints.clear()
+151:        """Capture the exact fingerprint (name + serialised inputs) for this call.
+160:        self._pending_fp[event.tool_call_id] = self._compute_fingerprint(f"{event.tool_name}\x00{input_str}")
+175:            self._name_fingerprints.append("")
+179:        # ── Strategy 1: exact fingerprint (name + inputs) ──────────────
+183:        if s1_run >= self.threshold:
+185:                f"Loop detected: identical tool call '{event.tool_name}' repeated {s1_run} times consecutively"
+189:        if s1_run >= self.warn_threshold:
+192:                tools=f"`{event.tool_name}`",
+195:        # ── Strategy 2: name-only fingerprint (warn-only, no raise) ────
+196:        s2_run = self._consecutive_tail(self._name_fingerprints, event.tool_name) + 1
+197:        self._name_fingerprints.append(event.tool_name)
+199:        if not warning and s2_run >= self.name_warn_threshold:
+201:                tool=event.tool_name,
+203:                pattern=event.tool_name,

@@ -1,0 +1,14 @@
+--- R0
++++ R1
+@@ -49,2 +49,11 @@
+   _hook_: '*'
++# Break exact-identical Bash command loops (see processors/repeat_command_guard.py).
++# The length_recovery guard only catches finish_reason=length runaways and the
++# CustomEditToolProcessor only counts file writes; neither breaks the "re-run the
++# same failing query/build verbatim" loop that burned every budget_exceeded task
++# in the baseline round. This guard escalates a break-out nudge on exact repeats.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep13-i1/_meta_v2/R1/processors/repeat_command_guard.py::RepeatCommandGuard
++  threshold: 3
++  hard_stop_extra: 2
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

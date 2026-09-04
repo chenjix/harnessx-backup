@@ -1,0 +1,18 @@
+--- R2
++++ R3
+@@ -76,2 +76,15 @@
+   _hook_: '*'
++# Ensure the external verifier's standard Python HTTP client (`requests`) is
++# importable in the container. TB2's verifier runs AFTER the agent exits and
++# frequently does `import requests` to probe HTTP/network services the task
++# asked the agent to build. When `requests` is absent the verifier's test
++# module fails to collect (pytest rc=2, ModuleNotFoundError) → automatic 0
++# even for a correct service. Agents build the server in C/Go/stdlib and
++# probe with curl, so they never install the Python client themselves.
++# This processor injects ONE quiet, idempotent `pip install requests` on the
++# first model turn (append-only to the model's own call; `|| true` so it can
++# never fail the turn). Fires once per task; no-op when already installed.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i3/_meta_v2/R3/processors/verifier_dep_primer.py::VerifierDepPrimerProcessor
++  packages: requests
++  _hook_: '*'
+ - _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor

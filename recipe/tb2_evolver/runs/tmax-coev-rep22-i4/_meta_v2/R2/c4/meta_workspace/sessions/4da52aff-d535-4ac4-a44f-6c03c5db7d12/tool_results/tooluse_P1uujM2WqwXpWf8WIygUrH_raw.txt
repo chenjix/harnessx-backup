@@ -1,0 +1,76 @@
+1	# Tmax co-evolution journal — tmax-coev-rep22-i4
+2	
+3	## Round 1 — deterministic requests install for service tasks
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-09-01T22:00:00Z
+8	hypothesis_id: h_http_verifier_dep_install_v1
+9	levers: [control]
+10	predicted_affected: [task_000028_7fe033ac, task_000297_01ba10b6, task_001857_24daeef3]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=10/50; +6/-6 gained=task_000109_09ddd96b,task_000297_01ba10b6,task_000328_80fb4c9f,task_001031_a8f0eb37 lost=task_000396_e56917e2,task_001098_f5acdd79,task_001321_658ce4a8,task_001447_8bde38ef; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+14	expected_global_gain: "Flips up to 3 correct-but-ungraded HTTP/network-service tasks (6% of the 50-task round) failing solely on ModuleNotFoundError: requests at verifier collection; generalizes to any requests-graded service task."
+15	regression_risk: "Extra Bash install call fires only on detected service tasks; idempotent no-op if requests present. Broadened detection could false-positive on a background binary that isn't a service — worst case one wasted pip install, task stays correct."
+16	cost_shift: "+1 Bash tool call + one short pip install per detected service task at exit; negligible tokens, removes 3 hard zeros. Net positive."
+17	rollback_trigger: "Revert to R0 reminder-only HttpVerifierDepProcessor if net pass_rate regresses, or if replay/REPLAY_FAIL shows the injected Bash call crashes or pip install requests is blocked offline."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000028_7fe033ac` built a fully-correct service (nginx
+23	reverse proxy → C++ backend on `/tmp/video_backend.sock` returning the ffprobe
+24	frame count 150; agent verified `HTTP/1.1 200 OK` body `150`). It still scored
+25	0: the external verifier's `test_final_state.py` does `import requests`, the
+26	container lacks it, and pytest fails at *collection* time
+27	(`ModuleNotFoundError: No module named 'requests'`). The agent can never see
+28	this — verifier files are injected only after it exits. This is a harness
+29	deficiency. The same root cause recurs on `task_001857` (bare
+30	`/home/user/diagnostic_server &`) and `task_000297` (python http.server on
+31	`127.0.0.1:8080`), all three reward 0 with `initial_pytest.passed=true`.
+32	
+33	The existing `HttpVerifierDepProcessor` (reminder-only) failed here two ways:
+34	(1) it inspects only the Bash *command string*, so service starts whose port
+35	lives in a config file (`nginx -c`) or in a bare compiled binary carry no
+36	matchable token — no reminder fired on 000028/001857; (2) on 000297 a
+37	reminder-style nudge was insufficient — the agent ran `python3 -c 'import
+38	requests'`, saw `ModuleNotFoundError`, and finished anyway.
+39	
+40	### Changes
+41	
+42	- `processors/http_verifier_dep_install.py` — new
+43	  `HttpVerifierDepInstallProcessor`. Broadens service detection (framework/port
+44	  signal OR generic daemon / background-executable launch shape) and, on exit
+45	  intent for a detected service task, injects ONE real `Bash` tool call:
+46	  `python3 -c 'import requests' || python3 -m pip install --quiet requests`.
+47	  Deterministic (does not rely on model compliance), fires at most once per task,
+48	  no task-specific constants. Uses the proven `CustomSelfVerifyProcessor`
+49	  synthetic-tool-call injection pattern.
+50	- `config.yaml` — replaced the R0 `HttpVerifierDepProcessor` reference with the
+51	  new processor (kept `_order=91`, after CustomSelfVerifyProcessor 90).
+52	
+53	### Evidence
+54	
+55	- `task_000028_7fe033ac.result.json`: `final_pytest.output_tail` =
+56	  `ModuleNotFoundError: No module named 'requests'` at `test_final_state.py`
+57	  collection; `initial_pytest.passed=true`; endpoint returns `200 OK` body `150`.
+58	  messages.json: service started via `nohup /app/server ... &` and `nginx -c
+59	  /app/nginx.conf`; grep `HttpVerifierReminder` = 0 (old regex never matched).
+60	- `task_001857_24daeef3`: only service-launch command is
+61	  `/home/user/diagnostic_server 2>&1 &` (bare binary); `HttpVerifierReminder` = 0.
+62	- `task_000297_01ba10b6` idx 7-8: `python3 -c 'import requests'` →
+63	  `ModuleNotFoundError` (exit 1); idx 29 declared success without installing.
+64	- Feasibility: tasks 000010/000140/000378/001090/001937/002063 ran
+65	  `python3 -m pip install requests` and got `requests OK 2.34.2` — pip works in
+66	  these containers, so the injected install is actionable.
+67	
+68	### Uncertainty
+69	
+70	Main risk is a false-positive service detection triggering a harmless extra pip
+71	install, or the injected Bash call landing awkwardly relative to the
+72	self-verify keepalive (mitigated by ordering after it and firing on a *later*
+73	exit intent). If containers ever block outbound pip (offline), the install is a
+74	no-op and the task stays exactly as it was — no worse than R0. Watch the R1→R2
+75	gating attribution for the three predicted tasks and any T→F regressions on
+76	other service tasks.

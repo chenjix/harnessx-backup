@@ -1,0 +1,54 @@
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout: float = 30.0,
+    ) -> str:
+        """Run a shell command.  Returns combined stdout + stderr string."""
+
+    async def read_file(self, path: str) -> str:
+        """Return file contents.  *path* must be an absolute path."""
+        return await self.exec(f"cat -- {path!r}", cwd="/")
+
+    async def write_file(self, path: str, content: str) -> None:
+        """Write *content* to *path*.  Creates parent directories as needed.
+        *path* must be an absolute path."""
+        parent = str(Path(path).parent)
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        await self.exec(f"mkdir -p {parent!r} && echo {encoded!r} | base64 -d > {path!r}", cwd="/")
+
+    async def list_dir(self, path: str) -> list[str]:
+        """Return directory entries as strings (dirs suffixed with ``/``).
+        *path* must be an absolute path."""
+        result = await self.exec(f"ls -p -- {path!r}", cwd="/")
+        return [line.strip() for line in result.splitlines() if line.strip()]
+
+    async def kill_running(self) -> None:
+        """Best-effort: kill all processes currently running inside this sandbox.
+
+        Called by the Bash tool after a command timeout to prevent orphaned
+        processes (e.g. a training loop) from consuming resources and eventually
+        crashing the container via OOM.
+
+        Default implementation is a no-op.  Container-backed sandboxes should
+        override this to send SIGTERM/SIGKILL to all container processes.
+        """
+
+    def resolve(self, path: str) -> str:
+        """Resolve *path* relative to :attr:`workspace_path`.
+
+        If *path* is already absolute it is returned as-is.
+        Subclasses may add jail-checking here (see ``LocalSandbox``).
+        """
+        if Path(path).is_absolute():
+            return path
+        return str(Path(self.workspace_path) / path)
+
+    # ------------------------------------------------------------------
+    # Default exec-based implementations for Glob / Grep.
+    # LocalSandbox overrides these with faster Python implementations.
+    # ------------------------------------------------------------------
+
+    async def glob_files(self, pattern: str, base: str | None = None) -> list[str]:
+        """Return file paths matching *pattern* under *base*."""
+        cwd = base or self.workspace_path

@@ -1,0 +1,3 @@
+| id | score | config | trajectories | unique solves | unique losses | this proposal starts from |
+|----|------:|--------|--------------|---------------|---------------|---------------------------|
+| `n1_784f2e61` | — | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i3/R1/config.yaml` | `` | — | task_000298_31a3f716, task_000316_99102ad4, task_000331_dbf3bc55, task_000380_6ae4c07d, task_000606_5707f345, task_000764_a0052743, task_000780_92032f4a, task_000870_7cbd963f, task_000876_7b46f24c, task_001015_6c3ac118, task_001032_1adaccb9, task_001080_cd690ec7 |  |

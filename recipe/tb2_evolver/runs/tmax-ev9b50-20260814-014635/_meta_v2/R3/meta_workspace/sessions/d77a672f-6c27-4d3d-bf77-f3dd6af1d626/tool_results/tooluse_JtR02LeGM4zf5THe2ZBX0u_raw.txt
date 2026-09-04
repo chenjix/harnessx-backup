@@ -1,0 +1,209 @@
+1	"""Thin OpenAI/vLLM agent loop with a single Bash tool (qwen3_xml)."""
+2	from __future__ import annotations
+3	
+4	import json
+5	import time
+6	import urllib.error
+7	import urllib.request
+8	from dataclasses import dataclass, field
+9	from typing import Any, Callable
+10	
+11	BASH_TOOL: dict[str, Any] = {
+12	    "type": "function",
+13	    "function": {
+14	        "name": "Bash",
+15	        "description": (
+16	            "Execute a shell command inside the task container and return "
+17	            "stdout+stderr. Prefer working under /home/user."
+18	        ),
+19	        "parameters": {
+20	            "type": "object",
+21	            "properties": {
+22	                "command": {
+23	                    "type": "string",
+24	                    "description": "Shell command to run.",
+25	                },
+26	                "timeout": {
+27	                    "type": "integer",
+28	                    "description": "Timeout in milliseconds (default 30000).",
+29	                },
+30	            },
+31	            "required": ["command"],
+32	        },
+33	    },
+34	}
+35	
+36	SYSTEM_PROMPT = """\
+37	You are a terminal coding agent solving a single Linux task.
+38	Use the Bash tool to inspect the environment, edit files, and run commands.
+39	Work under /home/user unless the instruction says otherwise.
+40	When the task is complete, stop calling tools and briefly confirm what you did.
+41	Do not ask questions — act.
+42	"""
+43	
+44	
+45	@dataclass
+46	class StepLog:
+47	    step: int
+48	    role: str
+49	    content: str | None = None
+50	    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+51	    tool_results: list[dict[str, Any]] = field(default_factory=list)
+52	
+53	
+54	@dataclass
+55	class AgentResult:
+56	    steps: int
+57	    finished: str  # no_tool_calls | max_steps | error
+58	    messages: list[dict[str, Any]]
+59	    log: list[StepLog]
+60	    error: str | None = None
+61	
+62	
+63	def _chat(
+64	    api_base: str,
+65	    model: str,
+66	    messages: list[dict[str, Any]],
+67	    *,
+68	    temperature: float,
+69	    api_key: str,
+70	    timeout: float,
+71	) -> dict[str, Any]:
+72	    url = api_base.rstrip("/") + "/chat/completions"
+73	    body = {
+74	        "model": model,
+75	        "messages": messages,
+76	        "tools": [BASH_TOOL],
+77	        "tool_choice": "auto",
+78	        "temperature": temperature,
+79	    }
+80	    data = json.dumps(body).encode()
+81	    req = urllib.request.Request(
+82	        url,
+83	        data=data,
+84	        headers={
+85	            "Content-Type": "application/json",
+86	            "Authorization": f"Bearer {api_key or 'EMPTY'}",
+87	        },
+88	        method="POST",
+89	    )
+90	    with urllib.request.urlopen(req, timeout=timeout) as resp:
+91	        return json.loads(resp.read().decode())
+92	
+93	
+94	def _parse_args(raw: Any) -> dict[str, Any]:
+95	    if isinstance(raw, dict):
+96	        return raw
+97	    if not raw:
+98	        return {}
+99	    try:
+100	        return json.loads(raw)
+101	    except Exception:
+102	        return {"command": str(raw)}
+103	
+104	
+105	def run_agent(
+106	    *,
+107	    api_base: str,
+108	    model: str,
+109	    instruction: str,
+110	    exec_fn: Callable[[str, float], tuple[int, str]],
+111	    max_steps: int = 80,
+112	    temperature: float = 0.0,
+113	    api_key: str = "EMPTY",
+114	    request_timeout: float = 180.0,
+115	    default_cmd_timeout: float = 60.0,
+116	    system_prompt: str | None = None,
+117	) -> AgentResult:
+118	    sys_prompt = (system_prompt or SYSTEM_PROMPT).strip() or SYSTEM_PROMPT
+119	    messages: list[dict[str, Any]] = [
+120	        {"role": "system", "content": sys_prompt},
+121	        {"role": "user", "content": instruction},
+122	    ]
+123	    log: list[StepLog] = []
+124	
+125	    for step in range(1, max_steps + 1):
+126	        try:
+127	            resp = _chat(
+128	                api_base,
+129	                model,
+130	                messages,
+131	                temperature=temperature,
+132	                api_key=api_key,
+133	                timeout=request_timeout,
+134	            )
+135	        except Exception as e:
+136	            return AgentResult(
+137	                steps=step - 1,
+138	                finished="error",
+139	                messages=messages,
+140	                log=log,
+141	                error=f"chat failed at step {step}: {e}",
+142	            )
+143	
+144	        choice = (resp.get("choices") or [{}])[0]
+145	        msg = choice.get("message") or {}
+146	        tool_calls = msg.get("tool_calls") or []
+147	        content = msg.get("content")
+148	
+149	        # Normalize assistant message for history.
+150	        asst: dict[str, Any] = {"role": "assistant", "content": content or ""}
+151	        if tool_calls:
+152	            asst["tool_calls"] = tool_calls
+153	        messages.append(asst)
+154	
+155	        entry = StepLog(step=step, role="assistant", content=content, tool_calls=tool_calls)
+156	        if not tool_calls:
+157	            log.append(entry)
+158	            return AgentResult(
+159	                steps=step, finished="no_tool_calls", messages=messages, log=log
+160	            )
+161	
+162	        for tc in tool_calls:
+163	            fn = (tc.get("function") or {})
+164	            name = fn.get("name") or ""
+165	            args = _parse_args(fn.get("arguments"))
+166	            tc_id = tc.get("id") or f"call_{step}"
+167	            if name.lower() not in ("bash",):
+168	                result = f"Error: unknown tool '{name}'. Only Bash is available."
+169	                rc = 1
+170	            else:
+171	                cmd = str(args.get("command") or "")
+172	                timeout_ms = args.get("timeout")
+173	                try:
+174	                    t_sec = (
+175	                        min(float(timeout_ms) / 1000.0, 300.0)
+176	                        if timeout_ms is not None
+177	                        else default_cmd_timeout
+178	                    )
+179	                except Exception:
+180	                    t_sec = default_cmd_timeout
+181	                if not cmd.strip():
+182	                    rc, result = 1, "Error: empty command"
+183	                else:
+184	                    t0 = time.time()
+185	                    try:
+186	                        rc, result = exec_fn(cmd, t_sec)
+187	                    except Exception as e:
+188	                        rc, result = 1, f"Error executing command: {e}"
+189	                    # annotate duration for debugging
+190	                    result = (result or "")[-12000:]
+191	                    if not result.endswith("\n"):
+192	                        result += "\n"
+193	                    result += f"[rc={rc} elapsed={time.time()-t0:.1f}s]"
+194	
+195	            tool_msg = {
+196	                "role": "tool",
+197	                "tool_call_id": tc_id,
+198	                "name": "Bash",
+199	                "content": result,
+200	            }
+201	            messages.append(tool_msg)
+202	            entry.tool_results.append(
+203	                {"tool_call_id": tc_id, "command": args.get("command"), "rc": rc, "output_tail": result[-2000:]}
+204	            )
+205	        log.append(entry)
+206	
+207	    return AgentResult(
+208	        steps=max_steps, finished="max_steps", messages=messages, log=log
+209	    )

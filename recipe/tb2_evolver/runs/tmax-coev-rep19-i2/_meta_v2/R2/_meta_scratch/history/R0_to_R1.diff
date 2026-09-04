@@ -1,0 +1,19 @@
+--- R0
++++ R1
+@@ -41,2 +41,16 @@
+   - 0.9
++  _hook_: '*'
++# External-HTTP-verifier dependency reminder. A whole cluster of Tmax tasks
++# ask the agent to stand up a service (HTTP server / nginx reverse proxy /
++# UNIX-socket backend / web microservice) that an EXTERNAL automated verifier
++# then exercises with Python `requests`. The base image ships without
++# `requests`, so the verifier's `test_final_state.py` fails to even collect
++# (ModuleNotFoundError) and the task scores 0 even when the service is
++# correct. The agent cannot see the verifier's test files (they are injected
++# after it exits), so it never installs the dep — but outbound pip DOES work
++# here. This processor injects ONE reminder, only on tasks whose description
++# signals a build-a-service-the-verifier-calls shape, to ensure the system
++# Python has the client library before finishing. No task-specific literals.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i2/_meta_v2/R1/c1/processors/verifier_http_dep_reminder.py::VerifierHttpDepReminder
++  dep_module: requests
+   _hook_: '*'

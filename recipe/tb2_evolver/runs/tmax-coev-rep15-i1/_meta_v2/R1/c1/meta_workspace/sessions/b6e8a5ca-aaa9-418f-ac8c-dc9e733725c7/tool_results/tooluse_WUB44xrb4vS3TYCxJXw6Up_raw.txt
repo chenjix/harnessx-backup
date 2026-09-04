@@ -1,0 +1,117 @@
+IDX 37
+cat > /home/user/migrate.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+URL Migration Utility - Parses legacy URLs and migrates to new JSON schema.
+"""
+
+import sys
+import re
+import json
+from urllib.parse import urlparse, parse_qs, unquote
+
+# Route definitions extracted from the schema image
+# Format: (pattern, path_param_mapping, query_param_mapping)
+ROUTES = [
+    # Route 1: /catalog/item/<item_id>
+    # Path: item_id -> product_id
+    # Query: dept -> department, sort -> sort_order
+    (
+        r'^/catalog/item/([^/]+)$',
+        {'item_id': 'product_id'},
+        {'dept': 'department', 'sort': 'sort_order'}
+    ),
+    # Route 2: /auth/session/<session_id>
+    # Path: session_id -> session_token
+    # Query: referrer -> traffic_source
+    (
+        r'^/auth/session/([^/]+)$',
+        {'session_id': 'session_token'},
+        {'referrer': 'traffic_source'}
+    ),
+    # Route 3: /user/prefs/<user_id>
+    # Path: user_id -> account_id
+    # Query: theme -> ui_theme, alerts -> notifications
+    (
+        r'^/user/prefs/([^/]+)$',
+        {'user_id': 'account_id'},
+        {'theme': 'ui_theme', 'alerts': 'notifications'}
+    ),
+]
+
+
+def parse_url(url):
+    """Parse a URL and extract path and query parameters."""
+    parsed = urlparse(url)
+    path = parsed.path
+    query_params = parse_qs(parsed.query)
+    
+    # Decode query parameter values to strings
+    decoded_params = {}
+    for key, values in query_params.items():
+        decoded_params[key] = values[0] if len(values) == 1 else values
+    
+    return path, decoded_params
+
+
+def match_route(url):
+    """
+    Match a URL against the defined routes and extract parameters.
+    Returns a dict with the new schema or None if no match.
+    """
+    parsed = urlparse(url)
+    path = parsed.path
+    query_params = parse_qs(parsed.query)
+    
+    # Decode query parameter values to strings
+    decoded_params = {}
+    for key, values in query_params.items():
+        decoded_params[key] = values[0] if len(values) == 1 else values
+    
+    for pattern, path_mapping, query_mapping in ROUTES:
+        match = re.match(pattern, path)
+        if match:
+            result = {}
+            
+            # Add path parameters
+            for path_key, new_key in path_mapping.items():
+                result[new_key] = match.group(1)
+            
+            # Add query parameters
+            for query_key, new_key in query_mapping.items():
+                if query_key in decoded_params:
+                    result[new_key] = decoded_params[query_key]
+            
+            return result
+    
+    return None
+
+
+def main():
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <input_urls.txt> <output.jsonl>", file=sys.stderr)
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
+    with open(input_file, 'r') as f:
+        urls = [line.strip() for line in f if line.strip()]
+    
+    results = []
+    for url in urls:
+        result = match_route(url)
+        if result is not None:
+            results.append(result)
+    
+    with open(output_file, 'w') as f:
+        for result in results:
+            f.write(json.dumps(result) + '\n')
+
+
+if __name__ == '__main__':
+    main()
+PYEOF
+chmod +x /home/user/migrate.py
+echo "Created migrate.py"
+=======END=======

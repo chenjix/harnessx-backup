@@ -1,0 +1,156 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatCommandBreakerProcessor — break identical-Bash-command loops.
+4	
+5	Closes a systemic ``budget_exceeded`` failure mode observed across many tasks:
+6	the agent issues the **exact same Bash command** turn after turn, gets the same
+7	(often empty or failing) tool result each time, and keeps re-issuing it — burning
+8	the entire step budget on a single unproductive command.
+9	
+10	This is NOT the ``finish_reason=length`` degenerate-narration loop that
+11	``LengthTruncationRecoveryProcessor`` already handles: here the model *does*
+12	emit a well-formed tool call every turn, so that processor never fires. The
+13	loop slips through and only ``budget_exceeded`` stops it, after ~25 wasted steps.
+14	
+15	Mechanism (non-destructive):
+16	* Track the normalized command string of the single Bash tool call each turn.
+17	* When the same command is issued ``repeat_threshold`` times in a row, inject a
+18	  firm corrective *user* message before the next model call telling the agent
+19	  the command produced an identical result N times and it must change strategy
+20	  (inspect state differently, fix the actual error, or move to the next step).
+21	* The offending tool call is still allowed to execute — we never block or kill
+22	  the run, we only add a redirect. So a legitimately-slow retry (e.g. a package
+23	  install re-run a few times) is at worst nudged, never broken.
+24	* Escalates wording if the loop persists past the first nudge.
+25	
+26	Generality: keys off the *shape* "same command repeated consecutively", with no
+27	task-specific commands, paths, or ids. It closes a class of loops, not one task,
+28	and is a no-op on any run whose consecutive-command count never reaches the
+29	threshold (the overwhelmingly common case for passing tasks).
+30	"""
+31	
+32	from __future__ import annotations
+33	
+34	import dataclasses
+35	
+36	from harnessx.core.events import (
+37	    BeforeModelEvent,
+38	    Message,
+39	    ModelResponseEvent,
+40	    TaskEndEvent,
+41	    TaskStartEvent,
+42	)
+43	from harnessx.core.processor import MultiHookProcessor
+44	
+45	
+46	_NUDGE_FIRST = (
+47	    "STOP — loop detected by the harness. You have just issued the SAME command "
+48	    "{n} times in a row and it produced the same result every time. Repeating it "
+49	    "again will not change the outcome. Do NOT run that command again. Instead, in "
+50	    "your next turn do ONE of the following: (a) if the command failed or returned "
+51	    "nothing useful, diagnose *why* with a different command (check the exact path "
+52	    "exists, inspect the real file/tool, read the actual error), or (b) if you have "
+53	    "the information you need, move on to the NEXT concrete step of the task. "
+54	    "Change your approach now."
+55	)
+56	
+57	_NUDGE_REPEAT = (
+58	    "STOP. You are STILL repeating a command that does not work. This has now "
+59	    "wasted many steps. Completely abandon this line of attack — the current "
+60	    "command will never succeed as written. Re-read the task requirements, pick a "
+61	    "DIFFERENT strategy, and either fix the underlying problem (wrong path, missing "
+62	    "dependency, wrong tool/flags) or proceed to a different required step. Issue a "
+63	    "genuinely different command in your next turn."
+64	)
+65	
+66	
+67	def _bash_command(event: ModelResponseEvent) -> str | None:
+68	    """Return the normalized command of a single-Bash-call turn, else None."""
+69	    calls = event.tool_calls or ()
+70	    if len(calls) != 1:
+71	        return None
+72	    call = calls[0]
+73	    if getattr(call, "name", None) != "Bash":
+74	        return None
+75	    inp = getattr(call, "input", None) or {}
+76	    cmd = inp.get("command") if isinstance(inp, dict) else None
+77	    if not isinstance(cmd, str):
+78	        return None
+79	    norm = cmd.strip()
+80	    return norm or None
+81	
+82	
+83	class RepeatCommandBreakerProcessor(MultiHookProcessor):
+84	    """Detect consecutive identical Bash commands and redirect the agent."""
+85	
+86	    _singleton_group = "tmax_repeat_command_breaker"
+87	    _order = 6  # right after LengthTruncationRecoveryProcessor (_order=5)
+88	
+89	    def __init__(self, repeat_threshold: int = 3) -> None:
+90	        # Fire when the same command has been issued this many times in a row.
+91	        self.repeat_threshold = max(2, int(repeat_threshold))
+92	        self._last_cmd: str | None = None
+93	        self._run_len: int = 0
+94	        self._pending_nudge: str = ""
+95	        self._nudges_sent: int = 0
+96	
+97	    async def on_task_start(self, event: TaskStartEvent):
+98	        self._last_cmd = None
+99	        self._run_len = 0
+100	        self._pending_nudge = ""
+101	        self._nudges_sent = 0
+102	        yield event
+103	
+104	    async def on_after_model(self, event: ModelResponseEvent):
+105	        cmd = _bash_command(event)
+106	        if cmd is None:
+107	            # Any non-single-Bash turn breaks the run (real progress / narration).
+108	            self._last_cmd = None
+109	            self._run_len = 0
+110	            yield event
+111	            return
+112	
+113	        if cmd == self._last_cmd:
+114	            self._run_len += 1
+115	        else:
+116	            self._last_cmd = cmd
+117	            self._run_len = 1
+118	
+119	        if self._run_len >= self.repeat_threshold:
+120	            self._nudges_sent += 1
+121	            self._pending_nudge = (
+122	                _NUDGE_REPEAT
+123	                if self._nudges_sent >= 2
+124	                else _NUDGE_FIRST.format(n=self._run_len)
+125	            )
+126	            # Re-arm: require another full run of repeats before nudging again,
+127	            # so we escalate rather than nudge on every subsequent identical turn.
+128	            self._run_len = 0
+129	            self._last_cmd = None
+130	
+131	        yield event
+132	
+133	    async def on_before_model(self, event: BeforeModelEvent):
+134	        if not self._pending_nudge:
+135	            yield event
+136	            return
+137	        nudge = self._pending_nudge
+138	        self._pending_nudge = ""
+139	        msgs = list(event.messages)
+140	        # If the run loop already appended a trailing user message, replace it so
+141	        # we don't create two consecutive user messages (contract-safe).
+142	        if msgs and getattr(msgs[-1], "role", None) == "user":
+143	            msgs[-1] = Message(role="user", content=nudge)
+144	            yield dataclasses.replace(event, messages=tuple(msgs))
+145	        else:
+146	            yield dataclasses.replace(
+147	                event,
+148	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+149	            )
+150	
+151	    async def on_task_end(self, event: TaskEndEvent):
+152	        self._last_cmd = None
+153	        self._run_len = 0
+154	        self._pending_nudge = ""
+155	        self._nudges_sent = 0
+156	        yield event

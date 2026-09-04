@@ -1,0 +1,132 @@
+81	    return args.model or os.environ.get("TB2_MODEL") or os.environ.get("MODEL") or ""
+82	
+83	
+84	def _resolve_system_prompt(
+85	    harness_config: Path | None,
+86	    system_prompt_file: Path | None,
+87	) -> str | None:
+88	    """Resolve Tmax agent system prompt for an evolve round.
+89	
+90	    Preference order:
+91	      1. --system-prompt-file
+92	      2. system_prompt.txt next to harness config (MetaAgent can write this)
+93	      3. templates/*.j2 under the harness config directory
+94	      4. None → agent_loop default
+95	    """
+96	    if system_prompt_file is not None and system_prompt_file.is_file():
+97	        return system_prompt_file.read_text(encoding="utf-8")
+98	    if harness_config is not None:
+99	        cfg = Path(harness_config).resolve()
+100	        sibling = cfg.parent / "system_prompt.txt"
+101	        if sibling.is_file():
+102	            return sibling.read_text(encoding="utf-8")
+103	        templates = cfg.parent / "templates"
+104	        if templates.is_dir():
+105	            j2s = sorted(templates.glob("*.j2"))
+106	            if j2s:
+107	                return j2s[0].read_text(encoding="utf-8")
+108	    env_prompt = (os.environ.get("TMAX_SYSTEM_PROMPT_FILE") or "").strip()
+109	    if env_prompt and Path(env_prompt).is_file():
+110	        return Path(env_prompt).read_text(encoding="utf-8")
+111	    return None
+112	
+113	
+114	def run_one(
+115	    task: dict[str, Any],
+116	    *,
+117	    api_base: str,
+118	    model: str,
+119	    work_root: Path,
+120	    out_dir: Path,
+121	    max_steps: int,
+122	    temperature: float,
+123	    rebuild: bool,
+124	    skip_initial: bool,
+125	    keep_container: bool,
+126	    network: str,
+127	    system_prompt: str | None = None,
+128	) -> dict[str, Any]:
+129	    tid = task["task_id"]
+130	    t0 = time.time()
+131	    result: dict[str, Any] = {
+132	        "task_id": tid,
+133	        "domain": task.get("domain"),
+134	        "reward": 0,
+135	        "status": "error",
+136	        "elapsed_s": 0,
+137	        "api_base": api_base,
+138	        "model": model,
+139	    }
+140	    container = None
+141	    try:
+142	        image = docker_env.build_image(
+143	            tid, task["container_def"], work_root, rebuild=rebuild
+144	        )
+145	        result["image"] = image
+146	        container = docker_env.start_container(tid, image, network=network)
+147	        result["container"] = container
+148	
+149	        if not skip_initial and task.get("test_initial_state"):
+150	            init = docker_env.run_pytest(
+151	                container,
+152	                task["test_initial_state"],
+153	                dest="/tmp/test_initial_state.py",
+154	            )
+155	            result["initial_pytest"] = {
+156	                "passed": init["passed"],
+157	                "rc": init["rc"],
+158	                "output_tail": init["output"][-1500:],
+159	            }
+160	            if not init["passed"]:
+161	                # Still continue — some fixtures are agent-facing checks; but
+162	                # record the failure for diagnosis.
+163	                result["initial_pytest_failed"] = True
+164	
+165	        def _exec(cmd: str, timeout: float) -> tuple[int, str]:
+166	            return docker_env.exec_in(container, cmd, timeout=timeout)
+167	
+168	        agent = agent_loop.run_agent(
+169	            api_base=api_base,
+170	            model=model,
+171	            instruction=str(task["description"]),
+172	            exec_fn=_exec,
+173	            max_steps=max_steps,
+174	            temperature=temperature,
+175	            api_key=os.environ.get("TB2_API_KEY", "EMPTY"),
+176	            system_prompt=system_prompt,
+177	        )
+178	        result["agent"] = {
+179	            "steps": agent.steps,
+180	            "finished": agent.finished,
+181	            "error": agent.error,
+182	        }
+183	        # Persist transcript (truncate tool outputs already capped).
+184	        (out_dir / f"{tid}.messages.json").write_text(
+185	            json.dumps(agent.messages, indent=2, ensure_ascii=False) + "\n"
+186	        )
+187	
+188	        final = docker_env.run_pytest(
+189	            container,
+190	            task["test_final_state"],
+191	            dest="/tmp/test_final_state.py",
+192	        )
+193	        result["final_pytest"] = {
+194	            "passed": final["passed"],
+195	            "rc": final["rc"],
+196	            "output_tail": final["output"][-2000:],
+197	        }
+198	        result["reward"] = 1 if final["passed"] else 0
+199	        result["status"] = "ok" if agent.error is None else "agent_error"
+200	    except Exception as e:
+201	        result["status"] = "error"
+202	        result["error"] = f"{type(e).__name__}: {e}"
+203	        result["traceback"] = traceback.format_exc()[-3000:]
+204	    finally:
+205	        if container and not keep_container:
+206	            try:
+207	                docker_env.stop_container(container)
+208	            except Exception:
+209	                pass
+210	        result["elapsed_s"] = round(time.time() - t0, 1)
+
+[Showing lines 81–210 of 412 total. Use offset=210 to read the next section.]

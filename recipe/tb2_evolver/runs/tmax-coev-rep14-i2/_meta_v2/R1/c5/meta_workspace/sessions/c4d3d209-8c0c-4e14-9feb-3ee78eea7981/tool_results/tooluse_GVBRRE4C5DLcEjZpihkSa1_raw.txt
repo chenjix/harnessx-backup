@@ -1,0 +1,95 @@
+=== [6] tool: import time
+import sys
+import os
+
+worker_id = sys.argv[1]
+log_path = f"/home/user/logs/worker_{worker_id}.log"
+target_bytes = 10 * 1024 * 1024
+written = 0
+chunk_size = 512 * 1024
+
+with open(log_path, 'w') as f:
+    while written < target_bytes:
+        f.write('A' * chunk_size)
+        f.flush()
+        written += chunk_size
+        time.sleep(0.1)
+
+
+=== [10] tool: #!/usr/bin/env python3
+"""
+Deployment Monitor Daemon
+
+Monitors disk usage in /home/user/logs/ and controls worker processes
+to prevent disk quota exhaustion during deployment.
+"""
+
+import os
+import time
+import signal
+import subprocess
+import glob
+
+LOGS_DIR = "/home/user/logs"
+LOG_PATTERN = os.path.join(LOGS_DIR, "*.log")
+THRESHOLD_BYTES = 40 * 1024 * 1024  # 40 MB
+SLEEP_INTERVAL = 0.1
+
+
+def get_total_logs_size():
+    """Calculate total size of all .log files in the logs directory."""
+    total_size = 0
+    try:
+        for filepath in glob.glob(LOG_PATTERN):
+            if os.path.isfile(filepath):
+                total_size += os.path.getsize(filepath)
+    except (OSError, IOError):
+        pass
+    return total_size
+
+
+def get_worker_processes():
+    """Get PIDs of all running worker_sim.py processes."""
+    worker_pids = []
+    try:
+        result = subprocess.run(
+            ["ps", "
+
+=== [62] tool: (exit 0, no output captured)
+
+[EditDetection] File `/home/user/deployment_monitor.py` has been modified more than 7 times. You are over-editing this file — step back and try a fundamentally different approach.
+
+[EditDetection] File `THRESHOLD_BYTES:` has been modified more than 7 times. You are over-editing this file — step back and try a fundamentally different approach.
+
+[EditDetection] File `=` has been modified more than 7 times. You are over-editing this file — step back and try a fundamentally different approach.
+
+=== [84] tool: #!/usr/bin/env python3
+import os, time, signal, subprocess, glob
+
+LOGS_DIR = "/home/user/logs"
+LOG_PATTERN = os.path.join(LOGS_DIR, "*.log")
+THRESHOLD_BYTES = 40 * 1024 * 1024
+SLEEP_INTERVAL = 0.1
+
+def get_total_logs_size():
+    total_size = 0
+    try:
+        for filepath in glob.glob(LOG_PATTERN):
+            if os.path.isfile(filepath):
+                total_size += os.path.getsize(filepath)
+    except: pass
+    return total_size
+
+def get_worker_processes():
+    worker_pids = []
+    try:
+        result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.splitlines():
+            if "worker_sim.py" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        pid = int(parts[1])
+                        os.kill(pid, 0)
+                        worker_pids.append(p
+

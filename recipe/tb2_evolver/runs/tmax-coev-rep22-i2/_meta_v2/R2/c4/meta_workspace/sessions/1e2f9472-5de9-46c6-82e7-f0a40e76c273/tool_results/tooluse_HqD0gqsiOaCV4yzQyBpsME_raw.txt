@@ -1,0 +1,102 @@
+199	    def _reset(self) -> None:
+200	        self._fps.clear()
+201	        self._call_fps.clear()
+202	        self._pending.clear()
+203	        self._blocked_ids.clear()
+204	        self._prev_message_count = 0
+205	        self._consecutive_blocks = 0
+206	
+207	    # ------------------------------------------------------------------
+208	    # Hooks
+209	    # ------------------------------------------------------------------
+210	
+211	    async def on_task_start(self, event: TaskStartEvent):
+212	        self._reset()
+213	        self._current_run_id = event.run_id
+214	        yield event
+215	
+216	    async def on_step_start(self, event: StepStartEvent):
+217	        if event.run_id != self._current_run_id:
+218	            self._reset()
+219	            self._current_run_id = event.run_id
+220	        current = len(event.messages)
+221	        if (
+222	            self._prev_message_count > 0
+223	            and self._prev_message_count - current >= self.compaction_drop_threshold
+224	        ):
+225	            self._fps.clear()
+226	            self._call_fps.clear()
+227	            self._consecutive_blocks = 0
+228	        self._prev_message_count = current
+229	        yield event
+230	
+231	    async def on_before_tool(self, event: ToolCallEvent):
+232	        # Only intervene when a full-triple cycle is already established AND the
+233	        # incoming call is the same call that repeats inside that cycle.
+234	        call_fp = self._call_fp(event.tool_name, event.tool_input)
+235	        self._pending[event.tool_call_id] = f"{event.tool_name}\x00{call_fp}"
+236	
+237	        best_cycles, best_period = self._best_cycle(list(self._fps))
+238	        if best_cycles >= self.break_cycles and len(self._call_fps) >= best_period:
+239	            # The repeating call-block is the tail `best_period` call fps.
+240	            recent_block = list(self._call_fps)[-best_period:]
+241	            if call_fp in recent_block:
+242	                self._consecutive_blocks += 1
+243	                if self._consecutive_blocks > self.max_blocks:
+244	                    raise LoopDetectedError(
+245	                        f"Cyclic loop unbroken: a {best_period}-step identical "
+246	                        f"tool cycle repeated {best_cycles}+ times and the agent "
+247	                        f"ignored {self.max_blocks} redirect attempts"
+248	                    )
+249	                # Block the call, inject a redirect, keep the run alive.
+250	                # Do NOT record this call in the windows (it never executed);
+251	                # the pending entry is dropped and the id is tagged blocked so
+252	                # on_after_tool can tell a block apart from real progress.
+253	                self._pending.pop(event.tool_call_id, None)
+254	                self._blocked_ids.add(event.tool_call_id)
+255	                yield dataclasses.replace(
+256	                    event,
+257	                    approved=False,
+258	                    synthetic_result=_BREAK_TEMPLATE.format(runs=best_cycles),
+259	                )
+260	                return
+261	
+262	        yield event
+263	
+264	    async def on_after_tool(self, event: ToolResultEvent):
+265	        entry = self._pending.pop(event.tool_call_id, None)
+266	        if entry is None:
+267	            # A call we blocked: it never executed. Record a break so it can't
+268	            # join a cycle, but KEEP the ignored-block counter so a
+269	            # non-recovering agent eventually trips the safety net.
+270	            if event.tool_call_id in self._blocked_ids:
+271	                self._blocked_ids.discard(event.tool_call_id)
+272	                self._fps.append("")
+273	                self._call_fps.append("")
+274	                yield event
+275	                return
+276	            # An unmatched result (no before_tool seen). Treat as genuine
+277	            # progress: break any cycle and reset the ignored-block counter.
+278	            self._fps.append("")
+279	            self._call_fps.append("")
+280	            self._consecutive_blocks = 0
+281	            yield event
+282	            return
+283	
+284	        tool_name, call_fp = entry.split("\x00", 1)
+285	        result_part = event.result or ""
+286	        if event.error:
+287	            result_part += f"\x01ERR\x01{event.error}"
+288	        full_fp = self._hash(f"{call_fp}\x00{result_part}")
+289	        self._fps.append(full_fp)
+290	        self._call_fps.append(call_fp)
+291	
+292	        # A real (executed) tool call broke the block streak.
+293	        self._consecutive_blocks = 0
+294	
+295	        best_cycles, best_period = self._best_cycle(list(self._fps))
+296	        if best_cycles >= self.warn_cycles:
+297	            warning = _WARN_TEMPLATE.format(period=best_period, cycles=best_cycles)
+298	            yield dataclasses.replace(event, result=(event.result or "") + warning)
+
+[Showing lines 199–298 of 305 total. Use offset=298 to read the next section.]

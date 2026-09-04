@@ -1,0 +1,144 @@
+1	# Tmax coev-rep21-i2 — evolution journal
+2	
+3	## Round 1 — install action-loop detector
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_action_loop_detect_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_001031_a8f0eb37, task_000011_d089ef35, task_001382_6c9d34ea, task_000477_de422e4d, task_000313_1dce9844, task_001207_44e97fe1]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=13/50; +4/-0 gained=task_000133_20c45b39,task_001031_a8f0eb37,task_001382_6c9d34ea,task_001697_af4b85fb; gating disabled (tolerance < 0)
+14	expected_global_gain: "Break the 12/50 budget_exceeded-at-80-steps cluster: escalating redirect warnings on repeated-identical Bash calls give a recovery path; hard-stop at 8 reclaims budget on hopeless verbatim loops."
+15	regression_risk: "Very low — warn fires only on 3rd consecutive IDENTICAL command; raise only on 8th. No passing R0 task shows high-repeat histograms (passing tasks 10-37 steps). Strategy-2 name-only warns disabled (name_warn_threshold=999) so single-tool Bash never false-warns."
+16	cost_shift: "Net down — terminating 26-29x verbatim loops at repeat 8 removes ~18-21 wasted budget iterations per affected task; only adds short warning strings to tool results."
+17	rollback_trigger: "If R2 pass_rate is flat/down AND any previously-passing R0 task (e.g. task_000009, task_000602, task_000710, task_000760, task_000790, task_000791, task_001108, task_002096) regresses to loop_detected, revert."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000010_644ab1c2` fails at `budget_exceeded`/80
+23	steps. Root cause: the task mandates writing `/home/user/operator.py`,
+24	which shadows stdlib `operator`; since CWD is `sys.path[0]`, every
+25	`python3` run circular-imports and crashes the interpreter (and the
+26	pytest verifier). The model *identified* the cause but never applied
+27	the fix (`python3 -P` / `PYTHONSAFEPATH` / different CWD) — a model
+28	capability gap. The harness deficiency it exposes is systemic: the
+29	model got trapped issuing the exact same failing command cycle ~10
+30	times with zero corrective feedback. Sweeping the round, 12 of 50
+31	tasks hit `budget_exceeded` at exactly 80 steps, and their command
+32	histograms are dominated by a single Bash command repeated 13-29x
+33	verbatim and consecutively (task_001031: 29x, task_000011: 27x,
+34	task_001382/000477: 26x, task_000313: 18x, task_001207: 13x). No R0
+35	processor detects action-level loops — the installed
+36	`LengthTruncationRecoveryProcessor` only handles the distinct
+37	`finish_reason=length`-with-no-tool-call shape.
+38	
+39	### Changes
+40	
+41	- `config.yaml` — add
+42	  `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+43	  (previously absent) with `warn_threshold=3`, `threshold=8`,
+44	  `name_warn_threshold=999`, `window_size=12`. Warns (redirects) on
+45	  each repeated-identical Bash call from repeat 3, raises
+46	  `LoopDetectedError` at repeat 8. No new code authored — reuses the
+47	  vetted in-tree processor. `LoopDetectedError` maps to
+48	  `exit_reason=loop_detected` (runloop.py:781), not `error`, so it
+49	  does not trip the replay crash gate.
+50	- `system_prompt.txt` — copied byte-for-byte from R0 (sidecar for
+51	  `SiblingSystemPromptBuilder`; unchanged).
+52	
+53	### Evidence
+54	
+55	- `task_000010_644ab1c2` messages.json: msgs 2/17/53 `ln -s
+56	  .../operator.py`, msgs 6/21/33 `rm && mv`, circular-import Traceback
+57	  at msgs 5/10/20/24 — identical (command → identical error) cycle,
+58	  narration from msg 25 "I've been stuck in a loop" yet keeps issuing
+59	  the same calls; `exit_reason=budget_exceeded`, 80 steps.
+60	- `task_001031_a8f0eb37`: 29 consecutive identical
+61	  `python3 -c "from mpi4py import MPI; help(...)"` (script over
+62	  messages.json).
+63	- `task_000011_d089ef35`: 27 consecutive identical `kill -9 66 ...`.
+64	- `task_001382_6c9d34ea`: 26 consecutive identical `kill -9 -p 72 ...`.
+65	- Cluster: 12/50 R0 tasks `exit_reason=budget_exceeded`, all at 80
+66	  steps; passing tasks by contrast finish in 10-37 steps with no
+67	  repeat histograms.
+68	
+69	### Uncertainty
+70	
+71	The assigned task's specific fix (interpreter shadowing) is a model
+72	capability gap this change does not directly supply, so
+73	`task_000010` may still fail even with the loop broken — the flip
+74	depends on the model finding the fix once it stops thrashing. The
+75	robust, measurable win is on the moderate-loop tasks (recovery via
+76	escalating warnings) and the cost/budget reclaim on the extreme
+77	loops. Signal to watch: if loop_detected appears on a previously
+78	passing task, `warn_threshold`/`threshold` are too tight — raise
+79	`threshold` first before reverting.
+80	
+81	## Round 1 — ensure verifier HTTP-client dep
+82	
+83	<!-- journal:frontmatter
+84	round: 1
+85	timestamp: 2026-08-31T12:35:00Z
+86	hypothesis_id: h_verifier_requests_dep_v1
+87	levers: [control]
+88	predicted_affected: [task_000028_7fe033ac, task_000106_23215092, task_000958_4bb2b05d, task_001857_24daeef3, task_002063_8c8adcfe]
+89	cited_candidates: [C-001]
+90	gating_outcome: pending
+91	gating_attribution: pending
+92	expected_global_gain: "Unblocks up to 5 service tasks whose verifier crashes at import (ModuleNotFoundError: requests) before the working solution is scored"
+93	regression_risk: "Non-service tasks untouched (heuristic-gated). For matched service tasks a spurious pip check costs ~1s; install is idempotent and all failures swallowed."
+94	cost_shift: "Negligible: one pre-loop sandbox exec on service-shaped tasks only; zero model tokens."
+95	rollback_trigger: "If R2 shows these five still fail with the same 'import requests' collection error, the container index is offline and no install can help — revert."
+96	-->
+97	
+98	### Why
+99	
+100	Assigned focus was `task_000028_7fe033ac`. The agent actually SOLVED it — it
+101	fixed the nginx socket path, fixed/compiled/ran the C++ server, wrote the
+102	logrotate config, and verified `http://127.0.0.1:8080/` returns `150` through
+103	nginx ("Integration test PASSED!"). Reward is still 0 because the *verifier*
+104	phase crashes at collection: `/tmp/test_final_state.py:6: import requests` →
+105	`ModuleNotFoundError: No module named 'requests'`. The verifier's pytest module
+106	uses `requests` to probe the HTTP service, but the eval container's system
+107	Python does not ship it. Per the tb2-playbook, verifier test files are injected
+108	after the agent session ends, so the agent cannot see or infer this dependency
+109	— an environment deficiency, not a capability gap. This is systemic: 5 of 41
+110	failing tasks fail with the identical `requests` ImportError at verifier
+111	collection, and all 5 are HTTP/socket service tasks.
+112	
+113	### Changes
+114	
+115	- `processors/verifier_dep_ensure.py` — new `VerifierDepEnsureProcessor`
+116	  (Control). On `on_task_start`, for service-shaped tasks (regex over the task
+117	  description), best-effort ensures `requests` imports in the system Python
+118	  (`python3 -c 'import requests' || pip install requests || true`). Idempotent,
+119	  contract-neutral (never touches `event.messages`), never raises.
+120	- `config.yaml` — registered the processor via absolute `file://` path early in
+121	  the pipeline (`_order=5`, before the model ever runs).
+122	- `system_prompt.txt` — copied byte-for-byte from R0 (SiblingSystemPromptBuilder
+123	  reads it next to the config; unchanged).
+124	
+125	### Evidence
+126	
+127	- `task_000028_7fe033ac` tool result: "Response body: 150 / Integration test
+128	  PASSED!"; `result.json.final_pytest.output_tail`: `import requests` →
+129	  `ModuleNotFoundError`. Service works; only verifier import fails.
+130	- `task_000106_23215092`: `finished=no_tool_calls`, reward 0, same import error;
+131	  body shows `Successfully installed scipy-1.15.3` — pip installs DO succeed in
+132	  this container, so ensuring `requests` is feasible.
+133	- `task_000958_4bb2b05d`, `task_001857_24daeef3`, `task_002063_8c8adcfe`:
+134	  `result.json.final_pytest` all carry the same `import requests` ImportError.
+135	- `grep -oh "No module named ..."` across all 50 result.json → `requests` 10x
+136	  (5 tasks x 2 pytest runs), nothing else.
+137	
+138	### Uncertainty
+139	
+140	If the eval container has no reachable pip index at verifier time (the earlier
+141	scipy install may have used a cache warmed during the agent phase), the install
+142	could fail — but it's swallowed and the task is no worse off. Real risk: if
+143	these tasks fail for a *second* reason beyond the missing dep, fixing collection
+144	alone won't flip them (partial credit unknown). Rollback trigger noted above.

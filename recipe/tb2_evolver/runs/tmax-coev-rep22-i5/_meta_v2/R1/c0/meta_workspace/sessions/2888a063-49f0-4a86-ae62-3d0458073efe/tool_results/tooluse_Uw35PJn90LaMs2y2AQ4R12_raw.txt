@@ -1,0 +1,62 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""CyclicLoopBreaker — break degenerate period-k tool-call cycles *and let the
+4	run continue*, instead of terminating it.
+5	
+6	Failure mode this closes
+7	------------------------
+8	The Tmax agent frequently gets stuck repeating the SAME tool call (or the SAME
+9	short alternating sequence of calls) that returns byte-identical output every
+10	time, making no progress and burning its entire step budget on a distraction
+11	before it can even attempt the real task. Observed on the evolve set:
+12	
+13	* ``task_000118_3043e92d`` (system_administration, budget_exceeded @ 80 steps):
+14	  28 *consecutive* identical (call, output) triples — the agent fixated on a
+15	  zombie process (``kill -9 1`` → same ``[python3] <defunct>`` output) for
+16	  ~50 turns, recognised it was looping ("I'm stuck in a loop") but could not
+17	  break out. It finally escaped on its own and started writing the actual
+18	  ``deployment_monitor.py`` at step 60 — with only ~20 steps of budget left,
+19	  not enough to iterate on the (buggy) monitor. Peak log dir = 209MB vs. the
+20	  45MB threshold → reward 0.
+21	* ``task_001857_24daeef3`` (debugging, budget_exceeded @ 80 steps): a strict
+22	  period-2 A-B cycle — two commands with byte-identical outputs alternating
+23	  for ~8 cycles (fingerprints ``f2ccf2, 2bf091, f2ccf2, 2bf091, …``).
+24	* ``task_001979_a1e24b6f`` (data_processing, exit=error): one fingerprint
+25	  repeated 37× across the run.
+26	
+27	Why the existing pipeline misses it
+28	-----------------------------------
+29	* ``LengthTruncationRecoveryProcessor`` resets its counter on *any* tool call,
+30	  so a loop that carries tool calls never trips it.
+31	* ``ParseRetryProcessor`` only counts parse errors, not productive-looking
+32	  repeats.
+33	* The stock ``LoopDetectionProcessor`` exact detector only counts a *period-1
+34	  consecutive* tail (A A A A) — it is blind to the period-2 A-B-A-B case, and
+35	  it is not even registered in this pipeline.
+36	
+37	Design — redirect, don't terminate
+38	-----------------------------------
+39	A prior candidate proposed a detector that raises ``LoopDetectedError`` on the
+40	same shape. Terminating the run reclaims budget but can *never flip* these
+41	tasks: the agent never gets to finish. task_000118 shows the agent can recover
+42	on its own if it stops looping early enough. So this processor:
+43	
+44	1. ``on_after_tool``: fingerprints the (tool_name, tool_input, result) triple
+45	   and, when the tail forms an identical period-k cycle repeated
+46	   ``warn_cycles`` times, appends a one-time corrective warning to the result
+47	   (a nudge — still lets the tool run).
+48	2. ``on_before_tool``: if the *incoming* call would extend a cycle that has
+49	   already repeated ``break_cycles`` times, it **blocks the call**
+50	   (``approved=False``) and injects a forceful redirect as the synthetic
+51	   result — WITHOUT ending the run. The agent keeps its remaining budget and
+52	   is pushed to abandon the dead-end line and work the actual task.
+53	3. Safety net: if the agent ignores the redirect and keeps re-forming the same
+54	   loop, blocked calls are cheap (instant, no execution), but if the number of
+55	   blocks in one run exceeds ``max_total_blocks`` we raise ``LoopDetectedError``
+56	   so a pathological non-recovering agent can't spin its whole budget.
+57	
+58	False-positive guard: the fingerprint includes the observable *output*, so
+59	productive exploration where the environment changes (an install that finally
+60	succeeds, a Traceback that becomes a success) produces different outputs each
+
+[Showing lines 1–60 of 302 total. Use offset=60 to read the next section.]

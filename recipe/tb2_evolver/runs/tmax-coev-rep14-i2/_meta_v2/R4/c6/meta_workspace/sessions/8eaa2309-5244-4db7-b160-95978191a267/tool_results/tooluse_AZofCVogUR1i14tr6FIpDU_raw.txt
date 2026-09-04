@@ -1,0 +1,44 @@
+=== memo tail ===
+  (5) as the stock processor, so it replaces it. Tracks CUMULATIVE truncations
+  per task (a tool call resets the consecutive run but not the cumulative count).
+  Once cumulative >= chronic_threshold (4) it (a) escalates to a terminal "STOP
+  narrating, ONE minimal command, do something different / write required output
+  at the exact path" directive and (b) collapses the runaway assistant turn to a
+  short stub instead of head+tail so the repeated narration stops re-priming the
+  loop. Below chronic it behaves like the stock processor. Contract-safe:
+  on_after_model rewrites only its own event content; on_before_model replaces
+  the trailing passive continue nudge (net length 0); never inserts/removes
+  messages; never force-exits.
+- config.yaml — R1 config with the stock LengthTruncationRecoveryProcessor entry
+  swapped for the new processor via absolute file:// path (repeat_threshold=2,
+  chronic_threshold=4, head_chars=1200, tail_chars=600). Everything else
+  byte-identical to R1. Sibling system_prompt.txt written byte-identical to R1.
+
+### Evidence
+
+- task_000133 result.json: exit_reason=budget_exceeded, steps=80,
+  initial_pytest.passed=true, final_pytest 'clean1.csv rejected' AND 'evil1.csv
+  bypassed'; reward=0.
+- task_000133 messages.json: 13 length-truncation nudges at
+  [7,10,20,22,24,26,34,36,38,40,50,54,67]; alternating turn sequence
+  CCTTCCCCTTTTCCCTTTTCCCCTCTCCCCCTC (max-consecutive 4); identical "CSV parser is
+  reading the file incorrectly … 15,15,05,15,05" re-narration at msgs
+  17/21/33/35/53/62/64/68.
+- Cluster: task_001032 cumulative=13 max-consec=2; task_000958 =7/2;
+  task_000683 =5/2; task_000747 =4/2 — all reward=0, all budget_exceeded.
+- Validators: canonicalize {"ok": true, "checked_templates": 0}; dry_fire
+  likely_bugs 0/0; contract violations 0; literals findings 0.
+
+### Uncertainty
+
+Two ways to know the bet is wrong: (1) the cluster stays F even though truncation
+budget was reclaimed — then the residual blocker is model capability
+(task_000133's libcsv parse bug the model never solved), logged as capability not
+harness; (2) a previously-passing truncating task (task_001832, task_000011)
+regresses attributable to the chronic directive — the rollback trigger, though
+the directive only says "emit one different command" and never force-exits.
+Honest: primarily budget reclamation + de-priming, with a plausible-but-not-
+guaranteed flip on members whose sole blocker was running out of budget.
+=== novelty check: is my hypothesis_id used before? ===
+167:hypothesis_id: h_loop_detection_v2
+177:retry_rationale: "R1 c-batch sibling proposed h_loop_detection_v1 raise-at-5; NEW evidence this focus surfaced - task_000936 PASSED after 26 identical consecutive tool calls, so any raise <=26 regresses it. This is a different shape (warn-only escalation, threshold above the recovery ceiling, Strategy 2 off) at the same lever."

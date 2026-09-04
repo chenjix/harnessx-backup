@@ -1,0 +1,82 @@
+41	Do not ask questions — act.
+42	"""
+43	
+44	
+45	@dataclass
+46	class StepLog:
+47	    step: int
+48	    role: str
+49	    content: str | None = None
+50	    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+51	    tool_results: list[dict[str, Any]] = field(default_factory=list)
+52	
+53	
+54	@dataclass
+55	class AgentResult:
+56	    steps: int
+57	    finished: str  # no_tool_calls | max_steps | error
+58	    messages: list[dict[str, Any]]
+59	    log: list[StepLog]
+60	    error: str | None = None
+61	
+62	
+63	def _chat(
+64	    api_base: str,
+65	    model: str,
+66	    messages: list[dict[str, Any]],
+67	    *,
+68	    temperature: float,
+69	    api_key: str,
+70	    timeout: float,
+71	    max_tokens: int | None = 4096,
+72	) -> dict[str, Any]:
+73	    url = api_base.rstrip("/") + "/chat/completions"
+74	    body: dict[str, Any] = {
+75	        "model": model,
+76	        "messages": messages,
+77	        "tools": [BASH_TOOL],
+78	        "tool_choice": "auto",
+79	        "temperature": temperature,
+80	    }
+81	    if max_tokens is not None and max_tokens > 0:
+82	        body["max_tokens"] = int(max_tokens)
+83	    data = json.dumps(body).encode()
+84	    req = urllib.request.Request(
+85	        url,
+86	        data=data,
+87	        headers={
+88	            "Content-Type": "application/json",
+89	            "Authorization": f"Bearer {api_key or 'EMPTY'}",
+90	        },
+91	        method="POST",
+92	    )
+93	    with urllib.request.urlopen(req, timeout=timeout) as resp:
+94	        return json.loads(resp.read().decode())
+95	
+96	
+97	def _parse_args(raw: Any) -> dict[str, Any]:
+98	    if isinstance(raw, dict):
+99	        return raw
+100	    if not raw:
+101	        return {}
+102	    try:
+103	        return json.loads(raw)
+104	    except Exception:
+105	        return {"command": str(raw)}
+106	
+107	
+108	def run_agent(
+109	    *,
+110	    api_base: str,
+111	    model: str,
+112	    instruction: str,
+113	    exec_fn: Callable[[str, float], tuple[int, str]],
+114	    max_steps: int = 80,
+115	    temperature: float = 0.0,
+116	    api_key: str = "EMPTY",
+117	    request_timeout: float = 180.0,
+118	    default_cmd_timeout: float = 60.0,
+119	    system_prompt: str | None = None,
+120	    max_tokens: int | None = 4096,
+
+[Showing lines 41–120 of 214 total. Use offset=120 to read the next section.]

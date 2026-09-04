@@ -1,0 +1,125 @@
+# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+#
+# Live surfaces MetaAgent may edit:
+#   - processors (this file)
+#   - tool_registry (this file)
+#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+#
+# Runtime-only slots (sandbox_provider, tracer) are injected by
+# recipe.tmax_eval.harness_runner — do not put them here.
+#
+# Per-call output cap is NOT in this YAML: harness_runner sets
+# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+# runaway generation cannot burn an hour of wall-clock on one task.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /home/user
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  show_project_dir: false
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at:
+  - 0.7
+  - 0.9
+  _hook_: '*'
+# External-HTTP-verifier dependency reminder. A whole cluster of Tmax tasks
+# ask the agent to stand up a service (HTTP server / nginx reverse proxy /
+# UNIX-socket backend / web microservice) that an EXTERNAL automated verifier
+# then exercises with Python `requests`. The base image ships without
+# `requests`, so the verifier's `test_final_state.py` fails to even collect
+# (ModuleNotFoundError) and the task scores 0 even when the service is
+# correct. The agent cannot see the verifier's test files (they are injected
+# after it exits), so it never installs the dep — but outbound pip DOES work
+# here. This processor injects ONE reminder, only on tasks whose description
+# signals a build-a-service-the-verifier-calls shape, to ensure the system
+# Python has the client library before finishing. No task-specific literals.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i2/_meta_v2/R1/c1/processors/verifier_http_dep_reminder.py::VerifierHttpDepReminder
+  dep_module: requests
+  _hook_: '*'
+# Step-budget-proximity verification nudge. Complements CustomSelfVerifyProcessor
+# (which fires only on a voluntary exit-intent turn) and TaskTimeReminderProcessor
+# (a no-op without timeout_seconds): fires ONCE when the run crosses a fraction of
+# the hard step cap, forcing the agent to confirm every required output artifact
+# exists at its exact path before the budget_exceeded cap terminates the run.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i2/R0/assets/processors/step_budget_verify.py::StepBudgetVerifyProcessor
+  step_budget: 80
+  warn_fraction: 0.8
+  _hook_: '*'
+# Break max_tokens repetition loops (finish_reason=length, no tool call).
+# Without this, one stuck task can block an entire evolve round.
+- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+  repeat_threshold: 2
+  head_chars: 1200
+  tail_chars: 600
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+# Break degenerate identical-command loops (same Bash command re-issued
+# turn after turn with the same result). Complements CustomEditToolProcessor
+# (which counts file edits): this keys on a normalised hash of the whole
+# command, so it fires for OCR/extraction loops, compile loops, SQL/file
+# rewrites — any stuck-repeat class — and escalates a directive that also
+# warns against silently fabricating unreadable required data.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i2/R0/assets/processors/repeated_command_breaker.py::RepeatedCommandBreaker
+  tool_name: Bash
+  warn_threshold: 3
+  hard_threshold: 5
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+# Independent-recomputation gate for numeric-computation tasks. The built-in
+# CustomSelfVerifyProcessor's exit-intent checklist is oriented to file
+# existence / output format; on scientific_computing / data_science tasks the
+# agent's self-verify turn degenerates into re-cat'ing the same output and
+# re-confirming format, which cannot catch a close-but-wrong number produced by
+# a subtly-wrong interpretation (re-running the same code reproduces the same
+# value). This processor piggybacks on the synthetic _tb2_self_verify tool
+# result and, ONLY when the session produced a value-agnostic numeric-answer
+# signature, appends ONE directive that forces the agent to recompute the
+# answer a second independent way and reconcile any disagreement before
+# committing. Contract-safe (augments event.result only), fires at most once,
+# silent on non-numeric tasks. No task-specific literals.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i2/_meta_v2/R2/c3/processors/numeric_recompute_gate.py::NumericRecomputeGate
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

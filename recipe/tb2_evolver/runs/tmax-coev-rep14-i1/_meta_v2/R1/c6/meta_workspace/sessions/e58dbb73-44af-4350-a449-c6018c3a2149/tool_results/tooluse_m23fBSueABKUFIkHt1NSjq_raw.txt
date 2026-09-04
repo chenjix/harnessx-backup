@@ -1,0 +1,77 @@
+1	# Evolve journal — tmax-coev-rep14-i1
+2	
+3	## Round 1 — step-budget deliverable reminder
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-28T12:00:00Z
+8	hypothesis_id: h_step_budget_reminder_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_000118_3043e92d, task_000206_a943669b, task_000958_4bb2b05d]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Flip/relieve the budget_exceeded cluster (>=4 tasks) by nudging deliverable finalization + exact-path verification before the 80-step wall"
+15	regression_risk: "A couple dozen extra tokens on tasks that run past 60% of an 80-step budget; short passing tasks (<20 steps) never see the reminder"
+16	cost_shift: "Negligible; at most two short injected user messages per long-running task; likely net-neutral by curbing end-of-budget spirals"
+17	rollback_trigger: "If R2 pass_rate is flat/down AND budget_exceeded count is unchanged, or if any previously-passing long-horizon task regresses to F, revert"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000010_644ab1c2` failed with `exit_reason=budget_exceeded`
+23	(80 steps, reward=0). The verifier's `test_operator_script_exists` reports the
+24	required deliverable `/home/user/operator.py` does not exist. Reading the
+25	trajectory: the agent created `operator.py` (msg 19), then **renamed it away**
+26	with `mv /home/user/operator.py /home/user/k8s_operator.py` (msg 23), and spent
+27	the entire back half of the run (msgs 40–70) in a port-forward / zombie-process
+28	debugging spiral, never restoring the required path. This is the shared shape of
+29	the round's `budget_exceeded` cluster (also task_000118, task_000206,
+30	task_000958): the agent gets absorbed in one sub-component, burns the step
+31	budget, and hits the wall without finalizing/verifying the deliverable at its
+32	exact specified path.
+33	
+34	The harness has the *knowledge* (system prompt + `CustomSelfVerifyProcessor`
+35	both say "verify exact output paths") but no *delivery mechanism* at the
+36	decisive moment: `CustomSelfVerifyProcessor` only fires on voluntary exit (never
+37	reached in a budget_exceeded run), and `TaskTimeReminderProcessor` is inert in
+38	the tmax path (`timeout_seconds` is never injected by `harness_runner._run_async`,
+39	so `self._timeout` stays None). The step budget (`BaseTask.max_steps=80`) has no
+40	reminder at all.
+41	
+42	### Changes
+43	
+44	- `processors/step_budget_reminder.py` — new `StepBudgetReminderProcessor`
+45	  (`MultiHookProcessor`): on `on_step_start`, when `step_id/max_steps` crosses
+46	  0.60 (soft) and 0.80 (hard), appends one user-role reminder to stop
+47	  sub-component exploration and finalize + verify every required output at its
+48	  EXACT specified path (no renaming/relocating deliverables). Fires each
+49	  threshold once; only active when `max_steps >= 20`. Contract-clean (append
+50	  one user message, mirrors `TaskTimeReminderProcessor`; no removals, no
+51	  system-prompt mutation).
+52	- `config.yaml` — register the processor after `TaskTimeReminderProcessor`
+53	  (`warn_at: [0.6, 0.8]`, `min_budget: 20`, `hard_threshold: 0.8`); rest of the
+54	  pipeline byte-identical to R0. `system_prompt.txt` sibling copied unchanged.
+55	
+56	### Evidence
+57	
+58	- `task_000010_644ab1c2` result.json: `exit_reason=budget_exceeded`, steps=80;
+59	  final_pytest: `Operator script /home/user/operator.py does not exist.`
+60	- `task_000010_644ab1c2` messages.json: msg 19 `cat > /home/user/operator.py`;
+61	  msg 23 `mv /home/user/operator.py /home/user/k8s_operator.py`; msgs 40–70
+62	  continuous proxy/zombie debugging, `operator.py` never recreated.
+63	- `task_000118_3043e92d`, `task_000206_a943669b`, `task_000958_4bb2b05d`:
+64	  each `exit_reason=budget_exceeded`, steps=80, reward=0, deliverable
+65	  unconverged at the wall.
+66	- `harness_runner.py::_run_async`: only `sandbox_provider` + `tracer` injected
+67	  at runtime → `TaskTimeReminderProcessor.timeout_seconds` is None → inert.
+68	
+69	### Uncertainty
+70	
+71	The reminder may not flip tasks whose failure is a genuine correctness bug
+72	rather than a finalization/path miss (e.g. task_000118's daemon logic, task_000958's
+73	service correctness). For those it is a fair-run improvement, not a guaranteed
+74	flip. If R2 shows flat pass_rate with an unchanged budget_exceeded count, the
+75	nudge isn't landing and should be revisited (e.g. escalate to a hard finalize
+76	directive or an injected verify tool-call at ~step 75). Watch for any long-horizon
+77	passing task regressing — none expected, since the reminder only adds messages.

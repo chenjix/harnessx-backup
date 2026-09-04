@@ -1,0 +1,121 @@
+1	# Evolve Journal — tmax-coev-rep14-i1
+2	
+3	## Round 1 — verifier requests readiness
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-28T12:00:00Z
+8	hypothesis_id: h_verifier_requests_readiness_v1
+9	levers: [instruction]
+10	predicted_affected: [task_000028_7fe033ac]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Flips the service-task cluster whose grader fails at collection with ModuleNotFoundError: requests (>=2 tasks share the mechanism)."
+15	regression_risk: "Low — inert guidance on non-service tasks; at most a couple extra Bash calls on service tasks. No pipeline/tool/knob change."
+16	cost_shift: "Negligible: ~1 short paragraph added to system prompt (~120 tok/turn) + occasional import-check/install Bash calls on service tasks."
+17	rollback_trigger: "If R2 pass_rate is flat/down and task_000028 stays F, or if service tasks show new install-loop budget_exceeded, revert the prompt paragraph."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus task_000028_7fe033ac failed with reward=0 despite a
+23	functionally complete solution. The agent fixed nginx routing, wrote and
+24	compiled the C++ socket server, ran it, created logrotate.conf, started nginx,
+25	and verified end-to-end with its own `/dev/tcp` HTTP probe returning
+26	`HTTP/1.1 200 OK ... 150`. The failure was NOT an assertion failure — the
+27	grader's `test_final_state.py` errored at *collection* time on
+28	`import requests → ModuleNotFoundError: No module named 'requests'`. Sweeping
+29	the round, task_000958_4bb2b05d (a different HTTP-microservice task) fails with
+30	the identical grader collection error. The shared mechanism: service-task
+31	graders are Python and import `requests`, but the container ships without it
+32	(the agent even hit `curl: command not found` / `wget: command not found`),
+33	and the agent never ensures the grader's client is importable before exiting.
+34	
+35	### Changes
+36	
+37	- `system_prompt.txt` (sibling read by SiblingSystemPromptBuilder) — added a
+38	  general "verifier-environment readiness" paragraph: on tasks where an
+39	  automated grader probes a network service, check `python3 -c "import
+40	  requests"` and install it if missing before finishing; keep background
+41	  services alive. No task IDs, paths, or constants embedded.
+42	- `config.yaml` — byte-identical to R0; the intervention lives entirely in the
+43	  evolvable sibling prompt.
+44	
+45	### Evidence
+46	
+47	- task_000028_7fe033ac `final_pytest.output_tail`: `ImportError while importing
+48	  test module '/tmp/test_final_state.py' ... import requests ...
+49	  ModuleNotFoundError: No module named 'requests'`; `initial_pytest.passed=true`.
+50	- task_000028 messages: agent's own probe returns `HTTP/1.1 200 OK ...
+51	  Content-Length: 3 ... 150`; earlier `bash: curl: command not found` and
+52	  `bash: wget: command not found` confirm missing HTTP tooling.
+53	- task_000958_4bb2b05d `final_pytest.output_tail`: identical
+54	  `/tmp/test_final_state.py:4: import requests → ModuleNotFoundError`. (Also has
+55	  an independent HTTP-500 bug → budget_exceeded; requests-readiness removes the
+56	  shared blocker but won't alone flip it.)
+57	
+58	### Uncertainty
+59	
+60	If the sandbox truly has no network and no pip cache, `pip install requests`
+61	may fail — in which case the round won't flip the cluster and the guidance is
+62	inert. But the grader's own successful reliance on `import requests` in passing
+63	environments suggests the module is installable/available in this image. If R2
+64	shows task_000028 still F and no cost change, the install path is blocked and
+65	this hypothesis is dead; revert per rollback_trigger.
+66	
+67	## Round 1 (c3) — wire in loop detection
+68	
+69	<!-- journal:frontmatter
+70	round: 1
+71	timestamp: 2026-08-28T12:30:00Z
+72	hypothesis_id: h_loop_detection_v1
+73	levers: [configuration]
+74	predicted_affected: [task_000118_3043e92d, task_000958_4bb2b05d, task_000206_a943669b]
+75	cited_candidates: [C-001]
+76	gating_outcome: pending
+77	gating_attribution: pending
+78	expected_global_gain: "Closes the budget_exceeded-at-80-steps cluster (4 tasks) by breaking verbatim/near-verbatim Bash-call loops with a warn-then-raise loop detector."
+79	regression_risk: "A healthy task issuing 6 consecutive byte-identical Bash calls would terminate as loop_detected; no R0-passing task did this, so risk is low."
+80	cost_shift: "Net decrease — terminates dead loops at run=6 instead of step 80, reclaiming ~70 steps/stuck task; warning string adds only a few hundred tokens."
+81	rollback_trigger: "Any previously-passing task newly exits with exit_reason=loop_detected next round."
+82	-->
+83	
+84	### Why
+85	
+86	Assigned focus task_000118_3043e92d exited at 80 steps with
+87	exit_reason=budget_exceeded, reward=0. It had already written a working
+88	deployment_monitor.py but fixated on a harmless zombie process: steps 2-27
+89	issue the byte-identical Bash command
+90	`wait 83 ...; sleep 1; ps aux | grep -E python|worker` 13 consecutive times
+91	with verbatim assistant text, then steps 41-68 cycle a second
+92	kill/check/run/check loop until budget runs out. Sweeping the round, three
+93	other tasks hit the same budget_exceeded-at-80 wall via the same mechanism
+94	(re-issuing near-identical Bash calls with zero progress). The R0 pipeline
+95	lacked any loop detector; the first-class
+96	harnessx.processors.control.LoopDetectionProcessor existed but was never wired
+97	in.
+98	
+99	### Changes
+100	
+101	- `config.yaml` — add `LoopDetectionProcessor` after `ParseRetryProcessor`
+102	  (window_size=12, warn_threshold=3, threshold=6, name_warn_threshold=8,
+103	  compaction_drop_threshold=5). Raise threshold set to 6 (vs default 5) to
+104	  give the 3 warn steps room to unblock the agent before the hard raise.
+105	
+106	### Evidence
+107	
+108	- task_000118_3043e92d steps 2..27: identical command
+109	  `wait 83 2>/dev/null; sleep 1; ps aux | grep -E "python|worker" | grep -v grep`
+110	  repeated 13x consecutively; then a second loop steps 41-68 to step 80.
+111	- task_000958_4bb2b05d: one `sqlite3 SELECT ...` command issued 18x
+112	  consecutively (max-consecutive-identical=18).
+113	- task_000206_a943669b: two near-identical `jq` variants issued 11x and 10x
+114	  (same-tool varying-args thrash — Strategy-1 warn @3 + Strategy-2 name-only @8).
+115	
+116	### Uncertainty
+117	
+118	The warn nudge may be too weak to break a strong fixation; if so the raise at
+119	run=6 still reclaims ~74 steps but the task may fail anyway. If R2 shows a
+120	previously-passing task regressing to exit_reason=loop_detected, raise
+121	`threshold` or drop to warn-only, or revert.

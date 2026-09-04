@@ -1,0 +1,17 @@
+--- R0
++++ R1
+@@ -55,2 +55,14 @@
+   _hook_: '*'
++# R1 (meta): break degenerate identical-Bash repetition loops. Distinct from
++# LengthTruncationRecoveryProcessor (which only handles finish_reason=length /
++# no tool call). Here the model DOES emit a well-formed Bash call every turn but
++# re-issues the byte-for-byte same command 10-33x in a row until the step budget
++# is exhausted (9/11 R0 budget_exceeded tasks). Bash-only fingerprinting so
++# internal tools like _tb2_self_verify (22 consecutive calls in a PASSING task)
++# never trip it; warn at 3, intercept-and-redirect at 6. Every R0 passing task
++# had max consecutive identical-Bash run = 1, so regression surface is ~nil.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R1/processors/bash_loop_breaker.py::BashLoopBreakerProcessor
++  warn_threshold: 3
++  break_threshold: 6
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

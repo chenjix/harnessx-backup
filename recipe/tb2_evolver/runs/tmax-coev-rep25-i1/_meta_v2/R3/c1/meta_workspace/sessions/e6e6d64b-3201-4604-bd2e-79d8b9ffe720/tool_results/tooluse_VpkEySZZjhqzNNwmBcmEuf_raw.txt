@@ -1,0 +1,115 @@
+1	# Evolve Brief
+2	
+3	## Assigned focus for THIS proposal
+4	
+5	**Complementary synthesis.** Read every pivot config and trajectory directory
+6	in the pivot table. Combine only mechanisms whose per-task coverage is
+7	complementary: preserve a mechanism that uniquely solves tasks, and use another
+8	pivot to repair its unique regressions. Resolve conflicting prompts/processors
+9	instead of blindly concatenating them. The result must still satisfy the
+10	generalization contract and contain no task-specific trigger.
+11	
+12	**Generalization contract.** Treat the named task as evidence, not as the
+13	target. First state the reusable failure class in terms observable by the
+14	agent (tool result, context state, progress, or verification state). Inspect
+15	at least two other trajectories for supporting or counter-evidence when they
+16	exist. The harness edit must trigger from that general state: do not mention
+17	task IDs, benchmark paths, filenames, expected answers, or task-specific
+18	content in the prompt, processor, or tool. Explain why the mechanism should
+19	help unseen tasks and identify which already-solved task class it could hurt.
+20	If the evidence supports only one task, prefer a no-op over a special case.
+21	
+22	This proposal is the SYNTHESIS slot: read every pivot harness and its trajectories before editing. Combine complementary mechanisms; do not copy a single parent wholesale.
+23	
+24	Other proposals in this batch are assigned different focuses. Stay on yours: a batch is useful only when its members differ. If your focus turns out to be unsupported by the trajectories, say so in `candidates.md` and make the smallest defensible edit rather than drifting onto another proposal's territory.
+25	
+26	## Pivot harnesses (read these BEFORE proposing)
+27	
+28	Several harnesses are live at similar scores with different per-task coverage. Treat each as a branch point: read THAT harness's `config` and `trajectories_dir`, note which tasks only that lineage uniquely solves, then propose. A synthesis that keeps complementary unique solves is better than copying one parent wholesale. Ties are allowed to stand — do not discard a lineage just because its pass rate matches another.
+29	
+30	| id | score | config | trajectories | unique solves | unique losses | this proposal starts from |
+31	|----|------:|--------|--------------|---------------|---------------|---------------------------|
+32	| `n0_8743947a` | 0.500 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R0/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r0-traj` | task_001089_220cc46b, task_001536_acfe6c35 | task_000329_a3ac56b0, task_000338_27d6a1be, task_001032_1adaccb9, task_001264_9f4ca84a, task_001498_df8254c9, task_001673_86224c91 |  |
+33	| `n1_06551c3b` | 0.580 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R2/c0/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r1-fe-c0-traj` | — | — |  |
+34	| `n2_b44cc6da` | 0.580 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R2/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r1-fe-c0-traj` | — | — |  |
+35	
+36	- `current_config`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R0/config.yaml`
+37	- `trajectories_dir`: `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r0-traj`
+38	- `output_dir`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R3/c1`
+39	- `memo_path`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/learnings.md`
+40	- `journal_context`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R3/c1/_meta_scratch/CONTEXT.md` — machine-rendered lever scoreboard, recent hypotheses, reverted bets, per-task history matrix, recent changesets. Read this after the memo to see which levers have been tried and how well their predicted-affected tasks actually flipped
+41	- budget: None USD, 200 steps, 14400s wall-clock
+42	
+43	## Deliverables (all under `output_dir`)
+44	
+45	- `config.yaml` — a HarnessConfig YAML that canonicalizes (required)
+46	- `tools/<name>.py` — optional new `@tool` modules
+47	- `processors/<name>.py` — optional new `MultiHookProcessor` classes
+48	- `templates/<name>.j2` — optional new system-prompt Jinja templates
+49	- `_meta_scratch/candidates.md` — when you change the config, list
+50	  candidates as `## Candidate C-N` sections (see orchestrator
+51	  evidence gate below)
+52	- `_meta_scratch/` — your own notes; this brief already lives here
+53	
+54	Read-only context (if present in `_meta_scratch/`):
+55	
+56	- `pareto_archive.json` — per-task pass/fail history across all rounds (tasks marked stuck/fragile/solved)
+57	- `history/OVERVIEW.md` — round-by-round score table
+58	- `history/R{i}_per_task.json` — per-task results for round i
+59	- `history/R{i}_to_R{j}.diff` — config diff between rounds
+60	- `env_probe.md` — which external sites/APIs are reachable (OK/BLOCKED/TIMEOUT) from this environment
+61	- `task_catalog.md` — all task questions being evaluated (read this to understand WHAT the agent needs to solve)
+62	
+63	## Global optimization constraint (Pareto-style)
+64	
+65	Do not optimize a narrow local win at the expense of global benchmark health. Prefer candidates that improve failing clusters while protecting already-passing clusters.
+66	
+67	For each shipped candidate, explicitly state:
+68	- `expected_global_gain`: which failing cluster(s) and why this can generalize
+69	- `regression_risk`: what could break outside `predicted_affected`
+70	- `cost_shift`: expected token/cost movement if the change lands
+71	
+72	A local improvement with likely net global degradation is not acceptable unless you provide unusually strong evidence and a clear rollback trigger.
+73	
+74	## Self-validation before `end_turn`
+75	
+76	No retry loop. If you end your turn with a broken artifact the
+77	round fails. `Read validate` for the CLI commands — at minimum
+78	run `canonicalize` on your new config before stopping, and run
+79	`dry_fire` / `contract` / `literals` when you authored anything
+80	under `tools/`, `processors/`, or `templates/`.
+81	
+82	## Decision contract (required)
+83	
+84	Before `end_turn`, make exactly one explicit decision:
+85	1) **Ship change**: write ALL of the following, then run validation:
+86	   - `output_dir/config.yaml` (required)
+87	   - `_meta_scratch/candidates.md` (REQUIRED when config changes —
+88	     at least one `## Candidate C-NNN` section with lens/lever/intent
+89	     tag, signal, verified body evidence, retroactive check, and
+90	     'Why X not Y' lever argument; the evidence gate hard-fails without it)
+91	   - a new `## Round N` section appended to `memo_path` journal with
+92	     `cited_candidates` frontmatter referencing your C-NNN IDs
+93	   - optional: `tools/<name>.py`, `processors/<name>.py`, `templates/<name>.j2`
+94	2) **Explicit no-op**: copy `current_config` byte-for-byte to
+95	   `output_dir/config.yaml`, then stop. No candidates.md needed.
+96	Analysis-only `end_turn` is invalid and is treated as a failed round.
+97	
+98	## Orchestrator post-flight
+99	
+100	After you stop, the orchestrator runs:
+101	1. **canonicalize** (always) — config.yaml must parse and every
+102	   template must render.
+103	2. **novelty** — a journal hypothesis_id marked `reverted` in
+104	   a prior round cannot be re-proposed.
+105	3. **evidence** — when the changeset is non-empty, the round
+106	   must produce `_meta_scratch/candidates.md` with at least
+107	   one `## Candidate C-N` section, and the journal entry's
+108	   `cited_candidates` frontmatter must reference ≥1 of those
+109	   IDs. Prevents shipping config changes without linked
+110	   evidence.
+111	4. **replay** — by default runs a synthetic smoke task
+112	   (`replay_mode=synthetic_task`): executes one tiny fixed
+113	   task through the run loop and fails on exception / timeout /
+114	   `exit_reason=error`. Optional `replay_mode=config_only`
+115	   keeps bind-only checking.

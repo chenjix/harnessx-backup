@@ -1,0 +1,45 @@
+12:    here — they are injected by the agent at run time via ``cfg.copy(...)``.
+14:All processor classes are kept in this module so that YAML round-trip
+21:import dataclasses
+30:    Message,
+40:from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+63:        return []
+70:    return list(paths)
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+116:    async def on_task_start(self, event: TaskStartEvent):
+121:    async def on_before_model(self, event: BeforeModelEvent):
+124:            return
+128:        yield dataclasses.replace(
+130:            messages=event.messages + (Message(role="user", content=msg),),
+133:    async def on_after_model(self, event: ModelResponseEvent):
+143:            yield dataclasses.replace(event, tool_calls=(keepalive,))
+147:    async def on_before_tool(self, event: ToolCallEvent):
+149:            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+153:    async def on_task_end(self, event: TaskEndEvent):
+159:class CustomEditToolProcessor(MultiHookProcessor):
+176:    async def on_task_start(self, event: TaskStartEvent):
+181:    async def on_before_tool(self, event: ToolCallEvent):
+188:    async def on_after_tool(self, event: ToolResultEvent):
+190:        injections: list[str] = []
+195:                injections.append(_EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold))
+197:        if injections:
+198:            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+202:    async def on_task_end(self, event: TaskEndEvent):
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+240:    async def on_task_start(self, event: TaskStartEvent):
+245:    async def on_step_start(self, event: StepStartEvent):
+248:            return
+265:            msg = Message(role="user", content=warn)
+266:            yield dataclasses.replace(
+274:    async def on_task_end(self, event: TaskEndEvent):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+285:    """After context compaction, re-inject a fresh workspace snapshot from the
+300:    async def on_task_start(self, event: TaskStartEvent):
+304:    async def on_step_start(self, event: StepStartEvent):
+311:            return
+318:            return
+324:            return
+340:        msg = Message(role="user", content=snapshot)
+341:        yield dataclasses.replace(
+347:    async def on_task_end(self, event: TaskEndEvent):
+400:class _StaticSystemPromptBuilder(BaseSystemPromptBuilder):

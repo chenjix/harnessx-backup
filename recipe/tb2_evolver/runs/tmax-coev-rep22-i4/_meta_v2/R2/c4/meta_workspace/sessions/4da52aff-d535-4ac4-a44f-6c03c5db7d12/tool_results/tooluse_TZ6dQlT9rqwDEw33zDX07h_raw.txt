@@ -1,0 +1,121 @@
+91	rollback_trigger: "N/A (no change to roll back). Human infra fix in recipe/tmax_eval/docker_env.py is the real remedy; see NEEDS_FROM_HUMAN.md."
+92	-->
+93	
+94	### Why
+95	
+96	Assigned focus `task_000028_7fe033ac` failed this round for a reason entirely
+97	outside the meta-agent's editable surface. Its `result.json` shows
+98	`status=error`, `reward=0`, `elapsed_s=0.1`, and a `RuntimeError: docker run
+99	failed ... Conflict. The container name "/tmax-task0000287fe033ac-1788298078"
+100	is already in use`. There is no `.messages.json` and the task dir contains only
+101	`result.json` — **the agent never launched**. The R1 diagnosis
+102	(`HttpVerifierDepProcessor` / `requests` at verifier-collection time) is
+103	superseded for this trajectory set: the task never reached the verifier because
+104	its container failed to start.
+105	
+106	This is not isolated: **9 of 50 tasks** in this trajectory set failed with the
+107	identical container-name `Conflict` at `docker run` time
+108	(`task_000015, 000028, 000140, 000264, 000396, 000505, 000748, 001032,
+109	001090`), all `status=error`, `elapsed_s≈0.1`, reward 0 — ~18% of the round
+110	silently zeroed by infrastructure.
+111	
+112	Root cause is in the **read-only** eval runner
+113	`recipe/tmax_eval/docker_env.py::start_container`: the container name is
+114	`f"tmax-{task_id[:20]}-{int(time.time())}"` (1-second resolution, no unique
+115	suffix, no pre-run `docker rm -f`, no retry on Conflict). Two tasks starting in
+116	the same second — or a leftover container from a prior run — collide. A
+117	`MultiHookProcessor` runs inside the agent loop, which only exists *after* the
+118	container starts, so no harness edit can intercept a container that never
+119	launched. There is no HarnessConfig knob for container naming/retry.
+120	
+121	### Changes
+122	
+123	- `config.yaml` — byte-for-byte copy of R1 config (explicit no-op; verified
+124	  via `cmp`, canonicalize `{"ok": true}`).
+125	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — documents the docker-conflict root
+126	  cause and suggests the fix (unique suffix / pre-run rm / retry-on-conflict)
+127	  in the read-only recipe layer.
+128	
+129	### Evidence
+130	
+131	- `task_000028_7fe033ac.result.json`: `status: "error"`, `elapsed_s: 0.1`,
+132	  `error: "docker run failed ... Conflict. The container name ... is already
+133	  in use"`, traceback at `recipe/tmax_eval/docker_env.py`, line 124.
+134	- 9/50 tasks share the identical `Conflict` error (enumerated above); all
+135	  `elapsed_s≈0.1`, no messages.json.
+136	
+137	### Uncertainty
+138	
+139	Making an off-focus processor/tool change here would violate SOUL.md
+140	(no task-specific injection) and the brief's anti-drift rule, and could only
+141	regress. The only real fix is the human infra change flagged in
+142	NEEDS_FROM_HUMAN.md. If a future trajectory set for this task actually starts
+143	the container and reaches the verifier, the R1 HttpVerifierDep hypothesis
+144	becomes testable again.
+145	
+146	## Round 2 — infra container-collision, no harness lever (no-op)
+147	
+148	<!-- journal:frontmatter
+149	round: 2
+150	timestamp: 2026-09-02T00:00:00Z
+151	hypothesis_id: h_no_op_infra_docker_name_collision_v1
+152	levers: []
+153	predicted_affected: []
+154	gating_outcome: pending
+155	gating_attribution: pending
+156	expected_global_gain: "None — assigned focus is an eval-runner infra bug, not a harness deficiency; no config lever applies. Explicit no-op preserves R1 state."
+157	regression_risk: "Zero — config + sibling system_prompt.txt copied byte-for-byte from R1 (md5 d1a7e90e / 914fb4a8). Canonicalize ok."
+158	cost_shift: "None."
+159	rollback_trigger: "N/A (no change)."
+160	-->
+161	
+162	### Why
+163	
+164	Assigned focus `task_000015_89886d8d` has `status: error`, `elapsed_s: 0.1`,
+165	`reward: 0` — the agent container never started. Error is a Docker
+166	container-name **Conflict** raised by `recipe/tmax_eval/docker_env.py::start_container`
+167	before the harness run loop engages. The name is
+168	`tmax-<task_id[:20]>-<int(time.time())>` — 1-second resolution + truncated
+169	task_id, so a stale/parallel container with the same name blocks `docker run`,
+170	and the runner does not `docker rm -f` the pre-existing name first. This is
+171	identical across ALL 9 errored tasks in this trajectory set — same timestamp
+172	`1788298078`, all `elapsed_s: 0.1`: task_000015, 000028, 000140, 000264,
+173	000396, 000505, 000748, 001032, 001090.
+174	
+175	This is categorically outside the HarnessConfig surface: the failure precedes
+176	agent startup, so no processor/tool/template can intercept it; and
+177	`recipe/**` (the eval runner) is read-only. Per tb2-playbook, config.yaml
+178	controls only the processor pipeline + system prompt — zero levers over Docker
+179	lifecycle. The brief's "unsupported focus" path applies: make the smallest
+180	defensible edit (none) rather than drift onto another proposal's territory.
+181	
+182	### Changes
+183	
+184	None. `config.yaml` and sibling `system_prompt.txt` copied byte-for-byte from
+185	`current_config` (R1). Explicit no-op.
+186	
+187	### Evidence
+188	
+189	- `task_000015_89886d8d.result.json`: status=error, elapsed_s=0.1, error =
+190	  docker Conflict on container name `/tmax-task00001589886d8d-1788298078`.
+191	- 8 sibling tasks show the identical Conflict at the same `-1788298078`
+192	  timestamp with elapsed_s=0.1.
+193	- `docker_env.py:105`: `name = f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"[:63]`; no pre-run `docker rm -f`, no retry on Conflict.
+194	- Canonicalize on copied config: `{"ok": true, "checked_templates": 0}`.
+195	
+196	### Needs from human
+197	
+198	Wrote `_meta_scratch/NEEDS_FROM_HUMAN.md`: fix `start_container` to be
+199	collision-proof (uuid suffix instead of second-resolution timestamp, and/or
+200	best-effort `docker rm -f <name>` before run, and/or retry once on daemon
+201	Conflict). Until fixed these 9 tasks stay false zeros and contaminate gating
+202	attribution (they also pollute R1's predicted service tasks 000028/000140/
+203	000505/001090).
+204	
+205	### Uncertainty
+206	
+207	Low. The root cause is unambiguous in the result.json errors and the runner
+208	source. The only open question is why the collision occurred (likely stale
+209	containers from a prior aborted batch or overlapping parallel dispatch within
+210	the same wall-clock second) — either way it is an infra/orchestration concern,
+211	not a harness one.

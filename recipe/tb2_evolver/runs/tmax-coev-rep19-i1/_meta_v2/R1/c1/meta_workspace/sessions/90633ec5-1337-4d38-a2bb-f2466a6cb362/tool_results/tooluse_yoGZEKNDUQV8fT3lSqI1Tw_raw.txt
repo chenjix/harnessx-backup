@@ -1,0 +1,71 @@
+-rw-r--r-- 1 jixuan.chen xuser 3920 Aug 30 09:52 /fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i1/learnings.md
+---content---
+# Evolve Journal — tmax-coev-rep19-i1
+
+## Round 1 — verifier env hygiene checklist
+
+<!-- journal:frontmatter
+round: 1
+timestamp: 2026-08-30T10:30:00Z
+hypothesis_id: h_verifier_env_hygiene_v1
+levers: [instruction]
+predicted_affected: [task_000028_7fe033ac, task_000010_644ab1c2]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Flip collection-time zero-reward failures in the system_administration cluster (0/5) where the agent's work is correct but the in-container verifier's Python can't start"
+regression_risk: "A few extra Bash calls on the exit turn; a spurious pip install if the agent over-applies the conditional dep check"
+cost_shift: "Small increase: longer exit checklist + at most a couple verification/install Bash calls on the final turn; no change to main solve loop"
+rollback_trigger: "If R2 pass_rate is flat/down and system_administration tasks still fail at pytest collection (or new regressions appear on previously-passing tasks), revert to the built-in CustomSelfVerifyProcessor"
+-->
+
+### Why
+
+Assigned focus `task_000028_7fe033ac` (system_administration) failed with
+`reward=0` despite a functionally-correct solution: the agent's own
+in-container HTTP GET returned `200 OK` with the correct frame count `150`,
+nginx routed to the right socket, the C++ server ran, logrotate config was
+created. The task scored zero because the **verifier's** pytest — run inside
+the same container after the agent exits — failed at *collection*:
+`ModuleNotFoundError: No module named 'requests'`. The agent left the
+container without a library the automated checker needed and had no way to
+see the verifier file. A second failing task in the round, `task_000010_644ab1c2`,
+shows the same root class from a different angle: the agent created
+`/home/user/operator.py`, shadowing the stdlib `operator` module, which
+crashed the verifier's Python at collection. Common cause: the agent left the
+container in a state where the verifier's interpreter could not even start.
+system_administration was the worst domain this round (0/5).
+
+### Changes
+
+- `processors/env_hygiene_verify.py` — `EnvHygieneVerifyProcessor`, a subclass
+  of the benchmark's `CustomSelfVerifyProcessor` that reuses all one-shot /
+  keepalive / before-model injection mechanics and overrides only the injected
+  exit checklist text, adding two general environment-hygiene items:
+  (a) ensure an automated checker's likely dependencies are importable now
+  (install if missing); (b) don't shadow stdlib/common-package module names
+  with files created in the working/home dir.
+- `config.yaml` — replaced the `CustomSelfVerifyProcessor` pipeline entry with
+  the new `EnvHygieneVerifyProcessor` via a `file://` absolute path.
+
+### Evidence
+
+- `task_000028_7fe033ac` result.json `final_pytest.output_tail`:
+  `import requests / E ModuleNotFoundError: No module named 'requests' /
+  Interrupted: 1 error during collection`. messages.json (~line 570): agent's
+  final HTTP self-test returns `HTTP/1.1 200 OK ... Content-Length: 150 ... 150`.
+- `task_000010_644ab1c2` result.json `final_pytest.output_tail`:
+  `/home/user/operator.py line 3 ... SyntaxError: Missing parentheses in call
+  to 'exec'` raised while the interpreter imports the stdlib `operator` module
+  during pytest bootstrap.
+
+### Uncertainty
+
+The guidance is Instruction — it only helps if the model acts on it at exit.
+The dep-check item is conditional ("if a checker would likely run a program"),
+so the main risk is either under-application (no behaviour change → noop) or a
+spurious install. If R2 shows the sysadmin cluster still failing at collection,
+the lever is right but the model isn't following it — consider a Control hook
+that probes `python3 -c` importability of common clients at task end instead.
+Validators run clean: canonicalize ok, dry_fire 0 bugs, contract 0 violations,
+literals 0 findings.

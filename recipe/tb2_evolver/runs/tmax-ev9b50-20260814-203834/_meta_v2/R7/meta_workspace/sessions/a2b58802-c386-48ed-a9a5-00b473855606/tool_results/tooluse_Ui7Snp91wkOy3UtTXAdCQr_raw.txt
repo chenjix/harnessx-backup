@@ -1,0 +1,104 @@
+chatcmpl-tool-89eac2e86873c7a3_raw.txt
+chatcmpl-tool-a230ed8468fa4515_raw.txt
+chatcmpl-tool-b8730cbee3943dc3_raw.txt
+=== raw model output sample ===
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cstring>
+#include <cstdlib>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <cerrno>
+
+const size_t TAR_BLOCK_SIZE = 512;
+
+struct TarHeader {
+    char name[100];
+    char mode[8];
+    char uid[8];
+    char gid[8];
+    char size[12];
+    char mtime[12];
+    char checksum[8];
+    char typeflag;
+    char linkname[100];
+    char magic[6];
+    char version[2];
+    char uname[32];
+    char gname[32];
+    char devmajor[8];
+    char devminor[8];
+    char prefix[155];
+    char padding[12];
+};
+
+bool isPathSafe(const std::string& targetDir, const std::string& entryPath) {
+    std::string target = targetDir;
+    if (!target.empty() && target.back() != '/') target += '/';
+    std::string fullPath = target + entryPath;
+    std::string normalized;
+    std::istringstream iss(fullPath);
+    std::string component;
+    while (std::getline(iss, component, '/')) {
+        if (component.empty() || component == ".") continue;
+        if (component == "..") {
+            if (normalized.empty()) return false;
+            size_t lastSlash = normalized.rfind('/');
+            if (lastSlash == std::string::npos) return false;
+            normalized = normalized.substr(0, lastSlash);
+        } else {
+            if (!normalized.empty()) normalized += '/';
+            normalized += component;
+        }
+    }
+    if (normalized.size() < target.size()) return false;
+    return normalized.substr(0, target.size()) == target;
+}
+
+bool createDirectory(const std::string& path) {
+    std::string current;
+    std::istringstream iss(path);
+    std::string component;
+    while (std::getline(iss, component, '/')) {
+        if (component.empty()) continue;
+        current += '/' + component;
+        struct stat st;
+        if (stat(current.c_str(), &st) != 0) {
+            if (mkdir(current.c_str(), 0755) != 0 && errno != EEXIST) {
+                std::cerr << "Error creating directory: " << current << std::endl;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void logExtraction(const std::string& filePath) {
+    int fd = open("/home/user/extraction_log.txt", O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0) return;
+    struct flock fl;
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = 0;
+    fl.l_len = 0;
+    if (fcntl(fd, F_SETLKW, &fl) < 0) { close(fd); return; }
+    std::string entry = "[EXTRACTED] " + filePath + "\n";
+    write(fd, entry.c_str(), entry.size());
+    fl.l_type = F_UNLCK;
+    fcntl(fd, F_SETLK, &fl);
+    close(fd);
+}
+
+void extractTar(const std::string& tarPath, const std::string& targetDir) {
+    std::ifstream tarFile(tarPath, std::ios::binary);
+    if (!tarFile.is_open()) { std::cerr << "Error opening tar file: " << tarPath << std::endl; return; }
+    
+    TarHeader header;
+    std::string entryPath;
+    
+    while (tarFile.read(reinterpret_cast<char*>(&header), TAR_BLOCK_SIZE)) {
+      

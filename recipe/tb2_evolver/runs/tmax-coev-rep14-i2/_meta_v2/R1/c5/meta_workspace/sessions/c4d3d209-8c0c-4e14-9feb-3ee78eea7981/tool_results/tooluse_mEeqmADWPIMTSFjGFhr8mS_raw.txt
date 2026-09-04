@@ -1,0 +1,63 @@
+1	# Evolve Journal — tmax-coev-rep14-i2
+2	
+3	## Round 1 — action-level loop guard
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-28T22:00:00Z
+8	hypothesis_id: h_loop_detection_v1
+9	levers: [configuration]
+10	predicted_affected: [task_000028_7fe033ac]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Cuts the budget_exceeded / repeated-non-progressing-action cluster; returns wasted compute to every run where the model loops on an identical failing Bash call"
+15	regression_risk: "A legitimate byte-identical retry (e.g. polling for a service to come up) could trip the warn at 3 or, rarely, the raise at 5"
+16	cost_shift: "Net negative (lower) — runaway loops cut off earlier; one extra processor adds negligible per-call overhead"
+17	rollback_trigger: "Next round pass-rate drops OR loop_detected exits appear on tasks that previously passed"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000028_7fe033ac` (nginx→C++/ffprobe microservice) failed
+23	with `exit_reason=budget_exceeded` at 80 steps despite the agent reaching a
+24	correct working end-state twice (`Status: 200 / Body: '150\n'`). The run was
+25	dominated by **repeated, non-progressing actions**: a zombie-process reaping
+26	loop (`kill -9`/`pkill` on `<defunct>` PIDs that can never be reaped, each
+27	returning `(exit 137, no output captured)`), verbatim narration loops (`"Let me
+28	try ... a different approach."` until the output-token cap, twice), and
+29	identical `urllib.request` probes issued 3×. The model *knew* the answer but
+30	had no harness mechanism to break its own action-level loops early enough to
+31	converge inside budget. This is a control/harness deficiency, not a capability
+32	gap.
+33	
+34	### Changes
+35	
+36	- `config.yaml` — insert `harnessx.processors.control.LoopDetectionProcessor`
+37	  (currently existing but unwired) with `warn_threshold=3`, `threshold=5`
+38	  (raise → clean `loop_detected` exit), `name_warn_threshold=999` (Strategy 2
+39	  disabled: Bash-only agent makes ≥8 consecutive Bash calls normal),
+40	  `window_size=12`, `compaction_drop_threshold=5`. Ordered `_order=20`, after
+41	  compaction/parse-retry.
+42	
+43	### Evidence
+44	
+45	- `task_000028_7fe033ac` result.json: `reward: 0`, `exit_reason:
+46	  budget_exceeded`, `agent.steps: 80`.
+47	- Body: kill-loop tool_input `pkill -9 -f "server" ...` → `(exit 137, no output
+48	  captured)`; the preceding `for pid ... kill -9` returned the *identical*
+49	  zombie list — same approach, same non-result.
+50	- Body: assistant content repeated verbatim `"Let me try to kill all processes
+51	  with a different approach."` then `[response truncated by harness ...
+52	  repetition loop]`.
+53	- The `final_pytest` `ModuleNotFoundError: No module named 'requests'` is a
+54	  verifier-phase artifact (test injected after agent exit per tb2-playbook),
+55	  not agent-fixable — confirming the real lever is the budget-waste loop.
+56	
+57	### Uncertainty
+58	
+59	If a task legitimately needs to issue the byte-identical command repeatedly
+60	(polling), the warn at 3 could nudge unhelpfully and the raise at 5 could cut a
+61	task short. Watched via `rollback_trigger`. Strategy 2 is disabled precisely to
+62	avoid Bash-only false positives; if that proves too conservative, a future
+63	round can re-enable it with a higher threshold.

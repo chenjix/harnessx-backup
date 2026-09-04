@@ -1,0 +1,16 @@
+--- R0
++++ R1
+@@ -42,2 +42,13 @@
+   _hook_: '*'
++# Step-based deadline nudge. The recipe runner enforces a hard step budget
++# (task.max_steps=80) but never sets TaskTimeReminderProcessor.timeout_seconds,
++# so the wall-clock reminder above is inert. Multiple failures ended at
++# exit_reason=budget_exceeded (80 steps) with NO deliverable file on disk —
++# an automatic 0. This processor fires escalating "commit your best-effort
++# output to disk now" reminders as the step budget is consumed.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i1/_meta_v2/R1/processors/step_budget_deadline.py::StepBudgetDeadlineProcessor
++  warn_at:
++  - 0.65
++  - 0.85
++  _hook_: '*'
+ # Break max_tokens repetition loops (finish_reason=length, no tool call).

@@ -1,0 +1,91 @@
+1	"""Thin OpenAI/vLLM agent loop with a single Bash tool (qwen3_xml)."""
+2	from __future__ import annotations
+3	
+4	import json
+5	import time
+6	import urllib.error
+7	import urllib.request
+8	from dataclasses import dataclass, field
+9	from typing import Any, Callable
+10	
+11	BASH_TOOL: dict[str, Any] = {
+12	    "type": "function",
+13	    "function": {
+14	        "name": "Bash",
+15	        "description": (
+16	            "Execute a shell command inside the task container and return "
+17	            "stdout+stderr. Prefer working under /home/user."
+18	        ),
+19	        "parameters": {
+20	            "type": "object",
+21	            "properties": {
+22	                "command": {
+23	                    "type": "string",
+24	                    "description": "Shell command to run.",
+25	                },
+26	                "timeout": {
+27	                    "type": "integer",
+28	                    "description": "Timeout in milliseconds (default 30000).",
+29	                },
+30	            },
+31	            "required": ["command"],
+32	        },
+33	    },
+34	}
+35	
+36	SYSTEM_PROMPT = """\
+37	You are a terminal coding agent solving a single Linux task.
+38	Use the Bash tool to inspect the environment, edit files, and run commands.
+39	Work under /home/user unless the instruction says otherwise.
+40	When the task is complete, stop calling tools and briefly confirm what you did.
+41	Do not ask questions — act.
+42	"""
+43	
+44	
+45	@dataclass
+46	class StepLog:
+47	    step: int
+48	    role: str
+49	    content: str | None = None
+50	    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+51	    tool_results: list[dict[str, Any]] = field(default_factory=list)
+52	
+53	
+54	@dataclass
+55	class AgentResult:
+56	    steps: int
+57	    finished: str  # no_tool_calls | max_steps | error
+58	    messages: list[dict[str, Any]]
+59	    log: list[StepLog]
+60	    error: str | None = None
+61	
+62	
+63	def _chat(
+64	    api_base: str,
+65	    model: str,
+66	    messages: list[dict[str, Any]],
+67	    *,
+68	    temperature: float,
+69	    api_key: str,
+70	    timeout: float,
+71	) -> dict[str, Any]:
+72	    url = api_base.rstrip("/") + "/chat/completions"
+73	    body = {
+74	        "model": model,
+75	        "messages": messages,
+76	        "tools": [BASH_TOOL],
+77	        "tool_choice": "auto",
+78	        "temperature": temperature,
+79	    }
+80	    data = json.dumps(body).encode()
+81	    req = urllib.request.Request(
+82	        url,
+83	        data=data,
+84	        headers={
+85	            "Content-Type": "application/json",
+86	            "Authorization": f"Bearer {api_key or 'EMPTY'}",
+87	        },
+88	        method="POST",
+89	    )
+
+[Showing lines 1–89 of 209 total. Use offset=89 to read the next section.]

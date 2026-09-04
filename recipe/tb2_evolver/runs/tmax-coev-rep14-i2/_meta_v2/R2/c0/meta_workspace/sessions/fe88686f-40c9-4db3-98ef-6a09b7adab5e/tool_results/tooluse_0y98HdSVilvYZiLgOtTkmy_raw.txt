@@ -1,0 +1,28 @@
+109:def _validate_messages_contract(
+121:    ``before_model``; callers should pass the returned value into the next call
+126:        before_sys = (before_msgs[0],) if before_msgs and before_msgs[0].role == "system" else ()
+127:        after_sys = (after_msgs[0],) if after_msgs and after_msgs[0].role == "system" else ()
+152:    elif hook == "before_model":
+155:                "before_model: messages became empty after processor — fail fast",
+167:                f"before_model: processor removed {-len_delta} message(s)",
+175:                f"before_model: processor added {len_delta} messages in a single step (max +1)",
+185:                    "before_model: processor added a message when last role is already 'user' "
+192:            # Cross-processor constraint: only one insertion per chain
+195:                    "before_model: second processor attempted to add user message "
+196:                    "(chain already has +1 user insertion)",
+205:                    f"before_model: new tail message has role={new_msg.role!r} (must be 'user')",
+218:                            "before_model: processor modified messages other than the last user",
+228:                            "before_model: processor modified messages when last role is not "
+261:    5. ``before_model`` net length change only 0 or +1.
+266:    sys_count = sum(1 for m in final_msgs if m.role == "system") if final_msgs else 0
+274:    if sys_count == 1 and final_msgs and final_msgs[0].role != "system":
+314:    # Invariant 5: before_model net length 0 or +1
+315:    if hook == "before_model" and net not in (0, 1):
+317:            f"post-hook: before_model chain net length change is {net:+d} (must be 0 or +1)",
+415:        # Fail-fast pre-condition: before_model and step_start must not receive empty messages
+416:        if hook in ("before_model", "step_start") and initial_msgs is not None and len(initial_msgs) == 0:
+426:        chain_user_additions = 0  # tracks user msg insertions in before_model chain
+489:    handler methods freely instead of being forced to override ``on_before_model``
+563:        BeforeModelEvent: "on_before_model",
+726:    async def on_before_model(self, event: BeforeModelEvent) -> AsyncIterator[Event]:
+817:def before_model(fn: Callable) -> Processor:

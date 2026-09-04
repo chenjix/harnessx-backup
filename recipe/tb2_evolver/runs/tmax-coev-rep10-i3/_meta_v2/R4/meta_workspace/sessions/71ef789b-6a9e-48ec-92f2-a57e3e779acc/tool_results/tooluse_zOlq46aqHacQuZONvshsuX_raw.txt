@@ -1,0 +1,132 @@
+1	# Tmax coev rep10 i3 — evolve journal
+2	
+3	## Round 1 — repeated-command loop guard
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-01-01T00:00:00Z
+8	hypothesis_id: h_repeated_command_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_000408_0c17d946, task_001716_c1f2ac56, task_000010_644ab1c2, task_000015_89886d8d, task_000118_3043e92d, task_002160_7b255cce, task_000020_eb7b8782]
+11	cited_candidates: [C-001]
+12	gating_outcome: reverted
+13	gating_attribution: score=12/50; +1/-4 gained=task_001716_c1f2ac56 lost=task_000123_aa456f4d,task_000358_4ab35712,task_001035_5a64a9e8,task_001776_abf6bf58; score 0.2400 < incumbent(mean) 0.3000 - tol 0.0400 -> revert to R0
+14	expected_global_gain: "Recover step budget from exact-command thrash loops (6 budget_exceeded + long done-fails); redirect the model mid-loop toward a different approach"
+15	regression_risk: "Passing runs with high exact-repeat counts (task_000123 echo x16, task_000358 x4, task_001035 x5) receive an extra nudge line; nudge-only + append-only so cannot un-do already-correct work"
+16	cost_shift: "Slightly negative overall — ~90 tokens per fire, but breaks 10-22 step loops early, reducing total steps/tokens on pathological runs"
+17	rollback_trigger: "R1 pass-rate < 15 (R0 baseline) OR any of task_000123/task_000358/task_001035 flips T->F"
+18	-->
+19	
+20	### Why
+21	
+22	R0 = 15/50 (30%). Failure taxonomy: **29/35 failures exit
+23	`no_tool_calls`=`done`** (agent voluntarily stops) and only 6 hit
+24	`budget_exceeded`. The `CustomSelfVerifyProcessor` already fires on
+25	28/29 of the `done`-fails AND on every passing run, so the one-shot
+26	verify nudge is already present — most `done`-fails are semantically
+27	wrong output that passes an existence check, i.e. **model capability
+28	gaps, not harness deficiencies** (no harness fix — skip). The one
+29	genuinely harness-addressable, cross-task cluster is **exact-command
+30	thrash**: runs that re-issue the *literally identical* Bash command
+31	many times without any state change, burning the whole 80-step budget.
+32	The existing `CustomEditToolProcessor` only counts file-WRITE commands
+33	(redirect/sed -i/tee) and is blind to read/poll/debug loops.
+34	
+35	### Changes
+36	
+37	- `processors/repeated_command_guard.py` — new `RepeatedCommandGuard`
+38	  `MultiHookProcessor`: counts exact-identical Bash command executions
+39	  per task; at threshold (5) appends a one-shot "you are looping, take
+40	  a fundamentally different action" nudge to that tool's result, then
+41	  resets the counter. Append-only, contract-clean, never blocks.
+42	- `config.yaml` — register the processor after `CustomEditToolProcessor`
+43	  (`_order=31`), `threshold: 5`.
+44	
+45	### Evidence
+46	
+47	- `task_000408_0c17d946`: `exit_reason=budget_exceeded`; command
+48	  `debugfs /home/user/drive.img 2>&1 << 'EOF'\nls -l /\nEOF` executed
+49	  **17 times** (exact Counter over full command strings). Died at
+50	  step 80 with no fix.
+51	- `task_001716_c1f2ac56`: `budget_exceeded`; the same
+52	  `python3 -c "...struct...PIL.Image..."` inline script re-run **22
+53	  times** (steps 0–21) before dying at step 80 with no `repo.pack`.
+54	- `task_000010_644ab1c2`: done-fail, 76 steps; `sleep 10\nps aux |
+55	  grep -E "mock_api|socat|python"` x10 — polling a process that never
+56	  started; deliverable `/home/user/operator.py` missing.
+57	- `task_000015_89886d8d`: done-fail, 54 steps; `cd /home/user &&
+58	  python3 -m pytest test_parser.py` x10 — re-running the same failing
+59	  test without changing the fix.
+60	- Caveat (regression scope): passing runs also show high repeats —
+61	  `task_000123` `echo "Task completed successfully!"` x16 (passed),
+62	  `task_001035` x5, `task_000358` x4 — hence exact-match + high
+63	  threshold + nudge-only design so these are not harmed.
+64	
+65	### Uncertainty
+66	
+67	The exact-repeat signal is present in both failing and passing runs,
+68	so the guard is deliberately scoped to nudge (not block) and to fire
+69	only at a high count. Risk: the nudge lands but the model still can't
+70	find the different approach (the underlying task may be a capability
+71	gap) — in that case the round is flat, not negative. If pass-rate
+72	drops or a cited passing task regresses, revert (see rollback_trigger).
+73	
+74	## Round 3 — verifier requests dep primer
+75	
+76	<!-- journal:frontmatter
+77	round: 3
+78	timestamp: 2026-08-21T02:39:19Z
+79	hypothesis_id: h_verifier_requests_dep_v1
+80	levers: [action]
+81	predicted_affected: [task_000020, task_000028, task_000661, task_000689, task_000958, task_002160, task_000010]
+82	cited_candidates: [C-001]
+83	gating_outcome: accepted
+84	gating_attribution: score=13/50; +3/-2 gained=task_000029_80a5350d,task_001035_5a64a9e8,task_001832_dd672877 lost=task_000185_46261088,task_000212_46a770d4; score 0.2600 >= incumbent(mean) 0.2700 - tol 0.0400
+85	expected_global_gain: "Flips up to 6 HTTP/service tasks whose verifier import requests hits rc=2 ModuleNotFoundError and forces reward 0 despite correct solutions"
+86	regression_risk: "Extra one-shot pip install tool-call appended to first turn of all 50 tasks; on the 12 passing tasks it is an idempotent <1s no-op but adds a 2nd tool_call/result to turn 0"
+87	cost_shift: "+1 tool call/task, negligible tokens (~<1s already-satisfied on most)"
+88	rollback_trigger: "If global pass-rate drops vs R0 (15/50), or any smoke/task errors on the injected turn-0 tool call, revert to R0"
+89	-->
+90	
+91	### Why
+92	
+93	A distinct cluster of HTTP/service tasks scored 0 in R2 not from bad
+94	solutions but because the external verifier's pytest module does
+95	`import requests`, and `requests` is absent from the task container →
+96	pytest rc=2 `ModuleNotFoundError: No module named 'requests'` at
+97	collection time → automatic reward 0. The agents built the server in
+98	C/Go/Node or Python stdlib and probed with `curl`, so they never had a
+99	reason to install the Python client. This is a verifier-side environment
+100	gap the harness can close, not a model reasoning error.
+101	
+102	### Changes
+103	
+104	- `processors/verifier_dep_primer.py` — new `VerifierDepPrimerProcessor`
+105	  (MultiHookProcessor). On the first model turn per task, appends one real
+106	  idempotent Bash `ToolCall` (`python3 -m pip install --quiet ... requests
+107	  || true`) to `event.tool_calls`; resets on task_start/task_end. Fires
+108	  exactly once/task, never replaces the model's own first action.
+109	- `config.yaml` — copied R0, registered the new processor under `processors`
+110	  with an absolute `file://` target; system_prompt.txt copied byte-for-byte
+111	  for SiblingSystemPromptBuilder resolution.
+112	
+113	### Evidence
+114	
+115	- rc=2 `ModuleNotFoundError: No module named 'requests'` in R2 trajectories
+116	  for tasks 000020, 000028, 000661, 000689, 000958, 002160 (000010 is a
+117	  circular-import variant of the same shape). All HTTP/service tasks.
+118	- pip is reachable in these containers: passing tasks show flask, certifi,
+119	  charset_normalizer installing successfully → `pip install requests` will
+120	  succeed and persist into the verifier phase.
+121	- Runloop-verified injection path: `on_after_model` output replaces
+122	  `model_event` (runloop L438), recorded as assistant message with its
+123	  tool_calls (L479), and each tool_call executed with id-matched results
+124	  (L497+) → provider-safe N calls / N results.
+125	
+126	### Uncertainty
+127	
+128	Two open risks. (1) `requests` may not be the only missing verifier dep —
+129	if a task's test imports another lib, that task stays at 0; the fix is
+130	scoped to the observed cluster. (2) The turn-0 injection touches all 50
+131	tasks; the 12 passers should see only a fast idempotent no-op, but if any
+132	turn-0 flow is disrupted or pass-rate drops vs R0, revert.

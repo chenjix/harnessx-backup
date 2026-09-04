@@ -1,0 +1,25 @@
+num messages 70
+You need to create a custom Kubernetes manifest operator script in Python. We have a mock Kubernetes cluster API running locally on port `8080`, and a legacy interactive CLI tool used to apply manifests to it. 
+
+Your objective is to write a Python script at `/home/user/operator.py` that fully automates the backup of existing manifests, sets up a required port forward, and interactively applies new manifests using the CLI tool.
+
+Here are the system details and constraints:
+1. **Directories**:
+   - `/home/user/k8s/active/`: Contains the currently applied manifests (`deploy.yaml`, `svc.yaml`).
+   - `/home/user/k8s/incoming/`: Contains new manifests to be applied (`deploy-v2.yaml`, `config.yaml`).
+2. **Backup Strategy**:
+   - Before applying anything, your Python script must create a compressed tarball of the `/home/user/k8s/active/` directory and save it exactly to `/home/user/k8s_backup.tar.gz`.
+3. **Port Forwarding (Simulated Firewall)**:
+   - The mock API listens on `127.0.0.1:8080`.
+   - The interactive CLI tool is strictly hardcoded to connect to `127.0.0.1:9090`. 
+   - Your script (or a background shell process you spawn) must forward traffic from `127.0.0.1:9090` to `127.0.0.1:8080`. You can use standard tools like `socat`, `nc`, or a simple Python proxy.
+4. **Interactive CLI Automation**:
+   - The CLI tool is located at `/home/user/k8s_apply_cli.py`. You invoke it by passing a manifest file: `python3 /home/user/k8s_apply_cli.py <path_to_manifest>`
+   - It is interactive and requires automation (e.g., using Python's `pexpect` module).
+   - It will first prompt exactly: `Operator Password: ` (The password is `K8s0p3r@t0r`).
+   - It will then output some validation lines and prompt exactly: `Apply manifest <filename>? [y/N]: ` (You must answer `y`).
+5. **Execution**:
+   - Your script `/home/user/operator.py` must iterate over all `.yaml` files in `/home/user/k8s/incoming/` and apply them one by one using the interactive CLI tool.
+   - Run your script to complete the task. Ensure the final state shows the manifests successfully applied in the mock API's backend logs (which the API automatically handles when successful).
+
+Ensure your script handles errors robustly. You are free to run background commands for the port forwarding before running your Python script if you prefer, as long as the entire pipeline works.

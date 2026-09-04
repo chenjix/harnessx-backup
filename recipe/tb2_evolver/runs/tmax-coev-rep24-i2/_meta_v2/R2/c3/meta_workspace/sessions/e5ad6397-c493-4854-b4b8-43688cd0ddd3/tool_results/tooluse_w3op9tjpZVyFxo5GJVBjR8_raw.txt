@@ -1,0 +1,40 @@
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:81:_SELF_VERIFY_MSG = """\
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:82:Before finishing, run through this checklist — do not skip any step even if you already verified:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:83:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:84:1. **Re-read the task description now.** Does your solution address every requirement, including edge cases, accuracy thresholds, and exact output format?
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:85:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:86:2. **Check every required output file exists at its exact path:**
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:87:```bash
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:88:ls -lh /path/to/each/required/output/file
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:89:```
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:90:A script that ran without errors does NOT guarantee the file was written. Run `ls` explicitly for each required file.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:91:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:92:3. **Inspect the actual file contents** — `cat` or `head` each output file and confirm the values are semantically correct, not just that the file exists or is non-empty.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:93:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:94:4. **Validate your verification method.** Did your test actually exercise the real behavior? Tests that only check syntax, importability, or exit code 0 on a trivial case are NOT valid — they can pass even on a broken implementation.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:95:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:96:5. **For running services:** confirm they are still alive and reachable right now, not just that they started earlier.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:97:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:98:Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:99:**SUCCESS: task complete. Output files confirmed at [list each required path].**\
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:100:"""
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:101:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:102:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:104:    """Inject a one-shot verification prompt when the model tries to exit without tool calls.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:105:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:106:    Fires at most once per task run.  On the next no-tool-call turn it stays silent.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:107:    """
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:108:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:109:    _singleton_group = "tb2_self_verify"
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:110:    _order = 90
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:111:
+--
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:137:            self._pending_message = _SELF_VERIFY_MSG
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:138:            keepalive = ToolCall(
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:139:                id=f"sv-{uuid.uuid4().hex[:8]}",
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:140:                name=_SELF_VERIFY_TOOL,
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:141:                input={},
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:142:            )
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:143:            yield dataclasses.replace(event, tool_calls=(keepalive,))
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:144:        else:

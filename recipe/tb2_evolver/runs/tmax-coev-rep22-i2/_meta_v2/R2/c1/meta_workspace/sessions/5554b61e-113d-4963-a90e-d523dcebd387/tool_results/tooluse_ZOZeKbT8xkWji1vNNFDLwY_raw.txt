@@ -1,0 +1,92 @@
+101	        cfg = Path(harness_config).resolve()
+102	        sibling = cfg.parent / "system_prompt.txt"
+103	        if sibling.is_file():
+104	            return sibling.read_text(encoding="utf-8")
+105	        templates = cfg.parent / "templates"
+106	        if templates.is_dir():
+107	            j2s = sorted(templates.glob("*.j2"))
+108	            if j2s:
+109	                return j2s[0].read_text(encoding="utf-8")
+110	    env_prompt = (os.environ.get("TMAX_SYSTEM_PROMPT_FILE") or "").strip()
+111	    if env_prompt and Path(env_prompt).is_file():
+112	        return Path(env_prompt).read_text(encoding="utf-8")
+113	    return None
+114	
+115	
+116	def run_one(
+117	    task: dict[str, Any],
+118	    *,
+119	    api_base: str,
+120	    model: str,
+121	    work_root: Path,
+122	    out_dir: Path,
+123	    max_steps: int,
+124	    temperature: float,
+125	    rebuild: bool,
+126	    skip_initial: bool,
+127	    keep_container: bool,
+128	    network: str,
+129	    system_prompt: str | None = None,
+130	    harness_config: Path | None = None,
+131	) -> dict[str, Any]:
+132	    tid = task["task_id"]
+133	    t0 = time.time()
+134	    result: dict[str, Any] = {
+135	        "task_id": tid,
+136	        "domain": task.get("domain"),
+137	        "reward": 0,
+138	        "status": "error",
+139	        "elapsed_s": 0,
+140	        "api_base": api_base,
+141	        "model": model,
+142	    }
+143	    container = None
+144	    try:
+145	        image = docker_env.build_image(
+146	            tid, task["container_def"], work_root, rebuild=rebuild
+147	        )
+148	        result["image"] = image
+149	        container = docker_env.start_container(tid, image, network=network)
+150	        result["container"] = container
+151	
+152	        if not skip_initial and task.get("test_initial_state"):
+153	            init = docker_env.run_pytest(
+154	                container,
+155	                task["test_initial_state"],
+156	                dest="/tmp/test_initial_state.py",
+157	            )
+158	            result["initial_pytest"] = {
+159	                "passed": init["passed"],
+160	                "rc": init["rc"],
+161	                "output_tail": init["output"][-1500:],
+162	            }
+163	            if not init["passed"]:
+164	                # Still continue — some fixtures are agent-facing checks; but
+165	                # record the failure for diagnosis.
+166	                result["initial_pytest_failed"] = True
+167	
+168	        def _exec(cmd: str, timeout: float) -> tuple[int, str]:
+169	            return docker_env.exec_in(container, cmd, timeout=timeout)
+170	
+171	        if harness_config is not None:
+172	            # Full HarnessX path: processors + tool_registry + system prompt.
+173	            from . import harness_runner
+174	
+175	            agent = harness_runner.run_harness_agent(
+176	                harness_config=Path(harness_config),
+177	                container=container,
+178	                instruction=str(task["description"]),
+179	                api_base=api_base,
+180	                model=model,
+181	                max_steps=max_steps,
+182	                temperature=temperature,
+183	                api_key=os.environ.get("TB2_API_KEY", "EMPTY"),
+184	                journal_dir=out_dir / tid / "oh_runs",
+185	            )
+186	            result["agent"] = {
+187	                "steps": agent.steps,
+188	                "finished": agent.finished,
+189	                "error": agent.error,
+190	                "exit_reason": agent.exit_reason,
+
+[Showing lines 101–190 of 463 total. Use offset=190 to read the next section.]

@@ -1,0 +1,72 @@
+81	    if not rebuild:
+82	        probe = _run(["docker", "image", "inspect", tag], timeout=30)
+83	        if probe.returncode == 0:
+84	            return tag
+85	    ctx = work_root / "build" / task_id
+86	    ctx.mkdir(parents=True, exist_ok=True)
+87	    for p in ctx.iterdir():
+88	        if p.is_file():
+89	            p.unlink()
+90	    _maybe_rebase(materialize_build_context(container_def, ctx))
+91	    proc = _run(
+92	        ["docker", "build", "--network=host", "-t", tag, str(ctx)],
+93	        timeout=build_timeout,
+94	    )
+95	    if proc.returncode != 0:
+96	        raise RuntimeError(
+97	            f"docker build failed for {task_id} (rc={proc.returncode}):\n"
+98	            f"{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+99	        )
+100	    return tag
+101	
+102	
+103	def start_container(task_id: str, image: str, *, network: str = "bridge") -> str:
+104	    """Start a long-lived container. Default bridge so apt-using agent cmds can work."""
+105	    name = f"tmax-{task_id.replace('_', '')[:20]}-{int(time.time())}"[:63]
+106	    proc = _run(
+107	        [
+108	            "docker",
+109	            "run",
+110	            "-d",
+111	            "--name",
+112	            name,
+113	            "--network",
+114	            network,
+115	            "--workdir",
+116	            "/home/user",
+117	            image,
+118	            "sleep",
+119	            "infinity",
+120	        ],
+121	        timeout=60,
+122	    )
+123	    if proc.returncode != 0:
+124	        raise RuntimeError(
+125	            f"docker run failed for {task_id}: {proc.stderr or proc.stdout}"
+126	        )
+127	    return (proc.stdout or "").strip() or name
+128	
+129	
+130	def stop_container(container: str, *, remove: bool = True) -> None:
+131	    _run(["docker", "kill", container], timeout=60)
+132	    if remove:
+133	        _run(["docker", "rm", "-f", container], timeout=60)
+134	
+135	
+136	def exec_in(
+137	    container: str,
+138	    command: str,
+139	    *,
+140	    timeout: float = 120,
+141	    workdir: str = "/home/user",
+142	) -> tuple[int, str]:
+143	    try:
+144	        proc = _run(
+145	            [
+146	                "docker",
+147	                "exec",
+148	                "-w",
+149	                workdir,
+150	                container,
+
+[Showing lines 81–150 of 195 total. Use offset=150 to read the next section.]

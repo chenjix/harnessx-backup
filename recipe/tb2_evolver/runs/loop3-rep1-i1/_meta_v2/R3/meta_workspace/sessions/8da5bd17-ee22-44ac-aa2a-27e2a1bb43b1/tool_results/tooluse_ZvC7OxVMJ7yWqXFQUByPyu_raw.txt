@@ -1,0 +1,82 @@
+141	        self,
+142	        messages: list[Message],
+143	        tools: list[ToolSchema],
+144	        stream_callback: "Callable[[object], None] | None" = None,
+145	    ) -> ModelResponseEvent:
+146	        try:
+147	            import litellm
+148	        except ImportError:
+149	            raise ImportError("Install litellm: pip install litellm")
+150	
+151	        # System messages are passed as {"role": "system", ...} in the messages list.
+152	        # This is the standard OpenAI-compatible format; litellm converts them to
+153	        # the provider-appropriate format internally (e.g. Anthropic "system=" param).
+154	        # This differs from AnthropicProvider, which extracts system messages manually
+155	        # because the direct Anthropic SDK requires them in the separate system= kwarg.
+156	        litellm_messages = []
+157	        for m in messages:
+158	            msg: dict = {"role": m.role, "content": to_openai_content(m.content)}
+159	            if m.tool_call_id:
+160	                msg["tool_call_id"] = m.tool_call_id
+161	            if m.name:
+162	                msg["name"] = m.name
+163	            if m.tool_calls:
+164	                # OpenAI tool-use format: assistant message must carry tool_calls
+165	                # so the model can correlate role=tool results on the next turn.
+166	                msg["tool_calls"] = [
+167	                    {
+168	                        "id": tc.id,
+169	                        "type": "function",
+170	                        "function": {
+171	                            "name": tc.name,
+172	                            "arguments": _json.dumps(tc.input),
+173	                        },
+174	                    }
+175	                    for tc in m.tool_calls
+176	                ]
+177	                msg["content"] = to_openai_content(m.content)
+178	            # ``to_openai_content`` returns None for empty text/blocks. The OpenAI
+179	            # *spec* permits null content on an assistant message that carries
+180	            # tool_calls, but several OpenAI-compatible gateways reject it
+181	            # outright with `Invalid value for 'content': expected a string, got
+182	            # null` (observed against gpt-5.5 through the SF gateway, which kills
+183	            # a multi-turn meta-agent run mid-flight the moment the model emits a
+184	            # tool call with no accompanying prose). An empty string is accepted
+185	            # everywhere and is semantically identical, so normalize rather than
+186	            # relying on each gateway's null tolerance.
+187	            if msg.get("content") is None:
+188	                msg["content"] = ""
+189	            litellm_messages.append(msg)
+190	
+191	        litellm_tools = to_openai_tools(tools)
+192	
+193	        kwargs = dict(self.kwargs)
+194	        # Fold explicitly-stored declared params back into the call-kwargs.
+195	        # setdefault preserves any override someone stuffed into
+196	        # ``self.kwargs`` directly (runtime customization pathway).
+197	        if self.request_timeout is not None:
+198	            kwargs.setdefault("request_timeout", self.request_timeout)
+199	        if self.extra_headers:
+200	            kwargs.setdefault("extra_headers", self.extra_headers)
+201	        if litellm_tools:
+202	            kwargs["tools"] = litellm_tools
+203	        if "max_tokens" not in kwargs and self.max_output_tokens is not None:
+204	            kwargs["max_tokens"] = self.max_output_tokens
+205	
+206	        for attempt in range(_RL_MAX_RETRIES + 1):
+207	            try:
+208	                if stream_callback is not None:
+209	                    # Streaming: deliver text deltas via callback, reconstruct response from chunks.
+210	                    stream_response = await litellm.acompletion(
+211	                        model=self.model,
+212	                        messages=litellm_messages,
+213	                        stream=True,
+214	                        timeout=self.timeout,
+215	                        **kwargs,
+216	                    )
+217	                    chunks = []
+218	                    async for chunk in stream_response:
+219	                        chunks.append(chunk)
+220	                        delta = chunk.choices[0].delta if chunk.choices else None
+
+[Showing lines 141–220 of 327 total. Use offset=220 to read the next section.]

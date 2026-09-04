@@ -1,0 +1,22 @@
+--- R2
++++ R3
+@@ -21,8 +21,13 @@
+ processors:
+-# R4: system-prompt sidecar (system_prompt.txt beside this YAML) revised from
+-# the 5-line default to an explicit general workflow — survey, plan, diagnose
+-# before retry, budget awareness, verify deliverables the way an external
+-# checker would (real HTTP client not raw socket; exact output path/format),
+-# keep required services alive, avoid polluting the verifier's working dir.
+-# Strategy-only; no task-specific literals. SiblingSystemPromptBuilder loads it.
++# R3 (C-003): system-prompt sidecar (system_prompt.txt beside this YAML)
++# extended with a general service-persistence strategy. Observed failure: on
++# HTTP/socket-service tasks the agent starts a server with `nohup ... &`, which
++# inherits the exec'd command's process group; HarborSandbox.kill_running()
++# sends SIGTERM to that group between Bash calls, so the server dies (`exit 143`,
++# `[server] <defunct>` zombies) and the verifier hits `Connection refused`. The
++# added rule teaches the agent to launch required services detached in their OWN
++# new session (`setsid ... < /dev/null &`) so they survive across calls and into
++# the verify phase, and to re-confirm the listener is up before finishing.
++# Strategy-only; no task-specific literals. SiblingSystemPromptBuilder loads the
++# sidecar from beside THIS config.yaml (output_dir), i.e. the R3 sidecar.
+ - _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor

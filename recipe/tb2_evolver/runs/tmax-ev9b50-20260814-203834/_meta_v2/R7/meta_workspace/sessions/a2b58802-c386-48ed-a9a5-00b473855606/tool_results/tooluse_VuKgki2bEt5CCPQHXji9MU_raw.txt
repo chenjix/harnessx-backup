@@ -1,0 +1,102 @@
+396	            )
+397	            before_event = next(
+398	                (e for e in reversed(_bm_events) if isinstance(e, BeforeModelEvent)),
+399	                before_event,
+400	            )
+401	            await tracer.on_event(before_event)
+402	
+403	            # ── 3. Call model ────────────────────────────────────────────────
+404	            if before_event.skip_model:
+405	                model_event = ModelResponseEvent(
+406	                    run_id=state.run_id,
+407	                    step_id=step_id,
+408	                    content=before_event.synthetic_output,
+409	                    finish_reason="stop",
+410	                    usage=Usage(),
+411	                )
+412	                spawn_events: list[SpawnSubAgentEvent] = []
+413	            else:
+414	                # Validate message sequence before sending to API:
+415	                # - Ensure tool_use/tool_result pairs are complete
+416	                # - Ensure messages don't end with assistant role (would be interpreted as prefill)
+417	                _before_msg_list = list(before_event.messages)
+418	                final_messages = _validate_messages(_before_msg_list)
+419	                model_response = await active_model_provider.complete(
+420	                    messages=final_messages,
+421	                    tools=list(before_event.tools),
+422	                    stream_callback=stream_callback,
+423	                )
+424	                model_event = ModelResponseEvent(
+425	                    run_id=state.run_id,
+426	                    step_id=step_id,
+427	                    content=model_response.content,
+428	                    thinking=model_response.thinking,
+429	                    thinking_blocks=model_response.thinking_blocks,
+430	                    tool_calls=model_response.tool_calls,
+431	                    finish_reason=model_response.finish_reason,
+432	                    usage=model_response.usage,
+433	                    model=model_response.model,
+434	                )
+435	                # after_model uses pipe_all: processors may yield SpawnSubAgentEvents
+436	                after_events = await pipe_all(model_event, get_procs("after_model"), tracer=tracer, hook="after_model")
+437	                spawn_events = [e for e in after_events if isinstance(e, SpawnSubAgentEvent)]
+438	                model_event = next(
+439	                    (e for e in reversed(after_events) if isinstance(e, ModelResponseEvent)),
+440	                    model_event,
+441	                )
+442	            await tracer.on_event(model_event)
+443	            for se in spawn_events:
+444	                await tracer.on_event(se)
+445	
+446	            # Update token/cost tracking
+447	            state.cumulative_tokens += model_event.usage.total_tokens
+448	            state.cumulative_input_tokens += model_event.usage.input_tokens
+449	            state.cumulative_output_tokens += model_event.usage.output_tokens
+450	            last_model_input_tokens = model_event.usage.input_tokens
+451	            last_model_output_tokens = model_event.usage.output_tokens
+452	            cost = _estimate_cost(model_event.usage)
+453	            state.cumulative_cost_usd += cost
+454	
+455	            if (
+456	                not _cost_warned
+457	                and state.max_cost_usd is not None
+458	                and state.cumulative_cost_usd >= state.max_cost_usd * 0.7
+459	            ):
+460	                _cost_warned = True
+461	                remaining_pct = 100 * (1 - state.cumulative_cost_usd / state.max_cost_usd)
+462	                state.add_raw_message(
+463	                    Message(
+464	                        role="user",
+465	                        content=(
+466	                            f"[COST WARNING: You have used {state.cumulative_cost_usd:.2f} of "
+467	                            f"${state.max_cost_usd:.2f} budget ({remaining_pct:.0f}% remaining). "
+468	                            "Start wrapping up — provide your FINAL ANSWER soon. "
+469	                            "A best-effort answer is better than running out of budget.]"
+470	                        ),
+471	                    )
+472	                )
+473	
+474	            if not before_event.skip_model:
+475	                state.add_raw_message(
+476	                    Message(
+477	                        role="assistant",
+478	                        content=model_event.content,
+479	                        tool_calls=model_event.tool_calls,
+480	                        thinking=model_event.thinking,
+481	                        thinking_blocks=model_event.thinking_blocks,
+482	                    )
+483	                )
+484	
+485	            if model_event.content:
+486	                final_output = model_event.content
+487	
+488	            # ── 4. Execute tools ─────────────────────────────────────────────
+489	            step_tool_results: list[ToolResultEvent] = []
+490	            interrupt_triggered = False
+491	            # Compute MCP results dir once per step (stable across all tool calls).
+492	            _tracer_session = getattr(tracer, "session_id", "")
+493	            _step_mcp_dir: str | None = None
+494	            if hasattr(tracer, "base_dir") and _tracer_session:
+495	                _step_mcp_dir = os.path.join(tracer.base_dir, _tracer_session, "mcp_results")
+
+[Showing lines 396–495 of 981 total. Use offset=495 to read the next section.]

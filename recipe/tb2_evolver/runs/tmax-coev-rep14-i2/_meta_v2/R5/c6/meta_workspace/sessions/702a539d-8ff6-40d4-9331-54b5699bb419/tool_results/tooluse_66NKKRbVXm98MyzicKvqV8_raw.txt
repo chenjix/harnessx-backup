@@ -1,0 +1,111 @@
+1	"""SelfVerifyTeardownBalance — de-bias the one-sided self-verify checklist.
+2	
+3	The stock TB2 self-verify checklist (CustomSelfVerifyProcessor, injected once
+4	per task right before the agent exits) contains a single service-lifecycle
+5	item that is one-sided:
+6	
+7	    5. **For running services:** confirm they are still alive and reachable
+8	       right now, not just that they started earlier.
+9	
+10	That steering is correct for tasks whose verifier connects to a service the
+11	agent must leave running, but it is *actively wrong* for lifecycle / init-
+12	script / CI-CD-pipeline tasks whose verifier asserts a CLEAN TEARDOWN — no
+13	lingering processes at exit. On those tasks the agent starts a service (its
+14	own testing, or by running the pipeline it authored) and, nudged only toward
+15	"keep it alive", never checks for or reaps stray processes before exiting.
+16	
+17	This processor makes that checkpoint two-sided. It hooks ``on_before_model``
+18	*after* CustomSelfVerifyProcessor (``_order`` 91 > 90) so that when the
+19	self-verify checklist has just been appended as the last user message, it
+20	augments that same message with a balanced teardown item. It does NOT insert
+21	a new message — it edits the content of the last user message only, which is
+22	the sole message-mutation the ``on_before_model`` contract permits when the
+23	last message is a user message.
+24	
+25	Generality: the added guidance is a strategy ("decide whether the verifier
+26	expects the service alive or torn down, and match that end state"), not a
+27	task-specific recipe. No task ids, ports, process names, or file paths appear
+28	here. It fires at most once per task (gated on the self-verify sentinel, which
+29	CustomSelfVerify injects exactly once), and only when that sentinel is present
+30	— so tasks that never reach the self-verify checkpoint are untouched, and the
+31	edit is idempotent (guarded by a second sentinel it inserts).
+32	"""
+33	
+34	from __future__ import annotations
+35	
+36	import dataclasses
+37	
+38	from harnessx.core.events import BeforeModelEvent, Message
+39	from harnessx.core.processor import MultiHookProcessor
+40	
+41	
+42	# Substring that uniquely identifies the stock self-verify checklist message.
+43	# Matches CustomSelfVerifyProcessor._SELF_VERIFY_MSG in
+44	# benchmarks/terminal_bench_2/harness.py. Kept as a stable phrase, not a task
+45	# literal.
+46	_SELF_VERIFY_SENTINEL = "run through this checklist"
+47	
+48	# Marker so we never double-append if some future pipeline re-emits the event.
+49	_TEARDOWN_MARKER = "[lifecycle end-state check]"
+50	
+51	_TEARDOWN_ITEM = (
+52	    "\n\n"
+53	    + _TEARDOWN_MARKER
+54	    + "\n**Match the required end state for any process you started.** "
+55	    "Item 5 above only covers services the verifier will connect to. If the "
+56	    "task is a lifecycle / init-script / deploy-or-CI pipeline whose success "
+57	    "criterion is a clean shutdown (e.g. 'gracefully stop', 'no lingering "
+58	    "processes', 'terminate on exit'), then any process you launched — "
+59	    "including during your own testing or by running a pipeline you wrote — "
+60	    "must be fully stopped before you finish. Decide which end state the task "
+61	    "wants:\n"
+62	    "  - Service must stay up  -> confirm it is still listening (item 5).\n"
+63	    "  - Service must be torn down -> stop it AND verify none survive "
+64	    "(e.g. list matching processes and confirm the list is empty; if a stop "
+65	    "signal was sent, wait briefly and re-check, escalating if needed).\n"
+66	    "Do not leave a process running that the task asked you to shut down, and "
+67	    "do not kill one the verifier still needs."
+68	)
+69	
+70	
+71	class SelfVerifyTeardownBalance(MultiHookProcessor):
+72	    """Append a two-sided service end-state item to the self-verify checklist."""
+73	
+74	    _singleton_group = "tb2_self_verify_teardown_balance"
+75	    _order = 91  # after CustomSelfVerifyProcessor (_order=90)
+76	
+77	    def __init__(self) -> None:
+78	        self._applied = False
+79	
+80	    async def on_task_start(self, event):
+81	        self._applied = False
+82	        yield event
+83	
+84	    async def on_task_end(self, event):
+85	        self._applied = False
+86	        yield event
+87	
+88	    async def on_before_model(self, event: BeforeModelEvent):
+89	        msgs = event.messages
+90	        if self._applied or not msgs:
+91	            yield event
+92	            return
+93	
+94	        last = msgs[-1]
+95	        if last.role != "user":
+96	            yield event
+97	            return
+98	
+99	        content = last.content
+100	        # Only augment plain-text self-verify checklist messages.
+101	        if not isinstance(content, str) or _SELF_VERIFY_SENTINEL not in content:
+102	            yield event
+103	            return
+104	        if _TEARDOWN_MARKER in content:
+105	            self._applied = True
+106	            yield event
+107	            return
+108	
+109	        new_last = dataclasses.replace(last, content=content + _TEARDOWN_ITEM)
+110	        self._applied = True
+111	        yield dataclasses.replace(event, messages=msgs[:-1] + (new_last,))

@@ -1,0 +1,78 @@
+1	# Candidates — R4
+2	
+3	## Candidate C-001
+4	[lens: failure | lever: control | intent: corrective]
+5	
+6	Add a warn-only `WindowedRepeatBreakerProcessor` that catches interleaved
+7	(non-consecutive) no-progress loops the existing consecutive-only
+8	`LoopDetectionProcessor` structurally misses: warn when the same command
+9	appears >=5 times within the last 8 tool calls, and when >=3 empty/no-op
+10	commands are issued in a row.
+11	
+12	- Tasks affected (failing, budget_exceeded, R3): task_000958_4bb2b05d,
+13	  task_000118_3043e92d, task_002073_a89d5ed6 (primary catches);
+14	  secondary support across the wider 7-task budget_exceeded cluster
+15	  (task_000028_7fe033ac, task_000442_502566d6, task_000010_644ab1c2,
+16	  task_000585_049544a3) where the same interleaved-repeat waste appears at
+17	  lower intensity.
+18	- Signal: `exit_reason=budget_exceeded` at the 80-step cap on 7/24 R3
+19	  failures. Command-stream measurement (window=8): task_000958 top command
+20	  repeated 16x with max 8-of-8 in a single window (first tripwire step ~9);
+21	  task_000118 top command repeated 19x, max 8-of-8 (tripwire step ~6);
+22	  task_002073 15 empty commands interleaved with the same verify command.
+23	  The R2 `LoopDetectionProcessor` warn (warn_threshold=3, CONSECUTIVE run
+24	  only) never fires on any of these because the repeats are interleaved with
+25	  an inspection / empty command that breaks the consecutive tail count.
+26	- Verified (Read of `.messages.json` command streams):
+27	  - task_000958_4bb2b05d: the command
+28	    `pkill -9 -f "./server"; sleep 1; cd /home/user && ./server &; sleep 2;
+29	    curl -s http://127.0.0.1:9090/` is re-run 16x — a service restart+retest
+30	    cycle that never changes the C++ source producing the failing result.
+31	  - task_000118_3043e92d: the command
+32	    `rm -f /home/user/logs/*; python3 /home/user/deployment_monitor.py &;
+33	    sleep 1; ...test...` re-run 19x — a monitor start+test cycle, same
+34	    failing result each time.
+35	  - task_002073_a89d5ed6: last ~20 tool calls alternate between an empty
+36	    command (`''`) and `# Final check ... echo "=== Script Verification ==="`
+37	    (13+ repeats), a degenerate verify/empty oscillation to budget_exceeded.
+38	- Why Control not Instruction: R2 (control, consecutive warn) and R3
+39	  (instruction, loop-escape protocol) both already shipped and the agent
+40	  DEMONSTRABLY already has the "I'm looping" awareness (R3 body: "I'm stuck
+41	  in a loop, let me try a different approach" said 16-17x). The missing piece
+42	  is a *mechanism-level* signal that fires on the interleaved shape the
+43	  consecutive detector cannot see — a prompt rule cannot count windowed
+44	  repeats across tool calls; only an `on_after_tool` hook can. This is a
+45	  detector-coverage gap, not a knowledge gap.
+46	- Why not Configuration (retune LoopDetectionProcessor): its counter is
+47	  `_consecutive_tail` — strictly consecutive by construction. No knob makes
+48	  it count windowed/interleaved repeats; lowering warn_threshold would fire
+49	  more aggressively on consecutive runs but still miss every interleaved
+50	  case here (all have consecutive-run <=3). A new detector is required, not a
+51	  retune.
+52	- Retroactive check (A-corrective): partial-yes. For task_000958/000118 the
+53	  windowed warn fires very early (step 6-9) — well before budget exhaustion —
+54	  redirecting the agent from "restart+retest" to "read/fix the source"
+55	  reclaims ~70 steps to actually change the code. For task_002073 the
+56	  empty-run warn + "finish if deliverable correct" reclaims the ~20 steps
+57	  lost to the empty/verify oscillation. The warn is soft (agent may ignore
+58	  it), so this is the R2/R3-style bet: the gain is conditional on the model
+59	  reacting. No task is made worse — a warn-only advisory cannot fail a task.
+60	- expected_global_gain: Flip a subset of the 7-task budget_exceeded cluster
+61	  by converting late-onset interleaved spin into an early redirect toward the
+62	  actual upstream bug (source/config), and free budget on tasks currently
+63	  exhausting all 80 steps in a no-progress oscillation. Generalizes across
+64	  domains (C++ microservice, Python monitor daemon, PSV pipeline) because the
+65	  shared root cause is loop-shape (interleaved repeat) not domain knowledge.
+66	- regression_risk: A currently-PASSING task (task_000865_d9a96bd4,
+67	  maxwin8=8) legitimately repeats a command 8x within an 8-window, and
+68	  task_001197 hits 5. Mitigated by making the guard WARN-ONLY (no raise ever)
+69	  — those tasks only ever see a harmless advisory line appended to a tool
+70	  result; they cannot be flipped to `loop_detected`. Cooldown=4 prevents the
+71	  advisory from spamming every subsequent step once a loop is established.
+72	- cost_shift: Near-neutral to negative. A few advisory tokens on affected
+73	  tasks; but converting 80-step budget_exceeded runs into earlier
+74	  completions / earlier bug-fixes should reduce median steps on the cluster.
+75	  Net positive if it flips >=2 budget tasks.
+76	- rollback_trigger: If R5 pass_rate is flat/down AND the budget_exceeded
+77	  count is unchanged, OR any of task_000865 / task_001197 flips T->F, revert
+78	  the WindowedRepeatBreakerProcessor.

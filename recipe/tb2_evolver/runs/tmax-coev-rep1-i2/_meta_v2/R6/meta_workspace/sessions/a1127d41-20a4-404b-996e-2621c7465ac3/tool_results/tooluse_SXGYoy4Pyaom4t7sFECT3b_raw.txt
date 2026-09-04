@@ -1,0 +1,144 @@
+79:_SELF_VERIFY_TOOL = "_tb2_self_verify"
+80:_SELF_VERIFY_ACK = "Verification check initiated. See the message above for instructions."
+81:_SELF_VERIFY_MSG = """\
+137:            self._pending_message = _SELF_VERIFY_MSG
+140:                name=_SELF_VERIFY_TOOL,
+148:        if event.tool_name == _SELF_VERIFY_TOOL:
+149:            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+===
+_SELF_VERIFY_MSG = """\
+Before finishing, run through this checklist — do not skip any step even if you already verified:
+
+1. **Re-read the task description now.** Does your solution address every requirement, including edge cases, accuracy thresholds, and exact output format?
+
+2. **Check every required output file exists at its exact path:**
+```bash
+ls -lh /path/to/each/required/output/file
+```
+A script that ran without errors does NOT guarantee the file was written. Run `ls` explicitly for each required file.
+
+3. **Inspect the actual file contents** — `cat` or `head` each output file and confirm the values are semantically correct, not just that the file exists or is non-empty.
+
+4. **Validate your verification method.** Did your test actually exercise the real behavior? Tests that only check syntax, importability, or exit code 0 on a trivial case are NOT valid — they can pass even on a broken implementation.
+
+5. **For running services:** confirm they are still alive and reachable right now, not just that they started earlier.
+
+Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+**SUCCESS: task complete. Output files confirmed at [list each required path].**\
+"""
+
+
+class CustomSelfVerifyProcessor(MultiHookProcessor):
+    """Inject a one-shot verification prompt when the model tries to exit without tool calls.
+
+    Fires at most once per task run.  On the next no-tool-call turn it stays silent.
+    """
+
+    _singleton_group = "tb2_self_verify"
+    _order = 90
+
+    def __init__(self) -> None:
+        self._verified = False
+        self._pending_message: str = ""
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._verified = False
+        self._pending_message = ""
+        yield event
+
+    async def on_before_model(self, event: BeforeModelEvent):
+        if not self._pending_message:
+            yield event
+            return
+        msg = self._pending_message
+        self._pending_message = ""
+        # last message is a tool result (role≠user) → append exactly +1 user
+        yield dataclasses.replace(
+            event,
+            messages=event.messages + (Message(role="user", content=msg),),
+        )
+
+    async def on_after_model(self, event: ModelResponseEvent):
+        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+        if exit_intent and not self._verified:
+            self._verified = True
+            self._pending_message = _SELF_VERIFY_MSG
+            keepalive = ToolCall(
+                id=f"sv-{uuid.uuid4().hex[:8]}",
+                name=_SELF_VERIFY_TOOL,
+                input={},
+            )
+            yield dataclasses.replace(event, tool_calls=(keepalive,))
+        else:
+            yield event
+
+    async def on_before_tool(self, event: ToolCallEvent):
+        if event.tool_name == _SELF_VERIFY_TOOL:
+            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+        else:
+            yield event
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._verified = False
+        self._pending_message = ""
+        yield event
+
+
+class CustomEditToolProcessor(MultiHookProcessor):
+    """Detect repeated Bash-based file edits and nudge the model to try a different approach.
+
+    TB2 only exposes Bash, so write operations are detected via command patterns
+    (redirects, sed -i, tee).  When the same file is edited more than
+    ``threshold`` times, a warning is appended to the tool result and the
+    per-file counter is reset.
+    """
+
+    _singleton_group = "bash_edit_detector"
+    _order = 30
+
+    def __init__(self, threshold: int = 7) -> None:
+        self.threshold = threshold
+        self._edit_counts: dict[str, int] = {}
+        self._pending: dict[str, list[str]] = {}
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._edit_counts.clear()
+        self._pending.clear()
+        yield event
+
+    async def on_before_tool(self, event: ToolCallEvent):
+        if event.tool_name == "Bash":
+            paths = _extract_written_files(event.tool_input.get("command", ""))
+            if paths:
+                self._pending[event.tool_call_id] = paths
+        yield event
+
+    async def on_after_tool(self, event: ToolResultEvent):
+        paths = self._pending.pop(event.tool_call_id, [])
+        injections: list[str] = []
+        for path in paths:
+            count = self._edit_counts.get(path, 0) + 1
+            self._edit_counts[path] = count
+            if count > self.threshold:
+                injections.append(_EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold))
+                self._edit_counts[path] = 0
+        if injections:
+            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+        else:
+            yield event
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._edit_counts.clear()
+        self._pending.clear()
+        yield event
+
+
+# ---------------------------------------------------------------------------
+# TaskTimeReminderProcessor
+# ---------------------------------------------------------------------------
+
+_TASK_TIME_WARN_70 = (
+    "[TaskTimeReminder] You have used 70% of your time budget ({elapsed:.0f}s / {total:.0f}s). "
+    "Stop exploring. Focus exclusively on implementing and writing all required output files. "
+    "Run `ls -lh` on each expected output path to confirm they exist."
+)

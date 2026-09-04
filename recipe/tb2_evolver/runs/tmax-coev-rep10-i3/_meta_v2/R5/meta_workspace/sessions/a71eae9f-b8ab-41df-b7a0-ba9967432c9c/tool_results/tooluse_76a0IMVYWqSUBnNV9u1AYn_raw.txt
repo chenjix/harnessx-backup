@@ -1,0 +1,256 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""NoProgressRepeatBreaker — a two-stage circuit breaker for zero-progress
+4	Bash command spirals.
+5	
+6	TB2 exposes only ``Bash``. A recurring, harness-addressable pathology in the
+7	R4 trajectories is the agent re-issuing the *exact same* command and getting
+8	back the *exact same* result many times in a row, making literally zero
+9	progress until the step budget is exhausted (``exit_reason=budget_exceeded``)
+10	or, in the worst case, the run crashes (``exit_reason=error``) after the same
+11	timed-out command (``exit 124, no output captured``) is re-run a dozen times.
+12	
+13	Why this differs from the reverted R1 exact-command *nudge* guard
+14	(``h_repeated_command_guard_v1``):
+15	
+16	  1. **Signal = consecutive identical (command, result) pairs**, not a global
+17	     count of a command string. R1 counted every occurrence of a command
+18	     string anywhere in the run, which also flagged benign passing runs that
+19	     re-emit an ``echo`` many times (exit 0, real progress between them). This
+20	     breaker only reacts when the *same command produces the same output
+21	     back-to-back* — the unambiguous signature of a no-progress loop. In the
+22	     R4 data, no passing task ever exceeds 3 such consecutive identical pairs,
+23	     while dying budget_exceeded tasks reach 5 / 6 / 10 / 19 / 24.
+24	
+25	  2. **Two stages, and the second one blocks.** R1 was nudge-only and was
+26	     ignored (in ``task_001017`` the model got repeated EditDetection nudges
+27	     and still ran the same timed-out command 15 more times, burning ~3800s of
+28	     wall-clock). Stage 1 (``soft_threshold``) appends a one-shot firm redirect
+29	     to the tool result. Stage 2 (``hard_threshold``) actually *blocks*
+30	     re-execution of the offending command via ``approved=False`` +
+31	     ``synthetic_result``, injecting a provider-safe tool result that tells the
+32	     model the command is being refused because it is not changing state. This
+33	     reclaims the remaining step budget and caps wall-clock/cost bleed.
+34	
+35	Safety / regression scope:
+36	  - Thresholds are set strictly above the passing-cluster maximum of 3
+37	    consecutive identical pairs (default soft=4, hard=6), so benign short
+38	    polls / retries are untouched.
+39	  - Only *identical* consecutive command+result pairs count; any change in the
+40	    command OR its output resets the streak, so iterative debugging (each
+41	    attempt slightly different, or the same command now producing new output)
+42	    is never penalised.
+43	  - The block is scoped to the exact offending command string. As soon as the
+44	    agent issues any different command, the breaker disarms and normal
+45	    execution resumes — it can never permanently wedge a run.
+46	"""
+47	
+48	from __future__ import annotations
+49	
+50	import dataclasses
+51	
+52	from harnessx.core.events import (
+53	    TaskEndEvent,
+54	    TaskStartEvent,
+55	    ToolCallEvent,
+56	    ToolResultEvent,
+57	)
+58	from harnessx.core.processor import MultiHookProcessor
+59	
+60	
+61	_SOFT_NUDGE = (
+62	    "\n\n[NoProgressRepeatBreaker] You have now run this exact command "
+63	    "{count} times in a row and received the identical result each time. "
+64	    "Re-running an identical command does not change the system state, so "
+65	    "this is making zero progress. STOP repeating it. Instead: (1) re-read "
+66	    "the task requirements, (2) diagnose *why* the output is unchanged — a "
+67	    "wrong path, a missing dependency, a process that never started, a "
+68	    "command that keeps timing out, or a flawed assumption — and (3) take a "
+69	    "fundamentally different action. If you believe the work is already done, "
+70	    "verify each required output file with `ls -lh` and `cat` rather than "
+71	    "re-running this command."
+72	)
+73	
+74	_HARD_BLOCK = (
+75	    "[NoProgressRepeatBreaker] BLOCKED. This exact command has already been "
+76	    "executed {count} times in a row with the identical result and was NOT "
+77	    "advancing the task, so it has not been run again to avoid exhausting the "
+78	    "step budget. Do not issue this command again. Take a fundamentally "
+79	    "different action: re-read the task, check the actual paths and process "
+80	    "state, fix the underlying assumption, or verify your existing outputs "
+81	    "with `ls -lh` / `cat`. Any different command will run normally."
+82	)
+83	
+84	
+85	def _norm(text) -> str:
+86	    if not isinstance(text, str):
+87	        return ""
+88	    return text.strip()
+89	
+90	
+91	# Guard-injected advisory suffixes appended by *other* processors (or by this
+92	# one's own soft nudge) must be stripped before comparing results, otherwise an
+93	# intermittent nudge from a sibling processor breaks the "identical result"
+94	# streak and lets a genuine no-progress spiral slip through.
+95	_GUARD_MARKERS = (
+96	    "[NoProgressRepeatBreaker]",
+97	    "[EditDetection]",
+98	    "[RepeatedCommandGuard]",
+99	    "Verification check initiated",
+100	)
+101	
+102	
+103	def _norm_result(text) -> str:
+104	    """Normalize a tool result for streak comparison: strip whitespace and drop
+105	    any trailing guard-injected advisory blocks so the underlying command
+106	    output is compared, not the harness annotations layered on top of it."""
+107	    if not isinstance(text, str):
+108	        return ""
+109	    s = text
+110	    cut = len(s)
+111	    for marker in _GUARD_MARKERS:
+112	        idx = s.find(marker)
+113	        if idx != -1 and idx < cut:
+114	            cut = idx
+115	    return s[:cut].strip()
+116	
+117	
+118	def _is_timeout(result: str) -> bool:
+119	    """A command that hit the per-command timeout (exit 124) produced no useful
+120	    work and consumed the full timeout budget — the most expensive form of a
+121	    no-progress repeat."""
+122	    return "exit 124" in result
+123	
+124	
+125	class NoProgressRepeatBreaker(MultiHookProcessor):
+126	    """Break zero-progress identical-command / identical-result spirals.
+127	
+128	    Stage 1 (soft_threshold): append a one-shot redirect nudge to the result.
+129	    Stage 2 (hard_threshold): block re-execution of the offending command and
+130	    return a synthetic tool result instead.
+131	    """
+132	
+133	    _singleton_group = "noprogress_repeat_breaker"
+134	    _order = 32  # just after CustomEditToolProcessor (_order=30)
+135	
+136	    def __init__(
+137	        self,
+138	        soft_threshold: int = 4,
+139	        hard_threshold: int = 6,
+140	        timeout_block_threshold: int = 3,
+141	    ) -> None:
+142	        self.soft_threshold = int(soft_threshold)
+143	        self.hard_threshold = int(hard_threshold)
+144	        if self.hard_threshold < self.soft_threshold:
+145	            self.hard_threshold = self.soft_threshold
+146	        # A command that keeps *timing out* (exit 124) burns the full per-command
+147	        # timeout of wall-clock each time and makes zero progress, so it is
+148	        # blocked at a lower streak than an ordinary identical-output repeat.
+149	        self.timeout_block_threshold = int(timeout_block_threshold)
+150	        # per-task state
+151	        self._last_cmd: str = ""
+152	        self._last_result: str = ""
+153	        self._streak: int = 0  # consecutive identical (cmd, result) pairs
+154	        self._timeout_streak: int = 0  # consecutive timeouts of the same command
+155	        self._pending_cmd: dict[str, str] = {}  # tool_call_id -> normalized command
+156	        self._nudged_for_cmd: str = ""  # cmd we've already soft-nudged once
+157	
+158	    async def on_task_start(self, event: TaskStartEvent):
+159	        self._reset()
+160	        yield event
+161	
+162	    async def on_task_end(self, event: TaskEndEvent):
+163	        self._reset()
+164	        yield event
+165	
+166	    def _reset(self) -> None:
+167	        self._last_cmd = ""
+168	        self._last_result = ""
+169	        self._streak = 0
+170	        self._timeout_streak = 0
+171	        self._pending_cmd.clear()
+172	        self._nudged_for_cmd = ""
+173	
+174	    async def on_before_tool(self, event: ToolCallEvent):
+175	        if event.tool_name != "Bash":
+176	            yield event
+177	            return
+178	        cmd = _norm((event.tool_input or {}).get("command", ""))
+179	        same_cmd = bool(cmd) and cmd == self._last_cmd
+180	        # Block on either signal:
+181	        #  (a) the same command has produced hard_threshold consecutive identical
+182	        #      results (a stable no-progress loop), or
+183	        #  (b) the same command has timed out timeout_block_threshold times in a
+184	        #      row (each timeout burns the full per-command wall-clock budget).
+185	        if same_cmd and (
+186	            self._streak >= self.hard_threshold
+187	            or self._timeout_streak >= self.timeout_block_threshold
+188	        ):
+189	            count = max(self._streak, self._timeout_streak)
+190	            msg = _HARD_BLOCK.format(count=count)
+191	            yield dataclasses.replace(event, approved=False, synthetic_result=msg)
+192	            return
+193	        # Stash the command so on_after_tool can pair it with its result.
+194	        self._pending_cmd[event.tool_call_id] = cmd
+195	        yield event
+196	
+197	    async def on_after_tool(self, event: ToolResultEvent):
+198	        if event.tool_name != "Bash":
+199	            yield event
+200	            return
+201	        # Ignore synthetic block results: our _HARD_BLOCK sentinel means the
+202	        # command was refused, not executed — do not fold it into the streak.
+203	        result = event.result or ""
+204	        if "[NoProgressRepeatBreaker] BLOCKED." in result:
+205	            yield event
+206	            return
+207	
+208	        # Pair the result with the command captured in on_before_tool.
+209	        cmd = self._pending_cmd.pop(event.tool_call_id, None)
+210	        norm_result = _norm_result(result)
+211	
+212	        if cmd is None:
+213	            # No command captured (shouldn't happen for Bash) — reset streak.
+214	            self._last_cmd = ""
+215	            self._last_result = norm_result
+216	            self._streak = 0
+217	            self._timeout_streak = 0
+218	            yield event
+219	            return
+220	
+221	        same_cmd = cmd == self._last_cmd and cmd != ""
+222	        if same_cmd and norm_result == self._last_result:
+223	            self._streak += 1
+224	        else:
+225	            self._streak = 1
+226	            self._nudged_for_cmd = ""  # new (cmd,result) context: allow a fresh nudge
+227	
+228	        # Timeout streak: consecutive timeouts of the *same* command (output need
+229	        # not be byte-identical — a timeout is a timeout).
+230	        if same_cmd and _is_timeout(norm_result):
+231	            self._timeout_streak += 1
+232	        elif _is_timeout(norm_result):
+233	            self._timeout_streak = 1
+234	        else:
+235	            self._timeout_streak = 0
+236	
+237	        self._last_cmd = cmd
+238	        self._last_result = norm_result
+239	
+240	        # Soft nudge fires when either streak crosses soft_threshold but neither
+241	        # has yet reached its hard/block threshold.
+242	        soft_hit = (
+243	            self.soft_threshold <= self._streak < self.hard_threshold
+244	            or self.soft_threshold
+245	            <= self._timeout_streak
+246	            < self.timeout_block_threshold
+247	        )
+248	        if soft_hit and self._nudged_for_cmd != cmd:
+249	            self._nudged_for_cmd = cmd
+250	            count = max(self._streak, self._timeout_streak)
+251	            yield dataclasses.replace(
+252	                event, result=result + _SOFT_NUDGE.format(count=count)
+253	            )
+254	            return
+255	        yield event
+256	

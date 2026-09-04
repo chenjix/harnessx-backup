@@ -1,0 +1,71 @@
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:104:    """Inject a one-shot verification prompt when the model tries to exit without tool calls.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:105:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:106:    Fires at most once per task run.  On the next no-tool-call turn it stays silent.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:107:    """
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:108:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:109:    _singleton_group = "tb2_self_verify"
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:110:    _order = 90
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:111:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:112:    def __init__(self) -> None:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:113:        self._verified = False
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:114:        self._pending_message: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:115:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:116:    async def on_task_start(self, event: TaskStartEvent):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:117:        self._verified = False
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:118:        self._pending_message = ""
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:119:        yield event
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:120:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:121:    async def on_before_model(self, event: BeforeModelEvent):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:122:        if not self._pending_message:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:123:            yield event
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:124:            return
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:125:        msg = self._pending_message
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:126:        self._pending_message = ""
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:127:        # last message is a tool result (role≠user) → append exactly +1 user
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:128:        yield dataclasses.replace(
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:129:            event,
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:130:            messages=event.messages + (Message(role="user", content=msg),),
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:131:        )
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:132:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:133:    async def on_after_model(self, event: ModelResponseEvent):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:134:        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:135:        if exit_intent and not self._verified:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:136:            self._verified = True
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:137:            self._pending_message = _SELF_VERIFY_MSG
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:138:            keepalive = ToolCall(
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:139:                id=f"sv-{uuid.uuid4().hex[:8]}",
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:140:                name=_SELF_VERIFY_TOOL,
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:141:                input={},
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:142:            )
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:143:            yield dataclasses.replace(event, tool_calls=(keepalive,))
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:144:        else:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:145:            yield event
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:146:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:147:    async def on_before_tool(self, event: ToolCallEvent):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:148:        if event.tool_name == _SELF_VERIFY_TOOL:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:149:            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:150:        else:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:151:            yield event
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:152:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:153:    async def on_task_end(self, event: TaskEndEvent):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:154:        self._verified = False
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:155:        self._pending_message = ""
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:156:        yield event
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:157:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:158:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:159:class CustomEditToolProcessor(MultiHookProcessor):
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:160:    """Detect repeated Bash-based file edits and nudge the model to try a different approach.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:161:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:162:    TB2 only exposes Bash, so write operations are detected via command patterns
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:163:    (redirects, sed -i, tee).  When the same file is edited more than
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:164:    ``threshold`` times, a warning is appended to the tool result and the
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:165:    per-file counter is reset.
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:166:    """
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:167:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:168:    _singleton_group = "bash_edit_detector"
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:169:    _order = 30
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:170:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:171:    def __init__(self, threshold: int = 7) -> None:
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:172:        self.threshold = threshold
+/fsx/home/jixuan.chen/harnessx-backup/benchmarks/terminal_bench_2/harness.py:173:        self._edit_counts: dict[str, int] = {}

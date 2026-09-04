@@ -1,0 +1,37 @@
+--- R4
++++ R5
+@@ -60,13 +60,23 @@
+   _hook_: '*'
+-# R2: break identical-Bash-command loops. Observed across the R1 budget_exceeded
+-# cluster: the agent issues the EXACT same Bash command 20-29 times in a row,
+-# gets the same (often empty/failing) result each time, and burns the whole
+-# 80-step budget on one unproductive command. LengthTruncationRecovery does not
+-# catch this — those turns emit a well-formed tool call, so finish_reason != length.
+-# This processor injects a firm redirect user message after the same command is
+-# issued `repeat_threshold` times consecutively; it never blocks execution, so a
+-# legitimately-slow retry is at worst nudged, never broken. Strategy/shape-only;
+-# no task-specific commands or paths. See processors/repeat_command_breaker.py.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R2/processors/repeat_command_breaker.py::RepeatCommandBreakerProcessor
+-  repeat_threshold: 3
++# R5 (C-006): HARD-break identical-Bash-command loops. Supersedes the R2
++# RepeatCommandBreakerProcessor, which injected a redirect *user* message via
++# on_before_model — that mutation reaches the model only transiently (the run
++# loop rebuilds model input from state.raw_messages each step and never writes
++# on_before_model edits back), so the nudge evaporated the next turn and left
++# ZERO trace in persisted history. Grep of the R4 round confirms 0 nudges
++# actually landed, and looping tasks (pycdc x24, `cat > file << EOF` x28,
++# printf x9) still burned the whole budget. This replacement intercepts the
++# offending call in on_before_tool with approved=False + synthetic_result: the
++# doomed command is NOT executed (saves the round-trip) and the corrective text
++# is written into state.raw_messages as the tool result, so it PERSISTS and
++# compounds in context — the model receives the block as the command's own
++# output and cannot silently ignore it. Fires only after `block_threshold`
++# consecutive byte-identical NON-EMPTY single-Bash calls (empty self-verify
++# marker turns excluded via normalization). Threshold 4 is chosen from measured
++# evidence: every currently-passing task's max consecutive non-empty identical
++# run is <=3; only stuck/failing tasks reach 4+, so the block cannot fire on a
++# passing trajectory (near-zero regression risk). No task ids/paths/commands are
++# hard-coded. See processors/repeat_command_blocker.py.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R5/processors/repeat_command_blocker.py::RepeatCommandBlockerProcessor
++  block_threshold: 4
+   _hook_: '*'

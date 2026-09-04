@@ -1,0 +1,153 @@
+1	# Terminal-Bench 2 — Evolution Journal
+2	
+3	## Round 1 — add loop detection
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-14T02:00:00Z
+8	hypothesis_id: h_loop_detect_v1
+9	levers: [control]
+10	predicted_affected: [task_000578_cebe85a5, task_001321_658ce4a8, task_000958_4bb2b05d, task_001031_a8f0eb37, task_001653_c4cafa73]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=30/50; +5/-4 gained=task_000684_1a33ef37,task_000965_069bb95f,task_001032_1adaccb9,task_001653_c4cafa73 lost=task_000748_c9807703,task_001090_c61c71f2,task_001701_95e3bbcb,task_001706_24462a09; score 0.6000 >= incumbent(mean) 0.5800 - tol 0.0400
+14	expected_global_gain: "Closes a 5-task identical-consecutive-call loop cluster spanning 4 domains; 2 of them are hard exit_reason=error (HTTP 400) crashes, so removing the failure mode is structurally valuable beyond raw pass count."
+15	regression_risk: "Near-zero. Every R0 passing task has max consecutive identical Bash call = 1; the raise threshold of 5 (warn at 3) is never approached by legitimate work. name-only strategy disabled (name_warn_threshold=9999) so single-tool TB2 does not get spammed."
+16	cost_shift: "Net negative (savings). Loops that ran 65-158 messages / all 80 steps get cut at ~5-8 repeats; no added cost on non-looping tasks."
+17	rollback_trigger: "If any R0-passing task regresses to loop_detected/early exit, or pass_rate drops, revert. Also revert if the 5 predicted tasks still fail with the SAME loop shape (indicates the model re-loops after the nudge and the harness lever is insufficient)."
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 29/50. Among the 21 failures, a distinct mechanical cluster
+23	of 5 tasks share a shape: the agent issues **byte-identical consecutive
+24	Bash tool calls** dozens of times in a row. On task_001321 the same call
+25	repeated 55 consecutive times (65 total); on task_000958 the same SQL
+26	query repeated 62 times until max_steps; task_000578 repeated a Go-file
+27	heredoc 37 times until the context overflowed into an HTTP 400 crash.
+28	The agent even emits self-aware text ("Let me try a different approach")
+29	yet keeps issuing the identical call — a mechanical repeat the model
+30	cannot self-interrupt. No repetition-loop detector exists in the current
+31	pipeline; `CustomEditToolProcessor` only counts file-write commands, so
+32	non-write loops (query/run) slip through.
+33	
+34	### Changes
+35	
+36	- `config.yaml` — insert built-in
+37	  `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+38	  after `CompactionProcessor`, before `ParseRetryProcessor`.
+39	  Params: window_size=12, warn_threshold=3, threshold=5,
+40	  name_warn_threshold=9999 (name-only strategy disabled for single-tool
+41	  TB2), compaction_drop_threshold=5. No new code authored — reuse of a
+42	  built-in processor.
+43	
+44	### Evidence
+45	
+46	- `task_001321_658ce4a8` messages.json: Bash call
+47	  `"/home/user/extractor < /home/user/raw_dump.txt | head -20"` repeated
+48	  55 consecutive times; ends exit_reason=error (HTTP 400).
+49	- `task_000578_cebe85a5`: `cat > .../main.go << 'EOF' ...` repeated 37
+50	  consecutive times (78 total) → HTTP 400.
+51	- `task_000958_4bb2b05d`: SQL-query Bash call repeated 62 consecutive
+52	  times → max_steps (80).
+53	- `task_001031_a8f0eb37`: `python3 << 'EOF' from mpi4py ...` repeated 59
+54	  consecutive times → max_steps.
+55	- `task_001653_c4cafa73`: `cat > /home/user/etl.c << 'EOF' ...` repeated
+56	  26 consecutive times.
+57	- Regression baseline: measured all 29 R0 passing tasks — max consecutive
+58	  identical Bash call = 1 across every one. Thresholds are never touched.
+59	
+60	### Uncertainty
+61	
+62	The warn-at-3 nudge may not break the model out of a loop it is
+63	mechanically committed to; in that case raise-at-5 still converts the
+64	crash/step-burn into a clean `loop_detected` exit (protects the replay
+65	gate and reclaims steps) but does not flip the task to pass. If the 5
+66	predicted tasks still fail with the same loop shape next round, the
+67	control lever alone is insufficient and we should escalate (e.g. inject
+68	a divergence hint on the warn, or a different tool affordance).
+69	
+70	### Not addressed this round (noted for future rounds)
+71	
+72	- **Timeout cluster** (9 tasks: 010,015,118,396,684,965,1032,1089,1818):
+73	  `finished: error` / "timed out" with token counts 4k-21k, well below
+74	  the 140k compaction threshold → infra/model-chat timeout, not context
+75	  bloat. Not harness-fixable via processor; skip unless infra changes.
+76	- **Premature-completion cluster** (7 tasks: 028,140,264,505,933,1653,
+77	  1781): `no_tool_calls` — agent declares done but verification fails.
+78	  Genuine correctness gaps (505 even noted a discrepancy then quit). The
+79	  existing CustomSelfVerifyProcessor already fires one verify prompt;
+80	  deeper fix likely a capability gap, not harness. Revisit if a
+81	  verification-loop mechanism shows promise.
+82	
+83	## Round 2 — structured system-prompt template
+84	
+85	<!-- journal:frontmatter
+86	round: 2
+87	timestamp: 2026-08-14T03:00:00Z
+88	hypothesis_id: h_prompt_survey_verify_v1
+89	levers: [instruction]
+90	predicted_affected: [task_000748_c9807703, task_000933_1f27096a, task_001706_24462a09, task_001090_c61c71f2, task_000118_3043e92d, task_000578_cebe85a5, task_001031_a8f0eb37, task_000264_ab8c7253]
+91	cited_candidates: [C-002]
+92	gating_outcome: accepted
+93	gating_attribution: score=29/50; +4/-5 gained=task_000578_cebe85a5,task_000748_c9807703,task_001321_658ce4a8,task_001706_24462a09 lost=task_000329_a3ac56b0,task_000965_069bb95f,task_001032_1adaccb9,task_001536_acfe6c35; score 0.5800 >= incumbent(mean) 0.6000 - tol 0.0400
+94	expected_global_gain: "Closes the largest harness-addressable cluster: premature/unverified completion + wrong-path deliverables (748,933,1706,1090,118 and output-missing 578,1031,264). A survey+plan+verify-before-exit prompt generalizes to every task class."
+95	regression_risk: "Low — all 30 R1-passing tasks already produce correct deliverables; a stronger prompt does not turn a correct solution incorrect. Main downside is a few extra Bash calls (survey + verification) per task."
+96	cost_shift: "Mild + : one survey command up front plus 1-3 verification commands before exit, partially offset by less wrong-path thrashing."
+97	rollback_trigger: "If pass_rate drops below R1 (30/50), or a currently-passing short task regresses to max_steps from verification churn, revert to the bare default prompt (delete templates/tb2_agent.j2)."
+98	-->
+99	
+100	### Why
+101	
+102	**Key structural discovery:** the tmax eval path (`recipe/tmax_eval/run_eval.py`
+103	→ `agent_loop.run_agent`) is a self-contained loop that does **not** run the
+104	harnessx processor pipeline. The only part of `config.yaml` it consumes is the
+105	system prompt, resolved by `_resolve_system_prompt`, which reads a
+106	`templates/*.j2` (or `system_prompt.txt`) sitting next to the config, else falls
+107	back to the bare 5-line `agent_loop.SYSTEM_PROMPT`. Consequently R1's
+108	`LoopDetectionProcessor` insertion was inert here (29→30 is within repeat-spread
+109	noise per `history/OVERVIEW.md`), and the R0/R1 agents ran with the bare default
+110	prompt that has zero guidance on environment survey, planning, exact output
+111	paths, or pre-exit verification. The dominant harness-addressable failure cluster
+112	in R1 is `finished=no_tool_calls` with a deliverable that is missing, truncated,
+113	or off-spec — the agent declared done without verifying its own output against the
+114	task's stated requirements. The only behavioral lever exposed on this benchmark is
+115	the system prompt.
+116	
+117	### Changes
+118	
+119	- `templates/tb2_agent.j2` — new structured system-prompt template (general
+120	  strategy: read task + note exact output paths; survey env first; decompose/plan;
+121	  write to exact paths; mandatory Definition-of-Done verification of every
+122	  deliverable's existence + content + constraints before stopping; background-service
+123	  discipline; no `apt-get update`). No task-specific literals.
+124	- `config.yaml` — swap `SystemPromptProcessor.system_builder` from
+125	  `_StaticSystemPromptBuilder` to `TemplateSystemPromptBuilder` pointing at the
+126	  new template via absolute `file://` path (keeps config coherent; the eval loop
+127	  picks the template up via `_resolve_system_prompt`). Rest of pipeline unchanged.
+128	
+129	### Evidence
+130	
+131	- `task_000748_c9807703` last assistant turns: "The script is working correctly /
+132	  complete" then summarizes stripping `error[E` down to `0502` — never re-checks
+133	  the required `E0502` literal survived; verifier asserts `'E0502' in '0502\n'`.
+134	- `task_001090_c61c71f2` final_pytest: `Process name is 'bash', expected 'monitor'`
+135	  and JSON list-vs-dict mismatch — stopped without validating output shape.
+136	- `task_000933_1f27096a` final_pytest: `Extracted graph_math_double binary not
+137	  found` — stopped without verifying tarball contents.
+138	- `task_000578_cebe85a5` / `task_001031_a8f0eb37` final_pytest: required
+139	  `results.json` never created at the exact path — no exit-time `ls` check.
+140	- Confirmed `_resolve_system_prompt` now returns the new 3874-char template with a
+141	  Definition-of-Done section (verified in-session), proving the change reaches the
+142	  agent on this eval path.
+143	
+144	### Uncertainty
+145	
+146	The prompt won't fix pure single-chat transport timeouts (010/015/028/264 etc. die
+147	on `chat failed: timed out`) or genuine capability/algorithm gaps (396 deviation,
+148	1937 grid value, 1781 deadlock logic, security classifier 505/1701) — those are not
+149	Instruction-addressable. If the survey/verify discipline adds enough steps that a
+150	short passing task now runs long or a mid-work timeout gets triggered more often,
+151	pass_rate could dip; the rollback trigger covers that. If R3 shows the verify
+152	discipline flips several of the predicted tasks, consider tightening the prompt's
+153	step-efficiency guidance.

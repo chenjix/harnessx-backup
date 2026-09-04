@@ -1,0 +1,174 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""Heredoc-aware Bash edit detector for TB2.
+4	
+5	Motivation
+6	----------
+7	The stock ``benchmarks.terminal_bench_2.harness.CustomEditToolProcessor``
+8	counts file "edits" by scanning a Bash command for write redirects
+9	(``>``, ``>>``, ``sed -i``, ``tee``).  On TB2 the only tool is ``Bash``,
+10	so the dominant file-authoring idiom is a single heredoc write:
+11	
+12	    cat > /home/user/foo.py << 'EOF'
+13	    ... python source ...
+14	    EOF
+15	
+16	The stock ``_extract_written_files`` scans the *entire* command string,
+17	heredoc body included.  Any ``>`` inside the body — e.g. a Python
+18	comparison ``if size > max_size:`` or an awk clause ``> $ERROR_THRESHOLD``
+19	— is misread as a write redirect, producing bogus "written files" such as
+20	``max_size:``, ``SIZE_THRESHOLD:``, ``=`` or ``0.02,``.  These phantom
+21	paths inflate the per-file edit counter and, worse, fire spurious
+22	``[EditDetection] File \`SIZE_THRESHOLD:\` has been modified more than N
+23	times`` warnings.  Observed across multiple TB2 trajectories; on
+24	task_000118 three phantom warnings fired at once and drove the model into
+25	an unproductive delete-and-recreate loop that never reached the real bug.
+26	
+27	Fix
+28	---
+29	Strip heredoc bodies before extracting write targets, so a single
+30	``cat > file << EOF ... EOF`` counts as exactly one edit to exactly one
+31	file (the redirect target on the opening line) and the body's ``>``
+32	characters are treated as data, not commands.  Legitimate over-edit
+33	detection on genuinely repeated writes is preserved unchanged.
+34	
+35	This class is otherwise a drop-in replacement for the stock
+36	``CustomEditToolProcessor`` — same hook wiring, same singleton group,
+37	same ``threshold`` knob, same warning text.
+38	"""
+39	
+40	from __future__ import annotations
+41	
+42	import dataclasses
+43	import re
+44	
+45	from harnessx.core.events import (
+46	    TaskStartEvent,
+47	    ToolCallEvent,
+48	    ToolResultEvent,
+49	    TaskEndEvent,
+50	)
+51	from harnessx.core.processor import MultiHookProcessor
+52	
+53	# Mirror the stock patterns so behaviour on non-heredoc commands is identical.
+54	_REDIRECT_WRITE_RE = re.compile(r"(?<![<>2&\d])>{1,2}\s*([^\s;&|><\n'\"]+)")
+55	_SED_INPLACE_RE = re.compile(
+56	    r"\bsed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|-i\S*)\s+\S+\s+([^\s;&|><\n'\"]+)"
+57	)
+58	_TEE_WRITE_RE = re.compile(r"\btee\s+(?:-\S+\s+)*([^\s;&|><\n'\"]+)")
+59	_SKIP_PATH_RE = re.compile(r"^(/dev/|/proc/|/sys/|-|\d+$)")
+60	
+61	# Matches a heredoc opener and captures the delimiter word.  Handles the
+62	# common forms:  << EOF, <<-EOF, << 'EOF', << "EOF", <<EOF
+63	_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+64	
+65	_EDIT_LIMIT_WARN = (
+66	    "\n\n[EditDetection] File `{path}` has been modified more than {threshold} times. "
+67	    "You are over-editing this file — step back and try a fundamentally different approach."
+68	)
+69	
+70	
+71	def _strip_heredoc_bodies(cmd: str) -> str:
+72	    """Remove the body of every heredoc in ``cmd``, keeping the opener line.
+73	
+74	    The opener line is retained so the ``cat > file << EOF`` redirect target
+75	    is still counted; only the interior lines (up to and including the
+76	    closing delimiter) are dropped.  If a heredoc is unterminated (no closing
+77	    delimiter found) the remainder of the command is dropped, which is the
+78	    safe choice — an unterminated body cannot contain real write commands
+79	    for our purposes.
+80	    """
+81	    lines = cmd.split("\n")
+82	    out: list[str] = []
+83	    i = 0
+84	    n = len(lines)
+85	    while i < n:
+86	        line = lines[i]
+87	        out.append(line)
+88	        # A single physical line can open multiple heredocs; the delimiters
+89	        # close in the order they were opened.
+90	        openers = _HEREDOC_OPEN_RE.findall(line)
+91	        if openers:
+92	            delimiters = [d for _, d in openers]
+93	            i += 1
+94	            # Consume body lines until every delimiter has been closed.
+95	            while i < n and delimiters:
+96	                body_line = lines[i]
+97	                if body_line.strip() == delimiters[0]:
+98	                    delimiters.pop(0)
+99	                i += 1
+100	            continue
+101	        i += 1
+102	    return "\n".join(out)
+103	
+104	
+105	def _extract_written_files(cmd: str) -> list[str]:
+106	    """Return deduplicated file paths that a bash command writes to.
+107	
+108	    Heredoc bodies are stripped first so ``>`` characters inside written
+109	    file content are not misread as redirects.
+110	    """
+111	    scan = _strip_heredoc_bodies(cmd)
+112	    if ">" not in scan and "sed" not in scan and "tee" not in scan:
+113	        return []
+114	    paths: set[str] = set()
+115	    for pattern in (_REDIRECT_WRITE_RE, _SED_INPLACE_RE, _TEE_WRITE_RE):
+116	        for m in pattern.finditer(scan):
+117	            p = m.group(1).strip("'\"")
+118	            if p and not _SKIP_PATH_RE.match(p):
+119	                paths.add(p)
+120	    return list(paths)
+121	
+122	
+123	class HeredocAwareEditToolProcessor(MultiHookProcessor):
+124	    """Detect repeated Bash-based file edits, ignoring heredoc body content.
+125	
+126	    Drop-in replacement for the stock ``CustomEditToolProcessor``: same hook
+127	    surface, same ``threshold`` semantics, same warning text.  The only
+128	    behavioural difference is that ``cat > file << EOF ... EOF`` counts as a
+129	    single edit of ``file`` and the heredoc body's ``>`` characters no longer
+130	    manufacture phantom file paths.
+131	    """
+132	
+133	    _singleton_group = "bash_edit_detector"
+134	    _order = 30
+135	
+136	    def __init__(self, threshold: int = 7) -> None:
+137	        self.threshold = threshold
+138	        self._edit_counts: dict[str, int] = {}
+139	        self._pending: dict[str, list[str]] = {}
+140	
+141	    async def on_task_start(self, event: TaskStartEvent):
+142	        self._edit_counts.clear()
+143	        self._pending.clear()
+144	        yield event
+145	
+146	    async def on_before_tool(self, event: ToolCallEvent):
+147	        if event.tool_name == "Bash":
+148	            paths = _extract_written_files(event.tool_input.get("command", ""))
+149	            if paths:
+150	                self._pending[event.tool_call_id] = paths
+151	        yield event
+152	
+153	    async def on_after_tool(self, event: ToolResultEvent):
+154	        paths = self._pending.pop(event.tool_call_id, [])
+155	        injections: list[str] = []
+156	        for path in paths:
+157	            count = self._edit_counts.get(path, 0) + 1
+158	            self._edit_counts[path] = count
+159	            if count > self.threshold:
+160	                injections.append(
+161	                    _EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold)
+162	                )
+163	                self._edit_counts[path] = 0
+164	        if injections:
+165	            yield dataclasses.replace(
+166	                event, result=(event.result or "") + "".join(injections)
+167	            )
+168	        else:
+169	            yield event
+170	
+171	    async def on_task_end(self, event: TaskEndEvent):
+172	        self._edit_counts.clear()
+173	        self._pending.clear()
+174	        yield event

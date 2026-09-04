@@ -1,0 +1,36 @@
+14:All processor classes are kept in this module so that YAML round-trip
+21:import dataclasses
+39:from harnessx.core.processor import MultiHookProcessor
+60:def _extract_written_files(cmd: str) -> list[str]:
+79:_SELF_VERIFY_TOOL = "_tb2_self_verify"
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+109:    _singleton_group = "tb2_self_verify"
+112:    def __init__(self) -> None:
+116:    async def on_task_start(self, event: TaskStartEvent):
+121:    async def on_before_model(self, event: BeforeModelEvent):
+128:        yield dataclasses.replace(
+133:    async def on_after_model(self, event: ModelResponseEvent):
+143:            yield dataclasses.replace(event, tool_calls=(keepalive,))
+147:    async def on_before_tool(self, event: ToolCallEvent):
+149:            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+153:    async def on_task_end(self, event: TaskEndEvent):
+159:class CustomEditToolProcessor(MultiHookProcessor):
+171:    def __init__(self, threshold: int = 7) -> None:
+176:    async def on_task_start(self, event: TaskStartEvent):
+181:    async def on_before_tool(self, event: ToolCallEvent):
+188:    async def on_after_tool(self, event: ToolResultEvent):
+198:            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+202:    async def on_task_end(self, event: TaskEndEvent):
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+230:    def __init__(
+240:    async def on_task_start(self, event: TaskStartEvent):
+245:    async def on_step_start(self, event: StepStartEvent):
+266:            yield dataclasses.replace(
+274:    async def on_task_end(self, event: TaskEndEvent):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+296:    def __init__(self, drop_threshold: int = 5) -> None:
+300:    async def on_task_start(self, event: TaskStartEvent):
+304:    async def on_step_start(self, event: StepStartEvent):
+341:        yield dataclasses.replace(
+347:    async def on_task_end(self, event: TaskEndEvent):
+400:class _StaticSystemPromptBuilder(BaseSystemPromptBuilder):

@@ -1,0 +1,69 @@
+1	# Evolve Journal — tmax-coev-rep15-i1
+2	
+3	## Round 1 — break repetition loops
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_repetition_loop_breaker_v1
+9	levers: [control, configuration]
+10	predicted_affected: [task_000118_3043e92d]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Closes the budget_exceeded-via-verbatim-narration-loop failure class harness-wide; reclaims step budget on any task where the model degenerates into repeated narration"
+15	regression_risk: "False-positive loop detection on legitimate multi-turn reasoning that happens to repeat a 400-char prefix 3x; mitigated by min_content_chars=200 and tool-call reset"
+16	cost_shift: "Net cheaper — looping tasks terminate early instead of burning all steps; ~0 added cost on non-looping tasks (cheap per-turn fingerprint)"
+17	rollback_trigger: "If task_000118 still budget_exceeded OR any previously-passing task regresses to loop_detected/error with the breaker firing, revert"
+18	-->
+19	
+20	### Why
+21	
+22	`task_000118_3043e92d` failed `budget_exceeded` at 80 steps / 924s.
+23	The agent entered a degenerate repetition loop: it emitted the same
+24	long reasoning block ("The user is right - I've been stuck in a loop...
+25	In the earlier test: - Second 1: Disk size 4096 bytes...") verbatim on
+26	~10+ consecutive turns, each cut off by the token limit and re-primed by
+27	a passive "please continue" nudge. The existing
+28	`LengthTruncationRecoveryProcessor` fired but its soft escalating nudge
+29	was ignored on every turn — the model's own stale narration in the
+30	context window outweighed a one-line user message, and several looping
+31	turns did not even carry `finish_reason=length` so the length processor
+32	never triggered on them. The agent *could* act correctly when it briefly
+33	broke out (it ran real Bash commands and observed the 200MB log dir at
+34	line 218) but immediately fell back into the loop and never recovered.
+35	This is a mechanical context pathology, not a missing capability.
+36	
+37	### Changes
+38	
+39	- `processors/repetition_loop_breaker.py` — new `RepetitionLoopBreaker`
+40	  `MultiHookProcessor`. Fingerprints normalised prefixes of consecutive
+41	  tool-less assistant turns; on ≥3 near-identical repeats it prunes the
+42	  poisoned duplicate assistant messages (and passive continue nudges)
+43	  from context and injects one decisive "one Bash command only" redirect.
+44	  Content-agnostic — names no task, path, or constant.
+45	- `config.yaml` — register `RepetitionLoopBreaker` (order 6, after
+46	  length-recovery, before compaction); lower
+47	  `LengthTruncationRecoveryProcessor.head_chars` 1200→700 so collapsed
+48	  runaway narration re-primes the next completion less strongly.
+49	
+50	### Evidence
+51	
+52	- `task_000118_3043e92d` result.json: `agent.finished=budget_exceeded`,
+53	  `steps=80`, `elapsed_s=924.4`, `reward=0`.
+54	- messages.json turns (lines 10-13, 26-29, 46-49, 62-65, 78-81, 94-97,
+55	  244, 252, 260, 268...) are byte-for-byte identical narration prefixes.
+56	- messages.json lines 15-16 / 22-24 / 30-32: passive
+57	  "cut off by the token limit... continue" nudges re-priming the loop.
+58	- Final pytest: peak log dir 209715200 B > 45000000 B threshold — the
+59	  monitor bug was never fixed because the loop consumed the step budget.
+60	
+61	### Uncertainty
+62	
+63	Risk is a false positive on genuine repeated reasoning. Guarded by
+64	requiring ≥3 consecutive tool-less turns with an identical 400-char
+65	normalised prefix, each ≥200 chars, and a full reset the moment any
+66	tool call fires. Worst case on a false positive is one extra redirect
+67	message and a slightly trimmed context — benign. If the breaker fires
+68	on a previously-passing task and regresses it, the rollback trigger
+69	above applies.

@@ -1,0 +1,133 @@
+# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+#
+# Live surfaces MetaAgent may edit:
+#   - processors (this file)
+#   - tool_registry (this file)
+#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+#
+# Runtime-only slots (sandbox_provider, tracer) are injected by
+# recipe.tmax_eval.harness_runner — do not put them here.
+#
+# Per-call output cap is NOT in this YAML: harness_runner sets
+# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+# runaway generation cannot burn an hour of wall-clock on one task.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+# R5 (meta): the ONLY change this round is a single Configuration knob —
+# LengthTruncationRecoveryProcessor.repeat_threshold lowered 2 -> 1 (see below).
+# Evidence: max_tokens truncation ("finish_reason=length, no tool_calls") is a
+# near-perfect FAIL discriminator on this benchmark. R4 messages.json grep of the
+# run-loop's "cut off by the token limit / continue" nudge shows 2-18 events on
+# EACH failing truncation-loop task (task_000730=18, task_000032=16, task_000796=15,
+# task_001016=8, task_001028=7) but ~0 on passing tasks (only task_000267=1, still
+# passed). Two of these (task_000730, task_001028) fail solely because the required
+# output file was never created — the agent burned its step budget re-generating
+# truncated analysis and reached the cap empty-handed. Firing the existing hard
+# escalation nudge ("STOP … one SHORT Bash call that writes the required output
+# file(s) to the path named in the task") on the FIRST truncation instead of the
+# second pulls the file-write directive one action turn earlier — the cheapest shot
+# at landing a best-effort partial before budget_exceeded. Near-zero regression:
+# the nudge only fires on length-truncation, which passing tasks never hit. The
+# command/content-repetition guards were deliberately left untouched: passing
+# iterative tasks reach 5-6 identical full-command repeats (task_000197=6,
+# task_000716=5), overlapping the failing loops, so tightening them carries real
+# regression risk that the truncation signal does not. All processors carried
+# forward from R4 byte-for-byte (meta file:// paths repointed to R5-local copies);
+# system_prompt.txt sidecar copied into R5/.
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /home/user
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  show_project_dir: false
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at:
+  - 0.7
+  - 0.9
+  _hook_: '*'
+# Break max_tokens repetition loops (finish_reason=length, no tool call).
+# Without this, one stuck task can block an entire evolve round.
+# R5 (meta): repeat_threshold lowered 2 -> 1 so the hard escalation nudge
+# (which directs the model to write the required output file to its exact path
+# with ONE short Bash call) fires on the FIRST truncation rather than the second.
+# Rationale + evidence in the pipeline header above. Gated strictly on
+# finish_reason=length & no tool_calls, a condition ~absent on passing tasks, so
+# regression risk is minimal; targets tasks that reach the step cap empty-handed
+# (task_000730, task_001028 both fail on a missing required output file).
+- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+  repeat_threshold: 1
+  head_chars: 1200
+  tail_chars: 600
+  _hook_: '*'
+# R2 (meta): break the *normal-finish* narration repetition loop that
+# LengthTruncationRecoveryProcessor cannot see. Fingerprints assistant content
+# and, after N consecutive look-alike turns, injects an escalating corrective
+# nudge. Mutates messages by at most +1 user turn per chain; no task-specific
+# literals. Carried forward byte-for-byte (repointed to R5-local copy).
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R5/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
+  repeat_threshold: 3
+  escalate_threshold: 5
+  prefix_chars: 120
+  min_content_chars: 40
+  _hook_: '*'
+# R3 (meta): break the *repeated-Bash-command* loop. Keys on the normalized Bash
+# command string over a rolling window and, after repeat_threshold occurrences,
+# injects an escalating nudge. +1 user turn per armed streak; no task-specific
+# literals. Carried forward byte-for-byte (repointed to R5-local copy).
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R5/processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
+  repeat_threshold: 4
+  escalate_threshold: 7
+  window: 12
+  min_cmd_chars: 3
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+# R1 (meta): ensure common verifier test-deps (HTTP client / image-video frame
+# reader / numeric+data libs / config parser) are importable in the container
+# Python. Fires ONCE EARLY (first model response); no-op when modules already
+# present; single Bash round-trip; no task-specific literals. Carried forward
+# byte-for-byte (repointed to R5-local copy).
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R5/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

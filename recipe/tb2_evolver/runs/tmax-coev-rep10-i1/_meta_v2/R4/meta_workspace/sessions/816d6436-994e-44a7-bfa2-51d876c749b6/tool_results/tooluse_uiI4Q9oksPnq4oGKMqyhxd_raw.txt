@@ -1,0 +1,18 @@
+=== 000028 task prompt (first user msg) ===
+You are an infrastructure engineer automating the provisioning of a video analysis microservice. We have a partially complete setup that is currently failing. An Nginx reverse proxy is configured to expose the service, but it is returning a 502 Bad Gateway because it is pointing to the wrong upstream UNIX socket path.
+
+Your objectives:
+1. **Fix Nginx Routing**: Inspect and fix the Nginx configuration at `/app/nginx.conf`. It currently routes requests to an incorrect UNIX socket. Update it to point to `/tmp/video_backend.sock`.
+2. **Fix and Update C++ Backend**: 
+   - We have a basic C++ HTTP socket server at `/app/server.cpp`. It is currently configured to listen on the wrong socket. Update it to listen on `/tmp/video_backend.sock`.
+   - Update the C++ code to analyze the video file located at `/app/video.mp4`. The server must dynamically calculate the exact total number of video frames in this file (you may use `ffprobe`, which is preinstalled, by shelling out from C++).
+   - The server must respond to any HTTP GET request with `HTTP/1.1 200 OK` and the body containing ONLY the integer frame count of the video.
+3. **Compile and Run**: Compile the C++ server into an executable at `/app/server`. Run it in the background. Its standard output and standard error must be appended to `/app/server.log`.
+4. **Log Configuration**: Create a logrotate configuration file at `/app/logrotate.conf` to manage `/app/server.log`. It should be configured to rotate daily, keep exactly 3 backups,
+
+=== check if agent used python3 -c import requests anywhere in 000028 ===
+cat > /app/server.cpp << 'EOF' #include <iostream> #include <sys/socket.h> #include <sys/un.h> #include <unistd.h> #include <string> #include <cstring
+cat > /app/server.cpp << 'EOF' #include <iostream> #include <sys/socket.h> #include <sys/un.h> #include <unistd.h> #include <string> #include <cstring
+python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/').read().decode())"
+python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/').read().decode())"
+python3 -c "import urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8080/'); print('Status:', r.status); print('Body:', r.read().decode())

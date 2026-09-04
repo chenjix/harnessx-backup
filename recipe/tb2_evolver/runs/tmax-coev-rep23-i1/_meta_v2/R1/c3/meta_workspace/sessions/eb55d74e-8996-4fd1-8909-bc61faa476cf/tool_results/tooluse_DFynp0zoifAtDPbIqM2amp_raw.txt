@@ -1,0 +1,88 @@
+1	# Candidates — Round 1, proposal c3
+2	
+3	Assigned focus: `task_000118_3043e92d` (system_administration) fails —
+4	`reward=0`, `final_pytest` peak log dir size = 209,715,200 bytes vs
+5	threshold 45,000,000. Agent wrote a `deployment_monitor.py` daemon but
+6	it never truncated logs during the grader's run.
+7	
+8	## Candidate C-001
+9	[lens: failure | lever: control | intent: corrective]
+10	
+11	Replace the stock `CustomEditToolProcessor` with a heredoc-aware variant
+12	that strips heredoc bodies before extracting Bash write targets, so a
+13	single `cat > file << EOF ... EOF` counts as one edit of one file and the
+14	body's `>` characters no longer manufacture phantom "written files" and
+15	spurious `[EditDetection]` over-edit warnings.
+16	
+17	- Tasks affected (corrective focus + generalization cluster):
+18	  - primary: `task_000118_3043e92d` (fail)
+19	  - same phantom-path mechanism observed: `task_001937_ac874115`
+20	    (fail; phantom paths `$ERROR_THRESHOLD)}` and `0.02,`),
+21	    `task_000118_3043e92d` (phantom `SIZE_THRESHOLD:`, `=`)
+22	- Signal: trajectory `messages.json` contains
+23	  `[EditDetection] File \`SIZE_THRESHOLD:\``, `File \`=\``,
+24	  `File \`$ERROR_THRESHOLD)}\``, `File \`0.02,\`` — none of these are
+25	  real files. They are fragments of heredoc / awk bodies containing `>`
+26	  comparisons. `_REDIRECT_WRITE_RE` in
+27	  `benchmarks/terminal_bench_2/harness.py::_extract_written_files` scans
+28	  the whole command string, heredoc body included.
+29	- Verified (Read):
+30	  - `task_000118_3043e92d/messages.json` — after the agent runs
+31	    `rm -f .../deployment_monitor.py && cat > .../deployment_monitor.py << 'EOF' ... SIZE_THRESHOLD = 40 * 1024 * 1024 ... if size > max_size: ... EOF`,
+32	    the tool result appends THREE simultaneous warnings:
+33	    ``[EditDetection] File `/home/user/deployment_monitor.py` ...``,
+34	    ``File `SIZE_THRESHOLD:` ...``, ``File `=` ...``. The very next
+35	    assistant turn reads: "I keep making the same mistake ... The system
+36	    is detecting excessive edits ... decided to delete the file and
+37	    create it fresh" — i.e. the phantom warnings actively drove the
+38	    model into an unproductive delete/recreate loop instead of debugging
+39	    the real (test-timing) bug.
+40	  - `task_001937_ac874115/messages.json` — same shape: phantom
+41	    ``File `$ERROR_THRESHOLD)}`` and ``File `0.02,`` warnings alongside
+42	    the real `report.txt`.
+43	  - Reproduced offline: fixed `_extract_written_files` on the exact
+44	    task_000118 heredoc yields only `['/home/user/deployment_monitor.py']`
+45	    (stock yields that PLUS `max_size:`); plain `>`/`>>`/awk redirects on
+46	    non-heredoc commands are extracted identically to stock.
+47	- Why Control not Instruction: the defect is a mechanical
+48	  false-positive in a processor's command parser, not missing agent
+49	  knowledge. No prompt rule can suppress a warning the harness itself
+50	  injects into tool results; the fix must live in the parser that
+51	  produces the warning. And it is not Configuration — no existing knob
+52	  (only `threshold`) can distinguish real writes from heredoc-body
+53	  fragments; the extraction logic itself is wrong.
+54	- Why not Action: no new agent capability is needed; `Bash` already
+55	  writes files fine. The gap is a harness signal corrupting the
+56	  conversation, addressed entirely inside an `on_after_tool` hook.
+57	- Retroactive check (A-corrective): partial-yes. Removing the phantom
+58	  `[EditDetection]` warnings removes the specific derailer that pushed
+59	  task_000118 into the delete/recreate loop and consumed steps it needed
+60	  for the real bug (its self-test used `sleep 1` before deploy and saw a
+61	  clean 4K result, masking the 209MB grader outcome). The underlying
+62	  monitor-timing bug is a model reasoning gap the harness should not
+63	  encode — but the harness was ACTIVELY MISLEADING the agent here, and
+64	  removing that noise materially raises the odds the agent debugs the
+65	  real issue. This is a genuine harness deficiency regardless of whether
+66	  it alone flips the task.
+67	- expected_global_gain: removes a false-signal class that fires on ANY
+68	  task authoring multi-line files via heredoc (the dominant TB2
+69	  file-creation idiom under a Bash-only tool) whose body contains `>`
+70	  (Python comparisons/pipes, awk, shell here-strings). ≥2 distinct tasks
+71	  observed already; the true population is larger since most code-writing
+72	  tasks use heredocs. Reduces wasted steps + confusion on the whole
+73	  code-authoring cluster.
+74	- regression_risk: very low. On non-heredoc commands the extractor is
+75	  byte-for-byte identical to stock (same 3 regexes, same skip filter),
+76	  so legitimate over-edit detection on genuinely repeated `>`/`sed -i`/
+77	  `tee` writes is unchanged. The only behavioural delta is that heredoc
+78	  bodies stop generating write targets — which is strictly correct. Edge
+79	  cases (unterminated heredoc, multiple heredocs per line) are handled
+80	  and unit-tested.
+81	- cost_shift: neutral-to-slightly-negative (cheaper). Fewer spurious
+82	  warnings → fewer confused recovery turns → fewer tokens on tasks that
+83	  previously thrashed on phantom over-edit alerts. No added per-step
+84	  work beyond a linear body strip.
+85	
+86	Rollback trigger: if global pass_rate drops or the code-authoring
+87	cluster regresses, revert to
+88	`benchmarks.terminal_bench_2.harness.CustomEditToolProcessor`.

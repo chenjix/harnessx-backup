@@ -1,0 +1,182 @@
+61	    "role": "tool",
+62	    "content": "(exit 0, no output captured)",
+63	    "tool_call_id": "chatcmpl-tool-89a3a4b6522f8c69",
+64	    "name": "Bash"
+65	  },
+66	  {
+67	    "role": "assistant",
+68	    "content": "Let me verify the server is running and listening on port 9090.",
+69	    "tool_calls": [
+70	      {
+71	        "id": "chatcmpl-tool-86383154f6ce3468",
+72	        "type": "function",
+73	        "function": {
+74	          "name": "Bash",
+75	          "arguments": "{\"command\": \"sleep 1 && netstat -tlnp 2>/dev/null | grep 9090 || ss -tlnp | grep 9090\"}"
+76	        }
+77	      }
+78	    ]
+79	  },
+80	  {
+81	    "role": "tool",
+82	    "content": "bash: line 1: ss: command not found\n\n(exit 1)",
+83	    "tool_call_id": "chatcmpl-tool-86383154f6ce3468",
+84	    "name": "Bash"
+85	  },
+86	  {
+87	    "role": "assistant",
+88	    "content": "Let me try another way to check if the server is running.",
+89	    "tool_calls": [
+90	      {
+91	        "id": "chatcmpl-tool-994c3c6dbb80e738",
+92	        "type": "function",
+93	        "function": {
+94	          "name": "Bash",
+95	          "arguments": "{\"command\": \"ps aux | grep mesh_server | grep -v grep\"}"
+96	        }
+97	      }
+98	    ]
+99	  },
+100	  {
+101	    "role": "tool",
+102	    "content": "root          66  0.0  0.0   4364  1792 ?        S    00:28   0:00 bash -lc cd /home/user && nohup ./mesh_server > /dev/null 2>&1 &\nroot          67  0.0  0.0   2776  1676 ?        S    00:28   0:00 ./mesh_server\n",
+103	    "tool_call_id": "chatcmpl-tool-994c3c6dbb80e738",
+104	    "name": "Bash"
+105	  },
+106	  {
+107	    "role": "assistant",
+108	    "content": "The server is running. Let me test it by connecting with a client and sending a digit to verify it works correctly.",
+109	    "tool_calls": [
+110	      {
+111	        "id": "chatcmpl-tool-985318b926f0c175",
+112	        "type": "function",
+113	        "function": {
+114	          "name": "Bash",
+115	          "arguments": "{\"command\": \"echo \\\"0\\\" | nc -q 1 127.0.0.1 9090\"}"
+116	        }
+117	      }
+118	    ]
+119	  },
+120	  {
+121	    "role": "tool",
+122	    "content": "bash: line 1: nc: command not found\n\n(exit 127)",
+123	    "tool_call_id": "chatcmpl-tool-985318b926f0c175",
+124	    "name": "Bash"
+125	  },
+126	  {
+127	    "role": "assistant",
+128	    "content": "Let me try using a different approach to test the server - I can use Python or write a simple test script.",
+129	    "tool_calls": [
+130	      {
+131	        "id": "chatcmpl-tool-918cf471516ed554",
+132	        "type": "function",
+133	        "function": {
+134	          "name": "Bash",
+135	          "arguments": "{\"command\": \"python3 -c \\\"import socket; s = socket.socket(); s.connect(('127.0.0.1', 9090)); s.send(b'0\\\\n'); print(s.recv(100).decode()); s.close()\\\"\"}"
+136	        }
+137	      }
+138	    ]
+139	  },
+140	  {
+141	    "role": "tool",
+142	    "content": "8.25\n\n",
+143	    "tool_call_id": "chatcmpl-tool-918cf471516ed554",
+144	    "name": "Bash"
+145	  },
+146	  {
+147	    "role": "assistant",
+148	    "content": "Let me verify this is correct. For quadrant 0 (Top-Left):\n- Original 2x2: 1.0, 2.0, 5.0, 6.0\n- Refined 4x4:\n  ```\n  1.0  1.0  2.0  2.0\n  1.0  1.0  2.0  2.0\n  5.0  5.0  6.0  6.0\n  5.0  5.0  6.0  6.0\n  ```\n\n- Reference: 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 5.0, 0.0, 6.0, 0.0, 0.0, 5.0, 0.0, 6.0\n\nLet me calculate MSE:\n- (1-1)² + (1-0)² + (1-2)² + (1-0)² + (2-0)² + (2-1)² + (2-0)² + (2-2)² + (5-5)² + (5-0)² + (6-6)² + (6-0)² + (6-0)² + (6-5)² + (6-0)² + (6-6)²\n- = 0 + 1 + 1 + 1 + 4 + 1 + 4 + 0 + 0 + 25 + 0 + 36 + 36 + 1 + 36 + 0\n- = 146\n- MSE = 146/16 = 9.125\n\nHmm, that doesn't match 8.25. Let me recalculate...\n\nActually wait, let me re-read the refined grid. The refined grid should be:\n- Row 0: 1.0, 1.0, 2.0, 2.0\n- Row 1: 1.0, 1.0, 2.0, 2.0\n- Row 2: 5.0, 5.0, 6.0, 6.0\n- Row 3: 5.0, 5.0, 6.0, 6.0\n\nAnd the reference is: 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 5.0, 0.0, 6.0, 0.0, 0.0, 5.0, 0.0, 6.0\n\nLet me compute element by element:\n- (1-1)² = 0\n- (1-0)² = 1\n- (2-2)² = 0\n- (2-0)² = 4\n- (1-0)² = 1\n- (1-1)² = 0\n- (2-0)² = 4\n- (2-2)² = 0\n- (5-5)² = 0\n- (5-0)² = 25\n- (6-6)² = 0\n- (6-0)² = 36\n- (5-0)² = 25\n- (5-5)² = 0\n- (6-0)² = 36\n- (6-6)² = 0\n\nSum = 0+1+0+4+1+0+4+0+0+25+0+36+25+0+36+0 = 132\nMSE = 132/16 = 8.25 ✓\n\nThe server is working correctly! Let me test the other quadrants as well.",
+149	    "tool_calls": [
+150	      {
+151	        "id": "chatcmpl-tool-a684c4ea144bc5bc",
+152	        "type": "function",
+153	        "function": {
+154	          "name": "Bash",
+155	          "arguments": "{\"command\": \"python3 -c \\\"import socket; s = socket.socket(); s.connect(('127.0.0.1', 9090)); s.send(b'1\\\\n'); print(s.recv(100).decode()); s.close()\\\"\"}"
+156	        }
+157	      }
+158	    ]
+159	  },
+160	  {
+161	    "role": "tool",
+162	    "content": "12.75\n\n",
+163	    "tool_call_id": "chatcmpl-tool-a684c4ea144bc5bc",
+164	    "name": "Bash"
+165	  },
+166	  {
+167	    "role": "assistant",
+168	    "content": "Let me verify quadrant 1:\n- Original 2x2 (Top-Right): 3.0, 4.0, 7.0, 8.0\n- Refined 4x4:\n  ```\n  3.0  3.0  4.0  4.0\n  3.0  3.0  4.0  4.0\n  7.0  7.0  8.0  8.0\n  7.0  7.0  8.0  8.0\n  ```\n\n- Reference: 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0, 7.0, 0.0, 8.0, 0.0, 0.0, 7.0, 0.0, 8.0\n\nMSE calculation:\n- (3-3)² = 0\n- (3-0)² = 9\n- (4-4)² = 0\n- (4-0)² = 16\n- (3-0)² = 9\n- (3-3)² = 0\n- (4-0)² = 16\n- (4-4)² = 0\n- (7-7)² = 0\n- (7-0)² = 49\n- (8-8)² = 0\n- (8-0)² = 64\n- (7-0)² = 49\n- (7-7)² = 0\n- (8-0)² = 64\n- (8-8)² = 0\n\nSum = 0+9+0+16+9+0+16+0+0+49+0+64+49+0+64+0 = 276\nMSE = 276/16 = 17.25\n\nHmm, that doesn't match 12.75. Let me re-check my calculation...\n\nActually, I think I made an error. Let me re-read the reference data for quadrant 1:\nRef 1: 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0, 7.0, 0.0, 8.0, 0.0, 0.0, 7.0, 0.0, 8.0\n\nSo the reference is:\n- Row 0: 3.0, 0.0, 4.0, 0.0\n- Row 1: 0.0, 3.0, 0.0, 4.0\n- Row 2: 7.0, 0.0, 8.0, 0.0\n- Row 3: 0.0, 7.0, 0.0, 8.0\n\nAnd the refined grid is:\n- Row 0: 3.0, 3.0, 4.0, 4.0\n- Row 1: 3.0, 3.0, 4.0, 4.0\n- Row 2: 7.0, 7.0, 8.0, 8.0\n- Row 3: 7.0, 7.0, 8.0, 8.0\n\nLet me recalculate:\n- (3-3)² = 0\n- (3-0)² = 9\n- (4-4)² = 0\n- (4-0)² = 16\n- (3-0)² = 9\n- (3-3)² = 0\n- (4-0)² = 16\n- (4-4)² = 0\n- (7-7)² = 0\n- (7-0)² = 49\n- (8-8)² = 0\n- (8-0)² = 64\n- (7-0)² = 49\n- (7-7)² = 0\n- (8-0)² = 64\n- (8-8)² = 0\n\nSum = 0+9+0+16+9+0+16+0+0+49+0+64+49+0+64+0 = 276\nMSE = 276/16 = 17.25\n\nBut the server returned 12.75. Let me check if there's an issue with my understanding...\n\nActually, wait. Let me re-read the task. The refined grid should be created by taking the 2x2 quadrant and expanding each value to a 2x2 block. So for quadrant 1:\n- Original: 3.0, 4.0, 7.0, 8.0 (in row-major order)\n- Refined: 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0, 7.0, 7.0, 8.0, 8.0, 7.0, 7.0, 8.0, 8.0\n\nHmm, that's what I calculated. Let me check the reference again...\n\nActually, I think I need to re-read the task more carefully. The reference data might be different from what I'm calculating. Let me just trust the server output for now and test all quadrants.",
+169	    "tool_calls": [
+170	      {
+171	        "id": "chatcmpl-tool-b5acedc4e76281e9",
+172	        "type": "function",
+173	        "function": {
+174	          "name": "Bash",
+175	          "arguments": "{\"command\": \"python3 -c \\\"import socket; s = socket.socket(); s.connect(('127.0.0.1', 9090)); s.send(b'2\\\\n'); print(s.recv(100).decode()); s.close()\\\"\"}"
+176	        }
+177	      }
+178	    ]
+179	  },
+180	  {
+181	    "role": "tool",
+182	    "content": "38.25\n\n",
+183	    "tool_call_id": "chatcmpl-tool-b5acedc4e76281e9",
+184	    "name": "Bash"
+185	  },
+186	  {
+187	    "role": "assistant",
+188	    "content": "",
+189	    "tool_calls": [
+190	      {
+191	        "id": "chatcmpl-tool-b9e012c5e4cbc702",
+192	        "type": "function",
+193	        "function": {
+194	          "name": "Bash",
+195	          "arguments": "{\"command\": \"python3 -c \\\"import socket; s = socket.socket(); s.connect(('127.0.0.1', 9090)); s.send(b'3\\\\n'); print(s.recv(100).decode()); s.close()\\\"\"}"
+196	        }
+197	      }
+198	    ]
+199	  },
+200	  {
+201	    "role": "tool",
+202	    "content": "50.75\n\n",
+203	    "tool_call_id": "chatcmpl-tool-b9e012c5e4cbc702",
+204	    "name": "Bash"
+205	  },
+206	  {
+207	    "role": "assistant",
+208	    "content": "Let me verify quadrant 2:\n- Original 2x2 (Bottom-Left): 9.0, 10.0, 13.0, 14.0\n- Refined 4x4:\n  ```\n  9.0  9.0  10.0  10.0\n  9.0  9.0  10.0  10.0\n  13.0  13.0  14.0  14.0\n  13.0  13.0  14.0  14.0\n  ```\n\n- Reference: 9.0, 0.0, 10.0, 0.0, 0.0, 9.0, 0.0, 10.0, 13.0, 0.0, 14.0, 0.0, 0.0, 13.0, 0.0, 14.0\n\nMSE:\n- (9-9)² = 0\n- (9-0)² = 81\n- (10-10)² = 0\n- (10-0)² = 100\n- (9-0)² = 81\n- (9-9)² = 0\n- (10-0)² = 100\n- (10-10)² = 0\n- (13-13)² = 0\n- (13-0)² = 169\n- (14-14)² = 0\n- (14-0)² = 196\n- (13-0)² = 169\n- (13-13)² = 0\n- (14-0)² = 196\n- (14-14)² = 0\n\nSum = 0+81+0+100+81+0+100+0+0+169+0+196+169+0+196+0 = 1092\nMSE = 1092/16 = 68.25\n\nBut the server returned 38.25. There's a discrepancy. Let me re-check my understanding of the task...\n\nActually, I think I may have misunderstood the task. Let me re-read it carefully.\n\nLooking at the reference data again:\n- Ref 0: 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 5.0, 0.0, 6.0, 0.0, 0.0, 5.0, 0.0, 6.0\n\nThis looks like a pattern where every other element is 0.0. So the reference is:\n- Row 0: 1.0, 0.0, 2.0, 0.0\n- Row 1: 0.0, 1.0, 0.0, 2.0\n- Row 2: 5.0, 0.0, 6.0, 0.0\n- Row 3: 0.0, 5.0, 0.0, 6.0\n\nAnd the refined grid for quadrant 0 is:\n- Row 0: 1.0, 1.0, 2.0, 2.0\n- Row 1: 1.0, 1.0, 2.0, 2.0\n- Row 2: 5.0, 5.0, 6.0, 6.0\n- Row 3: 5.0, 5.0, 6.0, 6.0\n\nSo the refined grid has each value repeated 4 times (2x2 block), while the reference has a checkerboard pattern.\n\nLet me recalculate MSE for quadrant 0:\n- (1-1)² = 0\n- (1-0)² = 1\n- (2-2)² = 0\n- (2-0)² = 4\n- (1-0)² = 1\n- (1-1)² = 0\n- (2-0)² = 4\n- (2-2)² = 0\n- (5-5)² = 0\n- (5-0)² = 25\n- (6-6)² = 0\n- (6-0)² = 36\n- (5-0)² = 25\n- (5-5)² = 0\n- (6-0)² = 36\n- (6-6)² = 0\n\nSum = 0+1+0+4+1+0+4+0+0+25+0+36+25+0+36+0 = 132\nMSE = 132/16 = 8.25 ✓\n\nThis matches! So my calculation for quadrant 0 is correct.\n\nNow let me check quadrant 1 again:\n- Original 2x2 (Top-Right): 3.0, 4.0, 7.0, 8.0\n- Refined 4x4:\n  ```\n  3.0  3.0  4.0  4.0\n  3.0  3.0  4.0  4.0\n  7.0  7.0  8.0  8.0\n  7.0  7.0  8.0  8.0\n  ```\n\n- Reference: 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0, 7.0, 0.0, 8.0, 0.0, 0.0, 7.0, 0.0, 8.0\n\nMSE:\n- (3-3)² = 0\n- (3-0)² = 9\n- (4-4)² = 0\n- (4-0)² = 16\n- (3-0)² = 9\n- (3-3)² = 0\n- (4-0)² = 16\n- (4-4)² = 0\n- (7-7)² = 0\n- (7-0)² = 49\n- (8-8)² = 0\n- (8-0)² = 64\n- (7-0)² = 49\n- (7-7)² = 0\n- (8-0)² = 64\n- (8-8)² = 0\n\nSum = 0+9+0+16+9+0+16+0+0+49+0+64+49+0+64+0 = 276\nMSE = 276/16 = 17.25\n\nBut the server returned 12.75. There's a discrepancy of 4.5.\n\nWait, let me re-check the reference data for quadrant 1:\nRef 1: 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0, 7.0, 0.0, 8.0, 0.0, 0.0, 7.0, 0.0, 8.0\n\nHmm, I think I might have misread the reference. Let me look at it again:\n- Row 0: 3.0, 0.0, 4.0, 0.0\n- Row 1: 0.0, 3.0, 0.0, 4.0\n- Row 2: 7.0, 0.0, 8.0, 0.0\n- Row 3: 0.0, 7.0, 0.0, 8.0\n\nWait, that's what I had. Let me recalculate more carefully:\n\nRefined (row-major): 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0, 7.0, 7.0, 8.0, 8.0, 7.0, 7.0, 8.0, 8.0\nReference (row-major): 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0, 7.0, 0.0, 8.0, 0.0, 0.0, 7.0, 0.0, 8.0\n\nDifferences:\n- (3-3)² = 0\n- (3-0)² = 9\n- (4-4)² = 0\n- (4-0)² = 16\n- (3-0)² = 9\n- (3-3)² = 0\n- (4-0)² = 16\n- (4-4)² = 0\n- (7-7)² = 0\n- (7-0)² = 49\n- (8-8)² = 0\n- (8-0)² = 64\n- (7-0)² = 49\n- (7-7)² = 0\n- (8-0)² = 64\n- (8-8)² = 0\n\nSum = 0+9+0+16+9+0+16+0+0+49+0+64+49+0+64+0 = 276\nMSE = 276/16 = 17.25\n\nBut the server returned 12.75. Let me check if there's an issue with my code...\n\nActually, I think I need to re-read the task more carefully. The task says:\n- `0`: Top-Left 2x2 (Rows 0-1, Cols 0-1)\n- `1`: Top-Right 2x2 (Rows 0-1, Cols 2-3)\n- `2`: Bottom-Left 2x2 (Rows 2-3, Cols 0-1)\n- `3`: Bottom-Right 2x2 (Rows 2-3, Cols 2-3)\n\nSo for quadrant 1 (Top-Right), the original 2x2 should be:\n- Row 0, Cols 2-3: 3.0, 4.0\n- Row 1, Cols 2-3: 7.0, 8.0\n\nThat's what I used. So the refined grid should be:\n- Row 0: 3.0, 3.0, 4.0, 4.0\n- Row 1: 3.0, 3.0, 4.0, 4.0\n- Row 2: 7.0, 7.0, 8.0, 8.0\n- Row 3: 7.0, 7.0, 8.0, 8.0\n\nWait, I think I see the issue. Let me re-check my code...\n\nActually, I think the issue might be in how I'm calculating the refined grid. Let me trace through the code:\n\n```c\nint start_row = quadrant / 2;\nint start_col = quadrant % 2;\n\nfor (int i = 0; i < 4; i++) {\n    for (int j = 0; j < 4; j++) {\n        int orig_row = i / 2 + start_row;\n        int orig_col = j / 2 + start_col;\n        refined[i][j] = master_grid[orig_row][orig_col];\n    }\n}\n```\n\nFor quadrant 1:\n- start_row = 1 / 2 = 0\n- start_col = 1 % 2 = 1\n\nSo for refined[0][0]:\n- orig_row = 0 / 2 + 0 = 0\n- orig_col = 0 / 2 + 1 = 1\n- refined[0][0] = master_grid[0][1] = 2.0\n\nWait, that's wrong! For quadrant 1 (Top-Right), the original 2x2 should be:\n- Row 0, Cols 2-3: 3.0, 4.0\n- Row 1, Cols 2-3: 7.0, 8.0\n\nSo refined[0][0] should be 3.0, not 2.0.\n\nI see the issue now. The start_col calculation is wrong. For quadrant 1, start_col should be 2, not 1.\n\nLet me fix the code:",
+209	    "tool_calls": [
+210	      {
+211	        "id": "chatcmpl-tool-9d810761e8fa6725",
+212	        "type": "function",
+213	        "function": {
+214	          "name": "Bash",
+215	          "arguments": "{}"
+216	        }
+217	      }
+218	    ]
+219	  },
+220	  {
+221	    "role": "tool",
+222	    "content": "Error: bash_tool() missing 1 required positional argument: 'command'",
+223	    "tool_call_id": "chatcmpl-tool-9d810761e8fa6725",
+224	    "name": "Bash"
+225	  },
+226	  {
+227	    "role": "assistant",
+228	    "content": "Let me fix the code. The issue is that for quadrant 1, the start_col should be 2, not 1. I need to multiply start_col by 2.",
+229	    "tool_calls": [
+230	      {
+231	        "id": "chatcmpl-tool-8215d49a48a5c7db",
+232	        "type": "function",
+233	        "function": {
+234	          "name": "Bash",
+235	          "arguments": "{\"command\": \"cat > /home/user/mesh_server.c << 'EOF'\\n#include <stdio.h>\\n#include <stdlib.h>\\n#include <string.h>\\n#include <unistd.h>\\n#include <sys/socket.h>\\n#include <netinet/in.h>\\n#include <arpa/inet.h>\\n#include <math.h>\\n\\n// Master 4x4 grid\\nfloat master_grid[4][4] = {\\n    {1.0, 2.0, 3.0, 4.0},\\n    {5.0, 6.0, 7.0, 8.0},\\n    {9.0, 10.0, 11.0, 12.0},\\n    {13.0, 14.0, 15.0, 16.0}\\n};\\n\\n// Reference datasets for each quadrant\\nfloat ref_data[4][16] = {\\n    {1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 5.0, 0.0, 6.0, 0.0, 0.0, 5.0, 0.0, 6.0},\\n    {3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0, 7.0, 0.0, 8.0, 0.0, 0.0, 7.0, 0.0, 8.0},\\n    {9.0, 0.0, 10.0, 0.0, 0.0, 9.0, 0.0, 10.0, 13.0, 0.0, 14.0, 0.0, 0.0, 13.0, 0.0, 14.0},\\n    {11.0, 0.0, 12.0, 0.0, 0.0, 11.0, 0.0, 12.0, 15.0, 0.0, 16.0, 0.0, 0.0, 15.0, 0.0, 16.0}\\n};\\n\\nint main() {\\n    int server_fd, client_fd;\\n    struct sockaddr_in address;\\n    int opt = 1;\\n    socklen_t addr_len;\\n    char buffer[10];\\n    float refined[4][4];\\n    float mse;\\n    \\n    // Create socket\\n    server_fd = socket(AF_INET, SOCK_STREAM, 0);\\n    if (server_fd == -1) {\\n        perror(\\\"Socket creation failed\\\");\\n        return 1;\\n    }\\n    \\n    // Set socket options\\n    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));\\n    \\n    // Configure address\\n    address.sin_family = AF_INET;\\n    address.sin_addr.s_addr = inet_addr(\\\"127.0.0.1\\\");\\n    address.sin_port = htons(9090);\\n    \\n    // Bind socket\\n    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {\\n        perror(\\\"Bind failed\\\");\\n        close(server_fd);\\n        return 1;\\n    }\\n    \\n    // Listen\\n    if (listen(server_fd, 3) < 0) {\\n        perror(\\\"Listen failed\\\");\\n        close(server_fd);\\n        return 1;\\n    }\\n    \\n    printf(\\\"Server listening on 127.0.0.1:9090\\\\n\\\");\\n    \\n    // Accept connections\\n    while (1) {\\n        addr_len = sizeof(address);\\n        client_fd = accept(server_fd, (struct sockaddr *)&address, &addr_len);\\n        if (client_fd == -1) {\\n            perror(\\\"Accept failed\\\");\\n            continue;\\n        }\\n        \\n        // Read quadrant digit\\n        if (read(client_fd, buffer, sizeof(buffer)) <= 0) {\\n            close(client_fd);\\n            continue;\\n        }\\n        \\n        int quadrant = buffer[0] - '0';\\n        \\n        // Extract 2x2 quadrant and refine to 4x4\\n        int start_row = quadrant / 2;\\n        int start_col = (quadrant % 2) * 2;\\n        \\n        for (int i = 0; i < 4; i++) {\\n            for (int j = 0; j < 4; j++) {\\n                int orig_row = i / 2 + start_row;\\n                int orig_col = j / 2 + start_col;\\n                refined[i][j] = master_grid[orig_row][orig_col];\\n            }\\n        }\\n        \\n        // Calculate MSE\\n        mse = 0.0;\\n        for (int i = 0; i < 16; i++) {\\n            mse += (refined[i/4][i%4] - ref_data[quadrant][i]) * (refined[i/4][i%4] - ref_data[quadrant][i]);\\n        }\\n        mse /= 16.0;\\n        \\n        // Send response\\n        char response[32];\\n        sprintf(response, \\\"%.2f\\\\n\\\", mse);\\n        send(client_fd, response, strlen(response), 0);\\n        \\n        close(client_fd);\\n    }\\n    \\n    close(server_fd);\\n    return 0;\\n}\\nEOF\"}"
+236	        }
+237	      }
+238	    ]
+239	  },
+240	  {
+
+[Showing lines 61–240 of 470 total. Use offset=240 to read the next section.]

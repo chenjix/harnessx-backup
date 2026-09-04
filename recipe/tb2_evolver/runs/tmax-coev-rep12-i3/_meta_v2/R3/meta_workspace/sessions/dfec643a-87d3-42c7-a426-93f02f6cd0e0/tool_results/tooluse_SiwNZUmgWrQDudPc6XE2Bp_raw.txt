@@ -1,0 +1,159 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	from __future__ import annotations
+4	
+5	import asyncio
+6	import shlex
+7	from typing import TYPE_CHECKING, Any
+8	
+9	from harnessx.sandbox.base import Sandbox, SandboxProvider
+10	
+11	if TYPE_CHECKING:
+12	    from harnessx.workspace.workspace import Workspace
+13	
+14	_OUTPUT_LIMIT = 8000
+15	
+16	# Temp file inside the container that records the PID of the setsid'd bash
+17	# started by the most recent exec() call.  kill_running() reads this file to
+18	# send SIGTERM/SIGKILL only to that process group, leaving other container
+19	# processes (e.g. background servers started by earlier commands) untouched.
+20	_PGID_FILE = "/tmp/_hx_exec_pgid"
+21	
+22	
+23	class HarborSandbox(Sandbox):
+24	    """Routes exec/read/write through Harbor's ``environment.exec()``."""
+25	
+26	    def __init__(
+27	        self,
+28	        environment: Any,
+29	        workspace_path: str = "/workspace",
+30	        output_limit: int | None = _OUTPUT_LIMIT,
+31	    ) -> None:
+32	        self._env = environment
+33	        self._workspace_path = workspace_path
+34	        self._output_limit = output_limit
+35	
+36	    @property
+37	    def workspace_path(self) -> str:
+38	        return self._workspace_path
+39	
+40	    def _trim(self, text: str) -> str:
+41	        if self._output_limit and len(text) > self._output_limit:
+42	            removed = len(text) - self._output_limit
+43	            return (
+44	                text[: self._output_limit]
+45	                + f"\n[...output truncated: {removed} chars not shown. Use head/tail/grep to target specific output.]"
+46	            )
+47	        return text
+48	
+49	    async def kill_running(self) -> None:
+50	        """Kill only the process group of the most recent exec() call.
+51	
+52	        Reads the PGID saved by exec()'s setsid wrapper and sends SIGTERM then
+53	        SIGKILL to that group.  Processes started by *earlier* exec() calls
+54	        (e.g. background servers) are in different process groups and are
+55	        therefore unaffected.
+56	        """
+57	        try:
+58	            await self._env.exec(
+59	                f"_pid=$(cat {_PGID_FILE} 2>/dev/null);"
+60	                f' [ -n "$_pid" ] || exit 0;'
+61	                f' kill -15 -"$_pid" 2>/dev/null;'
+62	                f" sleep 1;"
+63	                f' kill -9 -"$_pid" 2>/dev/null;'
+64	                f" rm -f {_PGID_FILE}",
+65	                timeout_sec=10,
+66	            )
+67	        except Exception:
+68	            pass
+69	
+70	    async def exec(
+71	        self,
+72	        command: str,
+73	        cwd: str | None = None,
+74	        timeout: float = 30.0,
+75	    ) -> str:
+76	        # Run the command inside a new session via setsid so it gets its own
+77	        # process group (PGID == PID of the setsid'd process).  The PID is
+78	        # saved to _PGID_FILE so kill_running() can target exactly this group
+79	        # without affecting other container processes.
+80	        #
+81	        # stdout/stderr flow through the background job's inherited file
+82	        # descriptors to docker compose exec's client as normal.  The exit
+83	        # code is forwarded via `wait`.
+84	        wrapped = (
+85	            f"setsid bash -c {shlex.quote(command)} &"
+86	            f" _hx_pid=$!;"
+87	            f" printf '%s' \"$_hx_pid\" > {_PGID_FILE};"
+88	            f" wait $_hx_pid"
+89	        )
+90	        try:
+91	            result = await self._env.exec(
+92	                wrapped,
+93	                cwd=cwd or self._workspace_path,
+94	                timeout_sec=int(timeout),
+95	            )
+96	        except BaseException:
+97	            # Harbor raises RuntimeError on timeout (not asyncio.TimeoutError).
+98	            # CancelledError arrives when an outer asyncio.wait_for fires.
+99	            # Either way the setsid'd process is still running — kill it.
+100	            try:
+101	                await asyncio.shield(self.kill_running())
+102	            except Exception:
+103	                pass
+104	            raise
+105	        stdout = result.stdout or ""
+106	        stderr = result.stderr or ""
+107	        output = stdout
+108	        if stderr:
+109	            output = f"{output}\nSTDERR: {stderr}" if output else f"STDERR: {stderr}"
+110	        if not output:
+111	            output = f"(exit {result.return_code}, no output captured)"
+112	        elif result.return_code != 0:
+113	            output = f"{output}\n(exit {result.return_code})"
+114	        return self._trim(output)
+115	
+116	
+117	class HarborSandboxProvider(SandboxProvider):
+118	    """Provider that wraps a Harbor ``BaseEnvironment``.
+119	
+120	    Harbor manages the container lifecycle; this provider has no lifecycle of
+121	    its own — acquire/release are no-ops.
+122	
+123	    Args:
+124	        environment:    A Harbor ``BaseEnvironment`` instance passed in from
+125	                        ``HarnessXAgent.run()``.
+126	        workspace_path: Container-side path used as the default cwd for all
+127	                        tool calls.  Defaults to ``/workspace``; use ``/app``
+128	                        for Terminal Bench 2.0 tasks.
+129	        output_limit:   Truncate exec output to this many characters.
+130	                        Default 4 000 (matches the old hand-rolled limit).
+131	                        Pass ``None`` to disable truncation.
+132	    """
+133	
+134	    def __init__(
+135	        self,
+136	        environment: Any,
+137	        workspace_path: str = "/workspace",
+138	        output_limit: int | None = _OUTPUT_LIMIT,
+139	    ) -> None:
+140	        self._environment = environment
+141	        self._workspace_path = workspace_path
+142	        self._output_limit = output_limit
+143	
+144	    async def acquire(
+145	        self,
+146	        hint_id: str | None = None,
+147	        workspace: "Workspace | None" = None,
+148	    ) -> HarborSandbox:
+149	        return HarborSandbox(
+150	            self._environment,
+151	            workspace_path=self._workspace_path,
+152	            output_limit=self._output_limit,
+153	        )
+154	
+155	    async def release(self, sandbox: Sandbox) -> None:
+156	        pass  # Harbor owns the container lifecycle
+157	
+158	    async def shutdown(self) -> None:
+159	        pass

@@ -1,0 +1,158 @@
+def _build_tool_registry_from_config(cfg: ToolRegistryConfig) -> Any:
+    """Build an InMemoryToolRegistry from a ToolRegistryConfig descriptor.
+
+    Supported ``custom`` target forms:
+      * ``module.path.sub.symbol`` — dotted import path.
+      * ``file:///abs/path/to/file.py::symbol`` — absolute-path file URI,
+        loaded via :func:`importlib.util.spec_from_file_location` (same
+        mechanism the processor loader uses in
+        :mod:`harnessx.core.builder`).
+
+    Load failures are logged at WARNING level rather than silently
+    discarded so the evolver / runner can surface missing tools instead
+    of handing the model an incomplete tool schema.
+    """
+    from ..tools.inmemory import InMemoryToolRegistry
+
+    registry = InMemoryToolRegistry()
+    if cfg.builtin:
+        from ..tools.builtin import build_default_tools
+
+        defaults = build_default_tools()
+        all_tools = getattr(defaults, "_tools", {})
+        for name in cfg.builtin:
+            tool = all_tools.get(name)
+            if tool is not None:
+                registry.register(tool)
+            else:
+                _log.warning(
+                    "tool_registry.builtin: %r is not in the default builtin "
+                    "set (%s); skipping. Move it to tool_registry.custom with "
+                    "a module path or file:// URI if it is a custom tool.",
+                    name,
+                    sorted(all_tools.keys()),
+                )
+    if cfg.custom:
+        import importlib as _importlib
+        import importlib.util as _importlib_util
+        import uuid as _uuid
+
+        for target in cfg.custom:
+            try:
+                if isinstance(target, str) and target.startswith("file://"):
+                    path_part, sym_name = _parse_file_tool_target(target)
+                    spec = _importlib_util.spec_from_file_location(f"_hx_custom_tool_{_uuid.uuid4().hex}", path_part)
+                    if spec is None or spec.loader is None:
+                        raise ImportError(f"cannot build import spec from {path_part!r}")
+                    mod = _importlib_util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    fn = getattr(mod, sym_name)
+                else:
+                    mod_path, sym_name = target.rsplit(".", 1)
+                    mod = _importlib.import_module(mod_path)
+                    fn = getattr(mod, sym_name)
+                registry.register(fn)
+                # Record the original target so later serialization
+                # (via _runtime_registry_to_config) can reproduce the
+                # same ``custom:`` entry, including file:// URIs whose
+                # synthetic module name is meaningless outside this
+                # process.
+                try:
+                    setattr(fn, "__hx_target__", target)
+                except Exception:
+                    # Tool is a dataclass; setattr should work, but if
+                    # someone passed a frozen/slotted object we still
+                    # want the registration itself to stand.
+                    pass
+            except Exception as exc:
+                _log.warning(
+                    "tool_registry.custom: failed to load %r: %s",
+                    target,
+                    exc,
+=== build_default_tools ===
+    Use for GAIA benchmark where tasks may include file attachments
+    (DOCX, XLSX, PDF, CSV, PPTX, images, etc.) AND where the agent
+    needs to draft intermediate notes or navigate its workspace.
+    """
+    from ..inmemory import InMemoryToolRegistry
+
+    registry = InMemoryToolRegistry()
+    for t in [
+        web_search_tool,
+        web_fetch_tool,
+        browser_tool,
+        read_tool,
+        write_tool,
+        edit_tool,
+        glob_tool,
+        grep_tool,
+        bash_tool,
+    ]:
+        registry.register(t)
+
+    return registry
+
+
+def build_gaia_tools_qw():
+    """
+    Registry for small Qwen models: web tools + full filesystem tool set.
+
+    Mirrors build_gaia_tools() (no code_interpreter — small Qwen models
+    reject that tool name). Filesystem tools let the agent open attached
+    files (DOCX, XLSX, PDF, CSV, PPTX, images) and keep intermediate notes.
+    """
+    from ..inmemory import InMemoryToolRegistry
+
+    registry = InMemoryToolRegistry()
+    for t in [
+        web_search_tool,
+        web_fetch_tool,
+        browser_tool,
+        read_tool,
+        write_tool,
+        edit_tool,
+        glob_tool,
+        grep_tool,
+        bash_tool,
+    ]:
+        registry.register(t)
+
+    return registry
+
+
+def build_gaia_tools_full():
+    """
+    Extended GAIA tool set: web tools + file tools + code interpreter.
+    Use for GAIA benchmark where tasks require computation, data analysis,
+    file processing (DOCX, XLSX, PDF, CSV, etc.), and web research.
+    """
+    from ..inmemory import InMemoryToolRegistry
+
+    registry = InMemoryToolRegistry()
+    for t in [web_search_tool, web_fetch_tool, browser_tool, read_tool, bash_tool]:
+        registry.register(t)
+
+    return registry
+
+
+def build_default_tools():
+    """
+    Full default tool set: filesystem (sandbox-aware) + web tools.
+    bash, read, write, edit, glob, grep + web_search, web_fetch, browser.
+
+    All filesystem tools route through the active sandbox (set by Harness.run via
+    get_current_sandbox()).  Without a sandbox they fall back to direct os/subprocess
+    calls.  Use for CLI agents and HarnessDescriptors that need the full tool set.
+    """
+    from ..inmemory import InMemoryToolRegistry
+
+    registry = InMemoryToolRegistry()
+    for t in [
+        bash_tool,
+        read_tool,
+        write_tool,
+        edit_tool,
+        glob_tool,
+        grep_tool,
+        web_search_tool,
+        web_fetch_tool,

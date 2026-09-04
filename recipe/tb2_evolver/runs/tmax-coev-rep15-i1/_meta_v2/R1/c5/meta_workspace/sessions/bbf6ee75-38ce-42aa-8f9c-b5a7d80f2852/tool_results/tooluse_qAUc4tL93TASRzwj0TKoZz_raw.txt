@@ -1,0 +1,239 @@
+65	- `task_001031_a8f0eb37` / `task_001321_658ce4a8`: 33 tool calls each, cycling
+66	  near-identical retries (mpi4py API / output-capture variants) with no pivot.
+67	
+68	### Uncertainty
+69	
+70	The forced-snapshot mechanism is proven to fire in this harness
+71	(`tb2_self_verify` uses the same injected-tool-call path), but whether fresh
+72	state actually lets these particular Qwen3.5-9B runs finish within remaining
+73	budget is the open question — some tasks (recursive-CTE perf, MPI) may also
+74	have a genuine capability gap the harness cannot close. If the cluster does
+75	not shrink at all in R2, the spiral is not the only blocker and the next round
+76	should look upstream (per-turn max_tokens sizing, or task-class capability).
+77	
+78	## Round 2 — final-state process/resource hygiene
+79	
+80	<!-- journal:frontmatter
+81	round: 2
+82	timestamp: 2026-04-27T12:00:00Z
+83	hypothesis_id: h_final_state_hygiene_v1
+84	levers: [control]
+85	predicted_affected: [task_000140_01c78b42, task_001090_c61c71f2]
+86	cited_candidates: [C-001]
+87	gating_outcome: pending
+88	gating_attribution: pending
+89	expected_global_gain: "Flip the TB2 final-container-state failure cluster: tasks whose verifier greps for lingering/misnamed processes or bounded resource footprints (task_000140 lingering vm_service; task_001090 wrong /proc/comm), a verifier family the file-content-only self-verify checklist never probes."
+90	regression_risk: "Low — appends text to the one-shot exit self-verify ack; injects no messages, changes no control flow, fires once per task. Non-service tasks read a few hundred extra tokens once. No passing task depends on leaving processes running unless the task asked for it (clause branches stopped-vs-running)."
+91	cost_shift: "+~350 tokens on the single exit turn per task; +1-3 Bash verify calls near the end on service/resource tasks only. Negligible aggregate, no per-step growth."
+92	rollback_trigger: "If R3 shows task_000140 still failing test_no_lingering_service_processes, or any previously-passing service task regresses (e.g. agent kills a process it was meant to leave running), revert the processor."
+93	-->
+94	
+95	### Why
+96	
+97	Assigned focus task_000140_01c78b42 fails the verifier test
+98	`test_no_lingering_service_processes`: `Lingering vm_service processes found:
+99	['338', '591', '790']`. The task asks the agent to fix a Go service, write a
+100	supervisor script, and build a CI/CD pipeline that starts the service, hits it,
+101	then **gracefully stops it** — so the required END state is "no vm_service
+102	running". The agent implemented everything correctly and ran the pipeline
+103	(step 14) to test it, but the pipeline's `kill -TERM $PID` on the single
+104	recorded PID is racy and misses copies spawned by earlier/repeated pipeline
+105	runs (the verifier re-runs the pipeline). The stock CustomSelfVerifyProcessor
+106	fired at step 20, but the agent's follow-up only re-checked output-file
+107	existence/content and never ran `pgrep`/`ps` to confirm no service lingered.
+108	
+109	The same root cause — the agent not reconciling the final *process* state
+110	against the task's required end-state — recurs at task_001090_c61c71f2, whose
+111	verifier fails `Process name is 'bash', expected 'monitor'` (a wrapper bash left
+112	in front of the real binary instead of `exec`-ing it). Two adjacent
+113	resource-footprint tasks (task_000118 log-dir size, task_000748 leaked bytes)
+114	sit on the same "final container state" verifier axis, so the resource clause is
+115	additive cover. The stock self-verify checklist covers output files and
+116	"is the service still alive" but says nothing about cleanup, process identity,
+117	or bounded resource state — a real harness gap on the TB2 final-state verifier
+118	family.
+119	
+120	### Changes
+121	
+122	- `processors/final_state_hygiene.py` — new `FinalStateHygieneProcessor`
+123	  (MultiHookProcessor). On `on_after_tool`, when the stock `_tb2_self_verify`
+124	  synthetic result appears, appends a task-agnostic final-state process/resource
+125	  hygiene checklist (reconcile running processes vs required stopped/running
+126	  end-state incl. process identity/port; reconcile bounded resource footprints).
+127	  Fires at most once per task; injects no messages; contract-clean.
+128	- `config.yaml` — registered the processor via absolute `file://…::FinalStateHygieneProcessor`
+129	  immediately after `CustomSelfVerifyProcessor` (order 95 so the synthetic
+130	  result exists before we append).
+131	
+132	### Evidence
+133	
+134	- `task_000140_01c78b42` result.json final_pytest: `FAILED
+135	  test_no_lingering_service_processes - AssertionError: Lingering vm_service
+136	  processes found: ['338', '591', '790']`.
+137	- `task_000140` msg 0 (prompt): "gracefully stop the Go service … sending a
+138	  SIGTERM kill signal" — required end-state is service stopped.
+139	- `task_000140` step 14 tool call: `bash /home/user/test_pipeline.sh` (spawns
+140	  `vm_service &`); step 20 `_tb2_self_verify` fired; msg 22 re-checked only files
+141	  (`ls`, `cat vm_setup.log`), never `pgrep vm_service`; msg 26 declared done.
+142	- `task_001090_c61c71f2` result.json tail: `assert comm == "monitor" … 'bash' ==
+143	  'monitor'` — final process-identity mismatch, same reconcile-end-state gap.
+144	
+145	### Uncertainty
+146	
+147	Assumes the model acts on the appended checklist when it reads the exit ack
+148	rather than skimming past it — same instruction-adherence risk as any prompt
+149	guidance, but delivered exactly at the exit decision point via the existing
+150	gate rather than as always-on prompt text. If R3 shows task_000140 still
+151	failing at the lingering-process test, the model is ignoring the exit reminder
+152	and the next escalation is a Control hook that actively runs `pgrep` for
+153	agent-spawned background processes at exit and blocks the exit until they are
+154	resolved. Watch for regressions where the agent over-eagerly kills a process a
+155	task wanted left running — the clause branches on stopped-vs-running to avoid
+156	this, but confirm on any service task that flips F.
+157	
+158	## Round 2 — correctness self-verify (value audit)
+159	
+160	<!-- journal:frontmatter
+161	round: 2
+162	timestamp: 2026-08-30T05:10:00Z
+163	hypothesis_id: h_correctness_self_verify_v1
+164	levers: [control]
+165	predicted_affected: [task_000396_e56917e2, task_000505_50b5162d, task_001653_c4cafa73, task_000140_01c78b42, task_000015_89886d8d]
+166	cited_candidates: [C-001]
+167	gating_outcome: pending
+168	gating_attribution: pending
+169	expected_global_gain: "Flips part of the ~15-task exit_reason=done/reward=0 'silent wrong-answer' cluster (largest R0 failing cluster untouched by R1's budget_exceeded fix) by turning the passive one-shot self-verify into an active correctness audit + forced independent cross-check. Generalizes to any task with a stated success criterion."
+170	regression_risk: "Low — same singleton group tb2_self_verify replaces the stock verify (no net processor added). Barriers fire only on exit-intent turns; phase-2 nudge fires at most once and only when the model re-narrated with zero new tool calls, then always yields to exit, so a genuinely-finished run is never trapped."
+171	cost_shift: "+1 to +3 Bash round-trips on runs that would otherwise rubber-stamp and exit; negligible on runs already doing real verification (they trip the 'new tool call since phase 1' guard and skip phase 2). Net positive vs a wasted 0-reward task."
+172	rollback_trigger: "If R3 pass_rate is flat/down AND the done/reward=0 cluster does not shrink, OR any previously-passing task regresses to done/reward=0 via being pushed to 'fix' a correct value, revert to the stock CustomSelfVerifyProcessor."
+173	-->
+174	
+175	### Why
+176	
+177	R0's largest failing cluster is exit_reason=done + finished=no_tool_calls +
+178	reward=0 (~15 tasks): the agent believed it finished, but the verifier's
+179	VALUE/behaviour assertion (a threshold, an exact match, a clean final state)
+180	failed. The stock `_tb2_self_verify` fired in every one of these cases, yet
+181	the agent rubber-stamped it — re-listing files and declaring "format matches"
+182	— because the stock checklist is existence/format-oriented and the model
+183	narrates straight past the weak "values are correct" item. The assigned
+184	task_000396 is the archetype: the task says the integration "diverges and
+185	fails to match the analytical reference", the verifier wants deviation < 0.1,
+186	the agent computed 0.576768, self-verified only that files exist, and exited —
+187	never reconciling a plainly-non-matching value against the stated goal.
+188	
+189	### Changes
+190	
+191	- `processors/correctness_self_verify.py` — new `MultiHookProcessor`
+192	  `CorrectnessSelfVerifyProcessor` (singleton group `tb2_self_verify`, so it
+193	  REPLACES the stock `CustomSelfVerifyProcessor`). Two exit-intent barriers:
+194	  (1) an adversarial correctness audit that forces reconciling the result
+195	  against the task's stated success criterion, independently re-deriving any
+196	  reported number, and testing on an edge/adversarial input; (2) a terminal
+197	  anti-rubber-stamp nudge that fires only if the model tries to exit again
+198	  with zero new tool calls since barrier 1, insisting on one concrete
+199	  cross-check command before exit. Bounded (phase 2 at most once, then free
+200	  exit). (C-001)
+201	- `config.yaml` — drop the stock
+202	  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` entry, add
+203	  the new `file://` processor at the same pipeline position / singleton group.
+204	
+205	### Evidence
+206	
+207	- `task_000396_e56917e2` msgs 42-53: max deviation `0.576768` written; verify
+208	  fired msg 53; agent re-checked only file existence + `0.25` bug line; exited.
+209	  final_pytest: `assert 0.576768 < 0.1`.
+210	- `task_000505_50b5162d` msgs 15-19: verify fired; agent only re-ran `ls`;
+211	  final_pytest: "2 of 2 evil bypassed" (detector tested only on `/bin/ls`).
+212	- `task_001653_c4cafa73` msgs 11-15: verify fired; agent confirmed "format
+213	  matches exactly"; VALUES wrong (`Centroid: 36.36..` vs `42.00..`).
+214	- `task_000140_01c78b42` msgs 20-26: verify fired; files confirmed; final_pytest
+215	  "Lingering vm_service processes found ['338','591','790']".
+216	- `task_000015_89886d8d` msgs 66-73: verify fired; agent's own passing test did
+217	  not exercise the golden corpus; final_pytest `accuracy 0.3389 < 0.98`.
+218	
+219	### Uncertainty
+220	
+221	Some cluster members (task_001653, task_000015) are partly capability-bound:
+222	the "recompute a second way / test the real corpus" barrier gives a genuine
+223	second chance but cannot conjure correct math the model can't do. The
+224	mechanism is proven to fire (same injected-tool-call path as the stock
+225	verify), and the phase-2 guard bounds cost, but whether these particular
+226	Qwen3.5-9B runs actually act on the audit rather than re-narrating a second
+227	time is the open question. If the cluster does not shrink at all in R3, the
+228	blocker is capability, not verification discipline, and the next round should
+229	look upstream (per-task-class reasoning support), not tighten the barrier.
+230	
+231	## Round 1 — rigorous completion guard (c7)
+232	
+233	<!-- journal:frontmatter
+234	round: 1
+235	timestamp: 2026-08-30T05:02:00Z
+236	hypothesis_id: h_rigorous_completion_guard_v1
+237	levers: [control]
+238	predicted_affected: [task_000015_89886d8d, task_000010_644ab1c2]
+239	cited_candidates: [C-001]
+240	gating_outcome: pending
+241	gating_attribution: pending
+242	expected_global_gain: "Flips/derisks the 'declared done after a shallow check' failure shape — agent finishes after script-ran / sample-matched / file-plausibly-exists without re-deriving the EXACT output contract (keys, exact path, format, accuracy behaviour) from the authoritative source. Generalizes to any task self-advertising a hidden/accuracy-graded eval (OCR-schema, data-migration, service-contract)."
+243	regression_risk: "Low. Guard arms ONLY when task text matches generic rigor-cue vocabulary, so trivial already-passing tasks get no extra turn; bounded at max_fires=2 so it cannot cause an exit-block/budget spiral; additive, +1 user message per fire (contract-verified), ordered right after the existing one-shot CustomSelfVerifyProcessor."
+244	cost_shift: "+0 on non-armed tasks; +1-2 short verification round-trips (plus agent re-checking) on armed tasks. Net-positive when it converts a 0-reward run into a pass or averts wasted retries."
+245	rollback_trigger: "If R2 pass_rate is flat/down AND neither task_000015 nor task_000010 flips AND any previously-passing rigor-advertised task regresses to budget_exceeded/error (exit-block spiral), revert the RigorousCompletionGuard entry."
+246	-->
+247	
+248	### Why
+249	
+250	Assigned cluster: task_000010_644ab1c2 (budget_exceeded, wrong exact path
+251	`k8s_operator.py` vs required `operator.py`) and task_000015_89886d8d
+252	(exit_reason=done, final accuracy 0.3389 < 0.98). Distinct proximate causes,
+253	one shared harness-actionable root: the agent finishes after a SHALLOW check
+254	without re-deriving the exact output contract from the authoritative source and
+255	without stress-testing beyond the provided sample. In task_000015 the OCR of
+256	the schema image clearly carried the true target keys (`category`, `order`,
+257	`traffic_source`) but the agent named its output keys after the sample's own
+258	query params (`department`, `sort_order`) and verified only that its script ran
+259	on the 3-line sample. In task_000010 the agent wrote a plausible-but-wrong path
+260	and never re-confirmed the exact required filename. The truncation-spiral half
+261	of task_000010 is owned by the sibling proposal (h_length_recovery_forceact_v1)
+262	— this candidate ships the complementary completion-discipline mechanism, not a
+263	duplicate length-recovery lever.
+264	
+265	### Changes
+266	
+267	- `processors/rigorous_completion_guard.py` — new `MultiHookProcessor`
+268	  `RigorousCompletionGuard` (singleton group `tb2_rigor_completion_guard`,
+269	  `_order=91`, right after `CustomSelfVerifyProcessor`). Captures
+270	  `task_description` at `on_task_start`; arms only when a generic rigor-cue
+271	  regex matches ("hidden", "massive", "edge-case", "accuracy", "threshold",
+272	  "robust", "property-based", "golden", "test suite will run", …). On an
+273	  exit-intent turn (finish_reason∈{end_turn,stop}, no tool calls) it injects a
+274	  bounded (`max_fires=2`) targeted reminder: re-derive the exact contract from
+275	  the source (not from samples), stress-test edge cases, confirm exact paths.
+276	  Uses the proven keepalive-tool-call exit-intercept path (approved=False +
+277	  synthetic_result), net +1 user message per fire. (C-001)
+278	- `config.yaml` — append the new `file://` processor with `max_fires=2`;
+279	  everything else byte-identical to R0 (length-recovery left untouched so this
+280	  proposal stays orthogonal to the sibling).
+281	
+282	### Evidence
+283	
+284	- `task_000015_89886d8d` msg 37 (Bash writing migrate.py): ROUTES table maps
+285	  `dept→department`, `sort→sort_order` with comments deriving keys from the
+286	  query-param names; msgs 40 & 66 show the only correctness check is running on
+287	  the 3-line `sample_urls.txt`; msg 73 final: "the script works correctly with
+288	  the sample URLs." OCR msgs 4/16/24 show `category`/`order`/`traffic_source`
+289	  were in context and ignored.
+290	- `task_000010_644ab1c2` result.json final_pytest: "Operator script
+291	  /home/user/operator.py does not exist" (agent wrote `k8s_operator.py`);
+292	  exit_reason=budget_exceeded at 80 steps.
+293	
+294	### Uncertainty
+295	
+296	task_000015 is partly a model OCR/reasoning capability limit — the correct
+297	keys were in context and the agent still guessed. The guard raises the odds it
+298	trusts the source over the sample but does not guarantee the flip. For
+299	task_000010 the guard only bites if the run reaches an exit turn before
+300	budget_exceeded, i.e. the sibling's length-recovery has to hold first — so 010
+301	is the secondary target here. If R2 shows no flip on either and no cost spike,
+302	the residual blocker is capability, and the next round should look upstream
+303	(per-turn max_tokens sizing / OCR tooling) rather than at completion discipline.

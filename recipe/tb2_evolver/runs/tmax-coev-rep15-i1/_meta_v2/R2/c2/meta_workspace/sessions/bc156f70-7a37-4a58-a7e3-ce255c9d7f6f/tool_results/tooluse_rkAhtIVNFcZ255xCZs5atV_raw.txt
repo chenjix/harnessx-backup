@@ -1,0 +1,29 @@
+=== PROMPT ===
+You are acting as a capacity planner and systems administrator. We have a simulated rolling deployment system that frequently crashes because the worker processes rapidly exhaust the allowed disk quota in the logging directory during the deployment phase. 
+
+Your task is to write a Python daemon script at `/home/user/deployment_monitor.py` that actively monitors and controls the deployment processes and their storage footprint.
+
+### System Behavior
+We have a deployment simulator located at `/home/user/run_deployment.sh`. When executed, it launches 20 worker processes. Each worker writes continuous chunks of data to its own log file in `/home/user/logs/worker_N.log` until it has written exactly 10 MB of data, after which the worker exits gracefully.
+If the total size of the `/home/user/logs/` directory exceeds 50 MB at any point, the deployment simulator environment will "crash" (simulated disk full), and the deployment will fail.
+
+### Your Objective
+You must write a robust Python script at `/home/user/deployment_monitor.py` that prevents the disk from filling up while allowing the deployment workers to complete their execution.
+
+Your script must do the following in a continuous loop:
+1. Monitor the total disk usage of all files in `/home/user/logs/`.
+2. If the total directory size exceeds **40 MB (40,000,000 bytes)**, your script must:
+   - Identify all currently running worker processes (their command lines will contain `worker_sim.py`).
+   - Send a `SIGSTOP` signal to these processes to pause them immediately so they stop writing.
+   - Truncate all `.log` files in the `/home/user/logs/` directory to 0 bytes to free up storage space. (Do not delete the files, as the processes hold open file handles; truncate them).
+   - Send a `SIGCONT` signal to the paused processes so they can resume their work.
+3. Sleep for a short interval (e.g., 0.1 seconds) to avoid high CPU usage.
+4. Exit cleanly when no more `worker_sim.py` processes are found running.
+
+### Requirements
+- You must write the solution in Python 3.
+- Use only standard library modules (e.g., `os`, `time`, `subprocess`, `signal`, `glob`).
+- Make sure your script handles race conditions gracefully (e.g., a process exiting right before you send a signal).
+- Do not modify `/home/user/run_deployment.sh` or the worker scripts. You are only creating the monitor daemon.
+
+When you are finished creating `/home/user/deployment_monitor.py`, you can test it by running it in the background (`python3 /home/user/deplo

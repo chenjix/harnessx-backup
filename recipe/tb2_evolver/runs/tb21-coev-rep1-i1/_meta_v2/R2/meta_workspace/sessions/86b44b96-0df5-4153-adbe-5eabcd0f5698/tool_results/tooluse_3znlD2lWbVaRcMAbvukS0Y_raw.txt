@@ -1,0 +1,202 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""ContextOverflowGuard — bound per-message and total context size at step_start.
+4	
+5	Motivation (harness deficiency, not a model-knowledge gap)
+6	----------------------------------------------------------
+7	The provider call in the run loop is not wrapped in try/except, so a provider
+8	``400 BadRequest`` (input exceeds the model's real max-context window) propagates
+9	uncaught and terminates the task with ``exit_reason=error`` at step ~0/1 —
+10	before the agent takes any recoverable action.
+11	
+12	The recurring trigger is a *single runaway assistant turn*: the model emits one
+13	enormous ``content`` string (observed 170k–344k characters across many distinct
+14	tasks). On the very next request the transcript exceeds the server's hard input
+15	limit and the whole run dies. The existing ``CompactionProcessor`` cannot help
+16	here because (a) its ``token_threshold`` is tuned above the server's real limit,
+17	and (b) it summarises *older* messages while leaving the single oversized recent
+18	turn intact.
+19	
+20	The stock token counter (``rough_token_count`` / cl100k_base) materially
+21	*undercounts* the real tokenizer for this model and ignores non-``content``
+22	fields, so a token-based budget is unreliable. This guard therefore works on
+23	**character length**, which is a stable, provider-agnostic upper bound on the
+24	transcript size that actually gets serialised into the request body.
+25	
+26	Mechanism
+27	---------
+28	Runs on ``on_step_start`` (the only hook where structural history edits are
+29	contract-legal). For each message in the assembled window:
+30	
+31	1. If any single message's textual ``content`` exceeds ``per_message_char_cap``,
+32	   replace it with a head + tail excerpt joined by a truncation marker. This
+33	   defuses the runaway single-turn dump that is the dominant failure mode.
+34	2. If the whole transcript still exceeds ``total_char_budget``, shrink the
+35	   largest messages further (oldest-largest first, always keeping the first
+36	   message and the most recent ``keep_recent`` messages readable) until the
+37	   transcript fits.
+38	
+39	Truncation is done **in place**: message count, roles, ordering, and
+40	``tool_call_id`` links are all preserved, so the raw/effective track invariant
+41	and the step_start message contract both hold. Only the ``content`` field of
+42	oversized messages shrinks. Messages whose ``content`` is a multimodal block
+43	list are left untouched (they are bounded elsewhere and are not the failure
+44	shape observed here).
+45	
+46	This is deliberately a *class* fix: it fires on any task whose transcript grows
+47	past a safe size, with no task-specific literals. Tasks that never approach the
+48	cap (every passing trajectory observed had a max message well under 6k chars)
+49	are structurally unaffected.
+50	"""
+51	
+52	from __future__ import annotations
+53	
+54	import dataclasses
+55	import logging
+56	
+57	from harnessx.core.events import (
+58	    StepStartEvent,
+59	    Message,
+60	    rough_token_count,
+61	    _extract_text,
+62	)
+63	from harnessx.core.processor import MultiHookProcessor
+64	
+65	logger = logging.getLogger(__name__)
+66	
+67	_TRUNC_MARKER = "\n\n... [ContextOverflowGuard: {dropped} chars elided to fit the model context window] ...\n\n"
+68	
+69	
+70	class ContextOverflowGuard(MultiHookProcessor):
+71	    """Cap per-message and total transcript character length at step_start.
+72	
+73	    Args:
+74	        per_message_char_cap: Any single message whose text ``content`` exceeds
+75	            this many characters is head/tail truncated. Chosen well above any
+76	            legitimate tool output / message observed on passing tasks, and well
+77	            below the char-equivalent of the model's real context window, so it
+78	            only ever fires on runaway turns.
+79	        total_char_budget: Ceiling on the summed text ``content`` of the whole
+80	            window. When exceeded after the per-message pass, the largest
+81	            messages are shrunk further until the transcript fits.
+82	        keep_recent: Number of most-recent messages exempt from the *secondary*
+83	            (total-budget) shrink pass so the live working context stays intact.
+84	            The per-message cap still applies to them.
+85	        min_message_chars: Floor a message is never shrunk below during the
+86	            secondary pass (keeps every turn at least minimally legible).
+87	    """
+88	
+89	    required_providers: frozenset = frozenset()
+90	
+91	    _singleton_group = "context_overflow_guard"
+92	    # After compaction (8) so we cap whatever survives compaction; before
+93	    # parse/verify processors so the request that actually leaves is bounded.
+94	    _order = 9
+95	
+96	    def __init__(
+97	        self,
+98	        per_message_char_cap: int = 120_000,
+99	        total_char_budget: int = 280_000,
+100	        keep_recent: int = 4,
+101	        min_message_chars: int = 2_000,
+102	    ) -> None:
+103	        self.per_message_char_cap = int(per_message_char_cap)
+104	        self.total_char_budget = int(total_char_budget)
+105	        self.keep_recent = max(0, int(keep_recent))
+106	        self.min_message_chars = max(256, int(min_message_chars))
+107	
+108	    # -- helpers ---------------------------------------------------------
+109	
+110	    @staticmethod
+111	    def _is_text(content) -> bool:
+112	        return isinstance(content, str)
+113	
+114	    def _truncate_text(self, text: str, cap: int) -> str:
+115	        """Head+tail truncation preserving both ends of an oversized string."""
+116	        if len(text) <= cap:
+117	            return text
+118	        # Reserve room for the marker; split remaining budget head/tail.
+119	        marker = _TRUNC_MARKER.format(dropped=len(text) - cap)
+120	        budget = max(self.min_message_chars, cap - len(marker))
+121	        head = budget * 2 // 3
+122	        tail = budget - head
+123	        return text[:head] + marker + (text[-tail:] if tail > 0 else "")
+124	
+125	    def _cap_message(self, m: Message, cap: int) -> Message:
+126	        if not self._is_text(m.content):
+127	            return m
+128	        if len(m.content) <= cap:
+129	            return m
+130	        return dataclasses.replace(m, content=self._truncate_text(m.content, cap))
+131	
+132	    # -- hook ------------------------------------------------------------
+133	
+134	    async def on_step_start(self, event: StepStartEvent):
+135	        source = event.messages if event.messages else event.raw_messages
+136	        if not source:
+137	            yield event
+138	            return
+139	
+140	        msgs = list(source)
+141	        n = len(msgs)
+142	        changed = False
+143	
+144	        # Pass 1 — per-message cap (defuses the runaway single-turn dump).
+145	        for i in range(n):
+146	            capped = self._cap_message(msgs[i], self.per_message_char_cap)
+147	            if capped is not msgs[i]:
+148	                msgs[i] = capped
+149	                changed = True
+150	
+151	        # Pass 2 — total budget. Shrink largest eligible messages first.
+152	        def total_chars() -> int:
+153	            return sum(len(m.content) for m in msgs if self._is_text(m.content))
+154	
+155	        if total_chars() > self.total_char_budget:
+156	            # Eligible = not the first message, not within keep_recent tail.
+157	            recent_start = max(1, n - self.keep_recent)
+158	            eligible = list(range(1, recent_start))
+159	            # Largest first.
+160	            eligible.sort(key=lambda i: len(msgs[i].content) if self._is_text(msgs[i].content) else 0, reverse=True)
+161	
+162	            guard = 0
+163	            while total_chars() > self.total_char_budget and guard < n + 1:
+164	                guard += 1
+165	                progressed = False
+166	                for i in eligible:
+167	                    if total_chars() <= self.total_char_budget:
+168	                        break
+169	                    m = msgs[i]
+170	                    if not self._is_text(m.content):
+171	                        continue
+172	                    cur = len(m.content)
+173	                    if cur <= self.min_message_chars:
+174	                        continue
+175	                    over = total_chars() - self.total_char_budget
+176	                    new_cap = max(self.min_message_chars, cur - over)
+177	                    if new_cap < cur:
+178	                        msgs[i] = dataclasses.replace(m, content=self._truncate_text(m.content, new_cap))
+179	                        changed = True
+180	                        progressed = True
+181	                if not progressed:
+182	                    break
+183	
+184	        if not changed:
+185	            yield event
+186	            return
+187	
+188	        new_messages = tuple(msgs)
+189	        new_count = rough_token_count(list(new_messages))
+190	
+191	        logger.info(
+192	            "ContextOverflowGuard: bounded transcript (%d msgs, ~%d chars total)",
+193	            len(new_messages),
+194	            sum(len(_extract_text(m.content)) for m in new_messages),
+195	        )
+196	
+197	        yield dataclasses.replace(
+198	            event,
+199	            messages=new_messages,
+200	            raw_messages=new_messages,
+201	            token_count=new_count,
+202	        )

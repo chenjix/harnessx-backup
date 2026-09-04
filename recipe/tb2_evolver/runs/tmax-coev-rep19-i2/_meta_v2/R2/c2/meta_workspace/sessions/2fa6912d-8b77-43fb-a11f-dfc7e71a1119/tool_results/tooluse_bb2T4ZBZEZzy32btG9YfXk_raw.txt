@@ -1,0 +1,56 @@
+===== task_000809_760d7fa0 =====
+You are a data scientist cleaning up a multimodal dataset. You have a dashcam video and a noisy telemetry event log. You need to write a Python HTTP service that processes requests to synchronize video frames with deduplicated and cleaned telemetry data.
+
+**Files provided:**
+- `/app/dashcam.mp4`: A video file containing the dashcam footage.
+- `/app/events.txt`: A text file containing telemetry events. Each line is formatted as `offset_sec|raw_text`.
+
+**Your requirements:**
+
+1. **Tokenization and Normalization:** 
+   For each event in `/app/events.txt`, you must extract the `raw_text`, convert it to lowercase, remove all non-alphanumeric characters (keep only `a-z`, `0-9`, and spaces), and tokenize it by splitting on spaces (removing empty tokens).
+
+2. **Hash-based Deduplication:**
+   Create a normalized string by joining the tokens with a single space. Compute the SHA-256 hash of this normalized string (encoded in UTF-8). If an event's hash has been seen in any previous line, discard the current event entirely. Keep only the first occurrence of each unique event.
+
+3. **Service & Timestamp Alignment:**
+   Write and start a Python HTTP server listening on `127.0.0.1:8000`. 
+   It must expose the endpoint `GET /query?t=<seconds>` (where `<seconds>` is an integer).
+   When a request is received:
+   - Perform **timestamp alignment**: Find the largest offset from your *deduplicated* events that is less than or equal to `t`. If `t` is smaller than the first deduplicated event's offset, return an HTTP 404.
+   - Extract the exact frame from `/app/dashcam.mp4` at `t` seconds. To ensu
+
+===== task_000958_4bb2b05d =====
+You are a Database Reliability Engineer managing a complex backup infrastructure. The metadata for all backups (Full and Incremental) across hundreds of databases is stored in a SQLite database located at `/home/user/backup_catalog.db`. 
+
+Your task is to implement a C++ HTTP microservice that answers specific analytical queries about the backup state. You must also optimize the database schema to ensure these queries perform efficiently.
+
+The SQLite database has the following table:
+`CREATE TABLE backups (id INTEGER PRIMARY KEY, db_name TEXT, backup_type TEXT, parent_id INTEGER, size_bytes INTEGER, status TEXT, created_at DATETIME);`
+`backup_type` is either 'FULL' or 'INC'. If it's 'INC', `parent_id` points to the immediately preceding backup in the chain (which could be an 'INC' or 'FULL' backup). If 'FULL', `parent_id` is NULL.
+
+Write a C++ HTTP server listening exactly on `127.0.0.1:9090`. You may download and use the header-only `cpp-httplib` library for the HTTP server, and link against `sqlite3`. 
+
+Your service must implement the following REST endpoints. All endpoints must require an `Authorization` header containing exactly `Bearer dbre-token-xyz123`. Return HTTP 401 Unauthorized if missing or incorrect.
+
+1. **`GET /chain?id=<id>`**
+   * **Goal:** Trace the lineage of an incremental backup back to its root Full backup.
+   * **Implementation:** Use a Recursive CTE to traverse the `parent_id` relationships upwards until `parent_id` is NULL.
+   * **Output Format:** A JSON array of backup IDs representing the chain, starting with the requested `<id>` and ending with the
+
+===== task_002063_8c8adcfe =====
+You are an open-source maintainer reviewing a pull request for a data processing pipeline. A contributor submitted a PR that attempts to rewrite our slow Python-based custom CRC verification logic into a Rust extension (`pyo3`). Unfortunately, the PR is broken, and the contributor is unresponsive. 
+
+You need to step in, fix the code, and launch the validation service.
+
+Here is the current state of the system:
+1. **The Image Artifact:** The hardware vendor provided a specification sheet at `/app/hw_specs.png`. You need to read this image (using OCR, `tesseract` is preinstalled) to find the proprietary "CRC-16 POLYNOMIAL" and the "INITIAL VALUE" required for the algorithm.
+2. **The Broken Rust Extension:** The contributor's Rust code is located in `/home/user/pr-review/rust_crc/`. It has a compilation error related to Rust's ownership and borrow checker. You need to fix the code in `/home/user/pr-review/rust_crc/src/lib.rs` and compile the Python extension (e.g., using `maturin develop` inside a virtual environment).
+3. **The Python Service:** You must write a Python web service in `/home/user/pr-review/server.py` that utilizes this compiled Rust extension.
+   - The service must listen on `127.0.0.1:8080`.
+   - It must expose a `POST /verify` endpoint.
+   - It must require an `Authorization: Bearer REVIEW_TOKEN_2024` header.
+   - The endpoint will receive JSON payloads in the format: `{"data": "some_string", "expected_crc": 12345}`.
+   - The service should use the Rust extension to calculate the CRC of `data` using the polynomial and initial value extracted from the image. 
+ 
+

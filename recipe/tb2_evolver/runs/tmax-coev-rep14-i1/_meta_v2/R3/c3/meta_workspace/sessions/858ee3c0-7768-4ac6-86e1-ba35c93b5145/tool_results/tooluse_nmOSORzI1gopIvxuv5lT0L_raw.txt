@@ -1,0 +1,40 @@
+16:    content: str | list  # str for text; list of content blocks for multimodal (Anthropic format)
+19:    tool_calls: tuple = ()  # tuple[ToolCall, ...] — populated for role=assistant with tool calls
+86:class TaskStartEvent(Event):
+131:class BeforeModelEvent(Event):
+141:class ModelResponseEvent(Event):
+143:    content: str = ""
+144:    thinking: str = ""  # extended thinking / reasoning content from the model
+146:    tool_calls: tuple[ToolCall, ...] = ()
+147:    finish_reason: str = "end_turn"
+175:    content_blocks: tuple = field(default=(), hash=False, compare=False)
+176:    # Native multimodal blocks (Anthropic content format) from MCP tools.
+198:class TaskEndEvent(Event):
+372:    if isinstance(m.content, list):
+373:        d["content"] = [dict(sorted(b.items())) if isinstance(b, dict) else b for b in m.content]
+375:        d["content"] = m.content or ""
+381:    if m.tool_calls:
+382:        d["tool_calls"] = [
+383:            {"id": tc.id, "name": tc.name, "input": dict(sorted(tc.input.items()))} for tc in m.tool_calls
+394:    Fields included: role, content, tool_call_id, name, tool_calls, thinking_blocks.
+399:    When a message has no in-memory content (content is empty string / empty list)
+401:    (we never read content_ref files during hashing).
+420:        "content": m.content if isinstance(m.content, list) else (m.content or ""),
+426:    if m.tool_calls:
+427:        d["tool_calls"] = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in m.tool_calls]
+437:    tool_calls = tuple(
+438:        ToolCall(id=tc["id"], name=tc["name"], input=tc.get("input", {})) for tc in d.get("tool_calls", [])
+442:        content=d.get("content", ""),
+445:        tool_calls=tool_calls,
+459:    Preserves tool_use/tool_result pairs: when an assistant message with tool_calls
+478:        if msg.role == "assistant" and msg.tool_calls:
+480:            tool_call_ids = {tc.id for tc in msg.tool_calls}
+507:def _extract_text(content: "str | list") -> str:
+508:    """Extract plain text from a content value (str or multimodal block list)."""
+509:    if isinstance(content, str):
+510:        return content
+512:        block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+524:    """Estimate token cost of a single non-text content block.
+551:    Non-text content blocks (images, audio) are estimated via
+560:        text = _extract_text(m.content)
+576:        if isinstance(m.content, list):

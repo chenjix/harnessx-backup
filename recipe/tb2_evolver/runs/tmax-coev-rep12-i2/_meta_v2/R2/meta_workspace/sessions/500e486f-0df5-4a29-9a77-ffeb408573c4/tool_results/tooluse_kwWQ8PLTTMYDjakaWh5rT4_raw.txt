@@ -1,0 +1,48 @@
+TASK PROMPT:
+You are tasked with creating a simplified, simulated "Kubernetes operator" script in Python that manages filesystem links, simulated volume mounts, and reverse proxy configurations based on JSON manifests. 
+
+There are several JSON manifests located in `/home/user/manifests`. Your job is to write a Python script at `/home/user/operator.py` that processes these manifests and generates the corresponding system state.
+
+For each `.json` file in `/home/user/manifests`, the format is:
+```json
+{
+  "app_name": "string",
+  "replicas": "integer",
+  "base_port": "integer",
+  "volumes": [
+    {
+      "name": "string",
+      "mount_path": "string"
+    }
+  ]
+}
+```
+
+Your Python script (`/home/user/operator.py`) must perform the following actions for each manifest:
+
+1. **Directory and Link Management**:
+   - Create a directory for the app at `/home/user/deployments/<app_name>`.
+   - For each replica (from `0` to `replicas - 1`), create a symlink named `replica_<N>` inside the app directory. This symlink must point to `/home/user/bin/runner.sh`.
+
+2. **Load Balancer Configuration**:
+   - Create an Nginx configuration file for the app at `/home/user/nginx/conf.d/<app_name>.conf`.
+   - The configuration must define an `upstream` block named `<app_name>_backend`.
+   - The upstream block should contain a `server` entry for each replica. The port for `replica_N` is calculated as `base_port + N`. All s
+
+===== all bash commands issued =====
+$ ls -la /home/user/manifests/
+$ echo '=== VERIFIER DEP CHECK (auto) ==='; python3 -c 'import requests' 2>/dev/null && echo 'ok: requests' || (echo 'installing: requests'; (pip install -q reque
+$ cat /home/user/manifests/api.json && echo "---" && cat /home/user/manifests/web.json
+$ cat > /home/user/operator.py << 'EOF' #!/usr/bin/env python3 """ Kubernetes Operator - Simulated filesystem link and volume mount manager """  import json impor
+$ python3 /home/user/operator.py
+$ mv /home/user/operator.py /home/user/k8s_operator.py
+$ mv /home/user/k8s_operator.py /home/user/operator.py && python3 /home/user/operator.py
+$ mv /home/user/operator.py /home/user/k8s_operator.py && python3 /home/user/k8s_operator.py && mv /home/user/k8s_operator.py /home/user/operator.py
+$ echo "=== Deployments ===" && ls -la /home/user/deployments/ && echo "" && echo "=== API Deployment ===" && ls -la /home/user/deployments/api/ && echo "" && ech
+$ echo "=== Nginx Configs ===" && ls -la /home/user/nginx/conf.d/ && echo "" && echo "=== API Nginx Config ===" && cat /home/user/nginx/conf.d/api.conf && echo ""
+$ echo "=== Volumes ===" && ls -la /home/user/volumes/ && echo "" && echo "=== API Volumes ===" && ls -la /home/user/volumes/api/ && echo "" && echo "=== Web Volu
+$ mv /home/user/k8s_operator.py /home/user/operator.py
+$ ls -la /home/user/operator.py && head -20 /home/user/operator.py
+$ echo "=== Final Verification ===" && echo "" && echo "1. Script location:" && ls -la /home/user/operator.py && echo "" && echo "2. Deployments:" && find /home/u
+$ 
+$ echo "=== Checking all required files ===" && echo "" && echo "1. Script file:" && ls -lh /home/user/operator.py && echo "" && echo "2. Deployment directories:"

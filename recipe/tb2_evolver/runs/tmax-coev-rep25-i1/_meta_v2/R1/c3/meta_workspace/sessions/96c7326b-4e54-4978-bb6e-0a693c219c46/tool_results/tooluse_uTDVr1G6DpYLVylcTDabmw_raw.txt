@@ -1,0 +1,107 @@
+1	# Evolve Brief
+2	
+3	## Assigned focus for THIS proposal
+4	
+5	**Tool surface.** Find a task where the available tools forced an awkward or many-step workaround. Add, remove, or re-describe a tool so the direct path exists.
+6	
+7	Use failing task `task_000118_3043e92d` only as the initial evidence anchor. Read its trajectory, then search for the same failure class in other trajectories before editing.
+8	
+9	**Generalization contract.** Treat the named task as evidence, not as the
+10	target. First state the reusable failure class in terms observable by the
+11	agent (tool result, context state, progress, or verification state). Inspect
+12	at least two other trajectories for supporting or counter-evidence when they
+13	exist. The harness edit must trigger from that general state: do not mention
+14	task IDs, benchmark paths, filenames, expected answers, or task-specific
+15	content in the prompt, processor, or tool. Explain why the mechanism should
+16	help unseen tasks and identify which already-solved task class it could hurt.
+17	If the evidence supports only one task, prefer a no-op over a special case.
+18	
+19	Other proposals in this batch are assigned different focuses. Stay on yours: a batch is useful only when its members differ. If your focus turns out to be unsupported by the trajectories, say so in `candidates.md` and make the smallest defensible edit rather than drifting onto another proposal's territory.
+20	
+21	## Pivot harnesses (read these BEFORE proposing)
+22	
+23	Several harnesses are live at similar scores with different per-task coverage. Treat each as a branch point: read THAT harness's `config` and `trajectories_dir`, note which tasks only that lineage uniquely solves, then propose. A synthesis that keeps complementary unique solves is better than copying one parent wholesale. Ties are allowed to stand — do not discard a lineage just because its pass rate matches another.
+24	
+25	| id | score | config | trajectories | unique solves | unique losses | this proposal starts from |
+26	|----|------:|--------|--------------|---------------|---------------|---------------------------|
+27	| `n0_8743947a` | 0.500 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R0/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r0-traj` | — | — |  |
+28	
+29	- `current_config`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R0/config.yaml`
+30	- `trajectories_dir`: `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r0-traj`
+31	- `output_dir`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R1/c3`
+32	- `memo_path`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/learnings.md`
+33	- budget: None USD, 200 steps, 14400s wall-clock
+34	
+35	## Deliverables (all under `output_dir`)
+36	
+37	- `config.yaml` — a HarnessConfig YAML that canonicalizes (required)
+38	- `tools/<name>.py` — optional new `@tool` modules
+39	- `processors/<name>.py` — optional new `MultiHookProcessor` classes
+40	- `templates/<name>.j2` — optional new system-prompt Jinja templates
+41	- `_meta_scratch/candidates.md` — when you change the config, list
+42	  candidates as `## Candidate C-N` sections (see orchestrator
+43	  evidence gate below)
+44	- `_meta_scratch/` — your own notes; this brief already lives here
+45	
+46	Read-only context (if present in `_meta_scratch/`):
+47	
+48	- `pareto_archive.json` — per-task pass/fail history across all rounds (tasks marked stuck/fragile/solved)
+49	- `history/OVERVIEW.md` — round-by-round score table
+50	- `history/R{i}_per_task.json` — per-task results for round i
+51	- `history/R{i}_to_R{j}.diff` — config diff between rounds
+52	- `env_probe.md` — which external sites/APIs are reachable (OK/BLOCKED/TIMEOUT) from this environment
+53	- `task_catalog.md` — all task questions being evaluated (read this to understand WHAT the agent needs to solve)
+54	
+55	## Global optimization constraint (Pareto-style)
+56	
+57	Do not optimize a narrow local win at the expense of global benchmark health. Prefer candidates that improve failing clusters while protecting already-passing clusters.
+58	
+59	For each shipped candidate, explicitly state:
+60	- `expected_global_gain`: which failing cluster(s) and why this can generalize
+61	- `regression_risk`: what could break outside `predicted_affected`
+62	- `cost_shift`: expected token/cost movement if the change lands
+63	
+64	A local improvement with likely net global degradation is not acceptable unless you provide unusually strong evidence and a clear rollback trigger.
+65	
+66	## Self-validation before `end_turn`
+67	
+68	No retry loop. If you end your turn with a broken artifact the
+69	round fails. `Read validate` for the CLI commands — at minimum
+70	run `canonicalize` on your new config before stopping, and run
+71	`dry_fire` / `contract` / `literals` when you authored anything
+72	under `tools/`, `processors/`, or `templates/`.
+73	
+74	## Decision contract (required)
+75	
+76	Before `end_turn`, make exactly one explicit decision:
+77	1) **Ship change**: write ALL of the following, then run validation:
+78	   - `output_dir/config.yaml` (required)
+79	   - `_meta_scratch/candidates.md` (REQUIRED when config changes —
+80	     at least one `## Candidate C-NNN` section with lens/lever/intent
+81	     tag, signal, verified body evidence, retroactive check, and
+82	     'Why X not Y' lever argument; the evidence gate hard-fails without it)
+83	   - a new `## Round N` section appended to `memo_path` journal with
+84	     `cited_candidates` frontmatter referencing your C-NNN IDs
+85	   - optional: `tools/<name>.py`, `processors/<name>.py`, `templates/<name>.j2`
+86	2) **Explicit no-op**: copy `current_config` byte-for-byte to
+87	   `output_dir/config.yaml`, then stop. No candidates.md needed.
+88	Analysis-only `end_turn` is invalid and is treated as a failed round.
+89	
+90	## Orchestrator post-flight
+91	
+92	After you stop, the orchestrator runs:
+93	1. **canonicalize** (always) — config.yaml must parse and every
+94	   template must render.
+95	2. **novelty** — a journal hypothesis_id marked `reverted` in
+96	   a prior round cannot be re-proposed.
+97	3. **evidence** — when the changeset is non-empty, the round
+98	   must produce `_meta_scratch/candidates.md` with at least
+99	   one `## Candidate C-N` section, and the journal entry's
+100	   `cited_candidates` frontmatter must reference ≥1 of those
+101	   IDs. Prevents shipping config changes without linked
+102	   evidence.
+103	4. **replay** — by default runs a synthetic smoke task
+104	   (`replay_mode=synthetic_task`): executes one tiny fixed
+105	   task through the run loop and fails on exception / timeout /
+106	   `exit_reason=error`. Optional `replay_mode=config_only`
+107	   keeps bind-only checking.

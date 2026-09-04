@@ -1,0 +1,117 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	
+16	tool_registry:
+17	  builtin:
+18	  - Bash
+19	  custom: []
+20	tracer: null
+21	processors:
+22	# R3 (C-003): system-prompt sidecar (system_prompt.txt beside this YAML)
+23	# extended with a general service-persistence strategy. Observed failure: on
+24	# HTTP/socket-service tasks the agent starts a server with `nohup ... &`, which
+25	# inherits the exec'd command's process group; HarborSandbox.kill_running()
+26	# sends SIGTERM to that group between Bash calls, so the server dies (`exit 143`,
+27	# `[server] <defunct>` zombies) and the verifier hits `Connection refused`. The
+28	# added rule teaches the agent to launch required services detached in their OWN
+29	# new session (`setsid ... < /dev/null &`) so they survive across calls and into
+30	# the verify phase, and to re-confirm the listener is up before finishing.
+31	# Strategy-only; no task-specific literals. SiblingSystemPromptBuilder loads the
+32	# sidecar from beside THIS config.yaml (output_dir), i.e. the R3 sidecar.
+33	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+34	  system_builder:
+35	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+36	  _hook_: '*'
+37	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+38	  working_dir: /home/user
+39	  constraints: {}
+40	  header: Environment
+41	  max_tree_lines: 20
+42	  non_interactive: true
+43	  inject_integrity_rules: true
+44	  show_project_dir: false
+45	  _hook_: '*'
+46	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+47	  tool_schemas: {}
+48	  _hook_: '*'
+49	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+50	  warn_at:
+51	  - 0.7
+52	  - 0.9
+53	  _hook_: '*'
+54	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+55	# Without this, one stuck task can block an entire evolve round.
+56	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+57	  repeat_threshold: 2
+58	  head_chars: 1200
+59	  tail_chars: 600
+60	  _hook_: '*'
+61	# R2: break identical-Bash-command loops. Observed across the R1 budget_exceeded
+62	# cluster: the agent issues the EXACT same Bash command 20-29 times in a row,
+63	# gets the same (often empty/failing) result each time, and burns the whole
+64	# 80-step budget on one unproductive command. LengthTruncationRecovery does not
+65	# catch this — those turns emit a well-formed tool call, so finish_reason != length.
+66	# This processor injects a firm redirect user message after the same command is
+67	# issued `repeat_threshold` times consecutively; it never blocks execution, so a
+68	# legitimately-slow retry is at worst nudged, never broken. Strategy/shape-only;
+69	# no task-specific commands or paths. See processors/repeat_command_breaker.py.
+70	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R2/processors/repeat_command_breaker.py::RepeatCommandBreakerProcessor
+71	  repeat_threshold: 3
+72	  _hook_: '*'
+73	# R1: token_threshold lowered 140000 -> 40000. The eval model's true context
+74	# window is 65536 tokens and harness_runner reserves 4096 for output, leaving a
+75	# ~61440-token input ceiling. Above it the server returns a hard 400 (context
+76	# length) that surfaces as exit_reason=error and crashes the whole task. The old
+77	# 140000 threshold was calibrated for a 128k+ model, so compaction NEVER fired
+78	# on this model and long tasks overflowed. rough_token_count (cl100k) also
+79	# under-counts the real request by ~9-10k (system prompt + Bash tool schema +
+80	# tokenizer skew), so we fire at 40000 rough tokens (~50k real) to keep every
+81	# request safely under the 61440 ceiling with margin for retention-window growth.
+82	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+83	  token_threshold: 40000
+84	  message_threshold: 100
+85	  retention_window: 6
+86	  eviction_fraction: 0.5
+87	  summarize_key: summarize
+88	  preserve_first_message: true
+89	  _hook_: '*'
+90	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+91	  max_consecutive_errors: 1
+92	  _hook_: '*'
+93	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+94	  drop_threshold: 5
+95	  _hook_: '*'
+96	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+97	  _hook_: '*'
+98	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+99	  threshold: 7
+100	  _hook_: '*'
+101	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+102	  _hook_: '*'
+103	# Ensure common verifier test-deps (HTTP client / config parser) are importable
+104	# in the container Python before the agent exits. TB2 verifiers frequently
+105	# `import requests` to probe a running HTTP server; when the base image lacks
+106	# it the verifier aborts at pytest collection time (ModuleNotFoundError) and a
+107	# correct solution scores 0. Fires at most once per run, only on exit-intent,
+108	# and is a no-op when the module is already present.
+109	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/R0/assets/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+110	  _hook_: '*'
+111	workspace: null
+112	workspace_template: default
+113	init_workspace: false
+114	step_snapshots: true
+115	sandbox_provider: null
+116	sandbox_hint_id: null
+117	plugins: []

@@ -1,0 +1,40 @@
+19:    SegmentBoundaryEvent,
+29:    compute_history_hash,
+45:    """Invariant 7: processor must not emit SegmentBoundaryEvent when history_hash is unchanged.
+52:        f"step_start step={step_id}: processor emitted SegmentBoundaryEvent "
+53:        "but history_hash is unchanged — spurious boundary"
+105:    The message is written into the factual track (`raw_messages`) so the
+109:    if state.raw_messages:
+110:        last = state.raw_messages[-1]
+113:    state.add_raw_message(Message(role="assistant", content=_USER_INTERRUPTED_MESSAGE))
+218:    # SegmentBoundaryEvent arrives.  The boundary check below may rotate the segment
+228:        _sp_boundary = SegmentBoundaryEvent(
+235:            compacted_raw_messages=tuple(state.raw_messages),
+243:    # inherits this value; on_step_start processors must NOT modify it.
+304:                raw_messages=tuple(state.raw_messages),
+310:                system_prompt=task_system_prompt,  # frozen by on_task_start; never modified by on_step_start
+313:            # Snapshot history_hash before processors run so we can detect structural changes.
+316:            _history_hash_before = compute_history_hash(_hist_before)
+318:            # pipe_all: collect SegmentBoundaryEvents
+325:            boundary_events: list[SegmentBoundaryEvent] = [
+326:                e for e in step_start_events if isinstance(e, SegmentBoundaryEvent)
+333:            # Compute history_hash after step_start processors ran (needed for both
+337:            _history_hash_after = compute_history_hash(_hist_after)
+340:            _enforce_boundary_invariant(boundary_events, _history_hash_before, _history_hash_after, step_id)
+343:            # processor-emitted SegmentBoundaryEvent.  If history_window changed
+345:            if not boundary_events and _history_hash_before != _history_hash_after:
+347:                _auto_boundary = SegmentBoundaryEvent(
+354:                    compacted_raw_messages=tuple(step_start_event.raw_messages or _post_step_msgs),
+367:                    state.raw_messages = list(boundary.compacted_messages)
+462:                state.add_raw_message(
+475:                state.add_raw_message(
+496:            _pre_tool_raw_idx = len(state.raw_messages)
+592:                        state.add_raw_message(
+622:                        state.add_raw_message(
+631:                        state.add_raw_message(
+656:                    state.raw_messages[_pre_tool_raw_idx:],
+659:                state.raw_messages[_pre_tool_raw_idx:] = _new_tool_msgs
+717:                state.add_raw_message(
+730:                state.add_raw_message(
+756:                    state.add_raw_message(
+780:        final_output = _recover_best_output(state.raw_messages, final_output)

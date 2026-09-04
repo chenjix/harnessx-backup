@@ -1,0 +1,183 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""BashLoopBreakerProcessor — break degenerate identical-Bash repetition loops.
+4	
+5	Systemic failure mode observed in the Tmax R0 trajectories: on hard tasks the
+6	model enters a *tool-level repetition loop* — it re-issues the byte-for-byte
+7	same ``Bash`` command (same command string, same output) over and over,
+8	narrating "I'm stuck in a loop / I need to stop repeating this" while doing
+9	exactly that, until it exhausts the step budget (``exit_reason=budget_exceeded``
+10	at the step cap). Nine of eleven budget-exceeded tasks in R0 showed 10-33
+11	consecutive identical Bash calls; the loops began as early as the 3rd-7th Bash
+12	call, wasting the remaining ~25-75 steps.
+13	
+14	This is distinct from ``LengthTruncationRecoveryProcessor`` (which handles
+15	``finish_reason=length`` with *no* tool call). Here the model *does* emit a
+16	tool call every turn — a well-formed but useless repeat.
+17	
+18	Design decisions (grounded in the R0 evidence):
+19	
+20	* **Bash-only fingerprinting.** Internal/injected tools (e.g. the self-verify
+21	  tool ``_tb2_self_verify``) are legitimately called many times in a row in
+22	  *passing* trajectories (one passing task issued 22 consecutive self-verify
+23	  calls). Fingerprinting those would produce false positives and could kill a
+24	  passing run. Only the model-authored ``Bash`` tool is tracked.
+25	* **Two-phase, warn-then-break.** A warning nudge is appended to the tool
+26	  result once the same command repeats ``warn_threshold`` times, giving the
+27	  agent a chance to abandon the dead command while it still has budget. If it
+28	  keeps repeating up to ``break_threshold``, the processor intercepts the
+29	  next identical call (does not execute it) and returns a strong corrective
+30	  message instead — the loop is broken without ending the whole task, so the
+31	  agent keeps its remaining steps for a different approach.
+32	* **Conservative thresholds.** Every R0 *passing* task had a max consecutive
+33	  identical-Bash run of exactly 1 — no passing task ever repeated an identical
+34	  command even twice. So the regression surface at ``warn_threshold=3`` /
+35	  ``break_threshold=6`` is effectively nil on the observed passing set.
+36	
+37	Strategy-only / benchmark-agnostic: no task ids, no command literals, no
+38	domain constants. Fires purely on the structural "identical Bash call N times
+39	in a row" shape.
+40	"""
+41	
+42	from __future__ import annotations
+43	
+44	import dataclasses
+45	import hashlib
+46	import json
+47	
+48	from harnessx.core.events import (
+49	    TaskEndEvent,
+50	    TaskStartEvent,
+51	    ToolCallEvent,
+52	    ToolResultEvent,
+53	)
+54	from harnessx.core.processor import MultiHookProcessor
+55	
+56	_BASH_TOOL = "Bash"
+57	
+58	_WARN_TEMPLATE = (
+59	    "\n\n[LoopBreaker] ⚠️  You have now run this EXACT same command {count} times "
+60	    "in a row and gotten the same result each time. Repeating it again will not "
+61	    "change anything. Stop. Re-read the task requirements, look at what this "
+62	    "output is actually telling you, and take a FUNDAMENTALLY different action: "
+63	    "inspect a different file, change the command's arguments, try another "
+64	    "approach, or — if the required deliverable already exists — verify it and "
+65	    "finish. Do not issue this command again."
+66	)
+67	
+68	_BREAK_TEMPLATE = (
+69	    "[LoopBreaker] BLOCKED: this exact command has now been issued {count} times "
+70	    "consecutively with no change in result, so it was NOT executed again. You are "
+71	    "in a dead loop. This line of attack is not working — abandon it completely.\n\n"
+72	    "Do ONE of the following in your next turn:\n"
+73	    "  1. If the task's required output file(s) already exist at the path named in "
+74	    "the task, run a quick check to confirm and then stop.\n"
+75	    "  2. Otherwise, try a genuinely different strategy: a different command, tool, "
+76	    "algorithm, input, or file. Do not re-run the blocked command or a trivial "
+77	    "variant of it.\n"
+78	    "Write at most two sentences of reasoning, then take that different action."
+79	)
+80	
+81	
+82	class BashLoopBreakerProcessor(MultiHookProcessor):
+83	    """Detect and break byte-for-byte repeated Bash commands.
+84	
+85	    Args:
+86	        warn_threshold: consecutive identical-Bash count at which a warning is
+87	            appended to the tool result (default 3).
+88	        break_threshold: consecutive identical-Bash count at which the next
+89	            identical call is intercepted (not executed) and replaced with a
+90	            corrective message (default 6). Must be >= warn_threshold.
+91	    """
+92	
+93	    _singleton_group = "bash_loop_breaker"
+94	    _order = 21  # just after LoopDetectionProcessor's slot; before compaction reset logic
+95	
+96	    def __init__(
+97	        self,
+98	        warn_threshold: int = 3,
+99	        break_threshold: int = 6,
+100	    ) -> None:
+101	        self.warn_threshold = max(2, int(warn_threshold))
+102	        self.break_threshold = max(self.warn_threshold + 1, int(break_threshold))
+103	        self._last_fp: str = ""
+104	        self._run: int = 0
+105	        # tool_call_id -> fingerprint, staged in on_before_tool
+106	        self._pending: dict[str, str] = {}
+107	
+108	    # ------------------------------------------------------------------
+109	    def _reset(self) -> None:
+110	        self._last_fp = ""
+111	        self._run = 0
+112	        self._pending.clear()
+113	
+114	    @staticmethod
+115	    def _fingerprint(tool_input: dict) -> str:
+116	        try:
+117	            s = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
+118	        except Exception:
+119	            s = repr(tool_input)
+120	        return hashlib.sha256(s.encode("utf-8", "replace")).hexdigest()[:16]
+121	
+122	    # ------------------------------------------------------------------
+123	    async def on_task_start(self, event: TaskStartEvent):
+124	        self._reset()
+125	        yield event
+126	
+127	    async def on_task_end(self, event: TaskEndEvent):
+128	        self._reset()
+129	        yield event
+130	
+131	    async def on_before_tool(self, event: ToolCallEvent):
+132	        # Only track the model-authored Bash tool. Any other tool (including
+133	        # injected internal tools) resets the consecutive run so their repeats
+134	        # never contribute to the loop count.
+135	        if event.tool_name != _BASH_TOOL:
+136	            self._last_fp = ""
+137	            self._run = 0
+138	            yield event
+139	            return
+140	
+141	        fp = self._fingerprint(event.tool_input)
+142	        if fp and fp == self._last_fp:
+143	            prospective = self._run + 1
+144	        else:
+145	            prospective = 1
+146	
+147	        # At/over the break threshold: intercept — do not execute the command
+148	        # again. Inject a corrective synthetic result instead.
+149	        if prospective >= self.break_threshold:
+150	            # keep the run counter advancing so a persistent offender keeps
+151	            # getting blocked rather than oscillating around the threshold
+152	            self._last_fp = fp
+153	            self._run = prospective
+154	            msg = _BREAK_TEMPLATE.format(count=prospective)
+155	            yield dataclasses.replace(
+156	                event,
+157	                approved=False,
+158	                synthetic_result=msg,
+159	            )
+160	            return
+161	
+162	        # Otherwise stage the fingerprint for on_after_tool to consume.
+163	        self._pending[event.tool_call_id] = fp
+164	        yield event
+165	
+166	    async def on_after_tool(self, event: ToolResultEvent):
+167	        fp = self._pending.pop(event.tool_call_id, None)
+168	        if fp is None:
+169	            # Not a tracked Bash call (or was intercepted). Leave as-is.
+170	            yield event
+171	            return
+172	
+173	        if fp and fp == self._last_fp:
+174	            self._run += 1
+175	        else:
+176	            self._last_fp = fp
+177	            self._run = 1
+178	
+179	        if self._run >= self.warn_threshold:
+180	            warning = _WARN_TEMPLATE.format(count=self._run)
+181	            yield dataclasses.replace(event, result=(event.result or "") + warning)
+182	        else:
+183	            yield event

@@ -1,0 +1,53 @@
+                break
+            if task.is_done(state):
+                break
+            if state.budget_exceeded():
+                exit_reason = "budget_exceeded"
+                break
+
+    except BudgetExceededError:
+        exit_reason = "budget_exceeded"
+        # Try to recover the best output from assistant messages
+        final_output = _recover_best_output(state.raw_messages, final_output)
+    except LoopDetectedError:
+        exit_reason = "loop_detected"
+        final_output = _recover_best_output(state.raw_messages, final_output)
+    except asyncio.CancelledError:
+        # User actively interrupted the execution (Ctrl+C / API cancel).
+        interrupt_step = state.step - 1 if state.step > 0 else state.step
+        await tracer.on_event(
+            ModelResponseEvent(
+                run_id=state.run_id,
+                step_id=interrupt_step,
+                content=_USER_INTERRUPTED_MESSAGE,
+                finish_reason="interrupted",
+                usage=Usage(),
+            )
+        )
+        _append_user_interrupted_message(state)
+        exit_reason = "interrupted"
+        final_output = _USER_INTERRUPTED_MESSAGE
+    except Exception as e:
+        # RL rollout: ContextLengthExceeded and GenerationAborted are expected
+        # flow-control signals (not bugs).  Log at debug to avoid flooding the
+        # console with thousands of tracebacks per run.
+        _exc_name = type(e).__name__
+        if _exc_name in ("ContextLengthExceeded", "GenerationAborted"):
+            _logger.debug("run_loop: %s: %s", _exc_name, e)
+        else:
+            # Warning without traceback so non-verbose CLI stays clean.
+            # Full traceback is available at DEBUG level (harnessx -v).
+            _logger.warning("run_loop error: %s: %s", _exc_name, e)
+            _logger.debug("run_loop error traceback:", exc_info=True)
+        exit_reason = "error"
+        final_output = f"Error: {e}"
+        error_message = f"{_exc_name}: {e}"
+
+    # Recover best output for non-clean exits (budget/loop hit via normal break)
+    if exit_reason in ("budget_exceeded", "loop_detected") and not final_output:
+        final_output = _recover_best_output(state.raw_messages, final_output)
+    if _model_empty_end_turn_seen:
+        state.set_slot("__model_empty_end_turn_seen", "diagnostic", True)
+        state.set_slot(
+=== LoopDetectedError def ===
+91:class LoopDetectedError(HarnessError):

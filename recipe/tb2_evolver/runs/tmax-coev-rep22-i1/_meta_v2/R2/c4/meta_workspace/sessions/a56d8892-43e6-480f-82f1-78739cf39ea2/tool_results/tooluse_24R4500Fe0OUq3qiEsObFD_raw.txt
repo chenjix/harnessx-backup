@@ -1,0 +1,74 @@
+1	## Round 1 — semantic repetition breaker
+2	
+3	<!-- journal:frontmatter
+4	round: 1
+5	timestamp: 2026-06-01T00:00:00Z
+6	hypothesis_id: h_semantic_repetition_breaker_v1
+7	levers: [control]
+8	predicted_affected: [task_000118_3043e92d, task_000958_4bb2b05d, task_001032_1adaccb9, task_001321_658ce4a8, task_000015_89886d8d, task_001031_a8f0eb37]
+9	cited_candidates: [C-001]
+10	gating_outcome: accepted
+11	gating_attribution: score=26/50; +2/-6 gained=task_001090_c61c71f2,task_001321_658ce4a8 lost=task_000684_1a33ef37,task_000912_770802f8,task_001089_220cc46b,task_001515_eed714e6; gating disabled (tolerance < 0)
+12	expected_global_gain: "Breaks non-converging diagnostic loops that burn 40-80 steps on high-step failures; reclaims budget and plausibly flips 1-3 tasks where real work was reachable once the loop is broken"
+13	regression_risk: "Conservative thresholds; offline replay raised on 0/30 passing tasks, warned 1. Worst case: a doomed task exits a few turns earlier (same reward 0)"
+14	cost_shift: "Net negative — early termination of 57-80 step loops down to ~10-29 steps; nudge adds at most one short message on a few tasks"
+15	rollback_trigger: "If any currently-passing task regresses to exit_reason=loop_detected, or pass_rate drops, revert"
+16	-->
+17	
+18	### Why
+19	
+20	Assigned task `task_000118_3043e92d` (write a disk-quota monitor daemon)
+21	failed with the log dir peaking at 200 MB vs the 45 MB threshold — the
+22	monitor never truncated. But the graded artifact is the final script (the
+23	verifier starts the monitor itself), and the agent never realised that: the
+24	whole visible trajectory is a non-converging diagnostic loop. It repeatedly
+25	runs `python3 monitor.py &` then `ps aux | grep`, sees defunct zombies,
+26	concludes "the monitor is not showing up in the process list", and repeats
+27	~15x with slightly-varied args, twice hitting the token limit, ending
+28	no_tool_calls having never run the real end-to-end test or fixed the
+29	script's timing bug. The same shape recurs across at least five other
+30	high-step failures (`task_000958`, `task_001032`, `task_001321`,
+31	`task_000015`, `task_001031`): passing tasks rarely exceed ~28 steps, while
+32	these burn 57-80. Existing guards miss it — LengthTruncationRecovery only
+33	fires on finish_reason=length, and LoopDetectionProcessor (not even in the
+34	R0 config) keys on exact/consecutive tool-arg fingerprints, which vary here.
+35	
+36	### Changes
+37	
+38	- `processors/semantic_repetition_breaker.py` — new `SemanticRepetitionBreaker`
+39	  MultiHookProcessor. `on_after_model` measures Jaccard token-overlap between
+40	  the current assistant narration and recent turns; warns (injects one
+41	  corrective redirect via `on_before_model`, net +1) at 3 near-dupes and
+42	  raises `LoopDetectedError` at 4 (window=8, sim=0.80), so the run exits
+43	  cleanly and recovers the last-good filesystem instead of exhausting budget.
+44	- `config.yaml` — register the processor (file:// abs path) after
+45	  LengthTruncationRecoveryProcessor and before CompactionProcessor.
+46	
+47	### Evidence
+48	
+49	- `task_000118_3043e92d` result: reward=0, steps=59, finished=no_tool_calls;
+50	  final_pytest peak size exceeded threshold. Msgs 55/57/.../71 repeat verbatim
+51	  "The monitor script is not showing up in the process list. Let me try..."
+52	  and "I see there are zombie processes"; two turns truncate at the token
+53	  limit mid-repetition.
+54	- `task_001321_658ce4a8` (budget_exceeded, 80 steps): 14 verbatim repeats of
+55	  "The error is still appearing. This is strange..." plus the existing
+56	  "I've been stuck in a loop" nudge firing and being ignored.
+57	- `task_000015_89886d8d` (57 steps): 6 repeats of "The tests are failing
+58	  because the URL decoder..." + 5 of "The user is telling me to stop the
+59	  repetition..." — nudge fired, agent could not escape.
+60	- `task_000958` (4 repeats), `task_001032` (7 repeats), `task_001031`
+61	  (5 repeats) — same non-converging narration shape.
+62	- Offline replay of the detector over R0 trajectories (window=8, sim=0.80,
+63	  warn=3, raise=4): 5/6 failing loop-tasks hard-raise at turns 10-29;
+64	  0/30 passing tasks raise; 1 passing task (task_000578) warns once.
+65	
+66	### Uncertainty
+67	
+68	The raise on `task_000118` does not fire (its narration varies just enough);
+69	it relies on the repeated early warn nudge redirecting the agent to verify
+70	the file / fix the logic rather than re-check process state. If the model
+71	ignores the nudge like it ignored the existing loop nudges, the task stays
+72	failed — but budget is still reclaimed for the rest of the round. Watch for
+73	any passing task flipping to exit_reason=loop_detected (false positive);
+74	none appeared in offline replay.

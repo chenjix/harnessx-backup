@@ -1,0 +1,24 @@
+--- R3
++++ R4
+@@ -110,2 +110,21 @@
+   _hook_: '*'
++# R4 (C-005): budget-aware companion to the exit-intent verifier dep guard.
++# Observed: 3 tasks (task_000796, task_000910, task_002108) exhausted the
++# 80-step budget (exit_reason=budget_exceeded) before ever reaching exit intent,
++# so the exit-only VerifierDepGuardProcessor NEVER fired; their verifier
++# `test_final_state.py` then aborted at pytest COLLECTION time with
++# `ModuleNotFoundError: No module named 'requests'` — a guaranteed structural 0
++# regardless of the final container state. This processor fires the SAME
++# idempotent dep-ensure Bash call on the first no-tool-call turn once the step
++# counter reaches (max_steps - budget_margin), in addition to exit intent, so
++# budget-bound runs still get the verifier's common test-deps installed before
++# the budget is exhausted. Fires at most once per task, only on a turn with no
++# model tool call (never clobbers a real action), and is a pure no-op when the
++# modules already import. Generic allow-list only (HTTP client / config parser);
++# no task ids, ports, paths, or process names. See
++# processors/verifier_dep_guard_budget.py.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R4/processors/verifier_dep_guard_budget.py::BudgetAwareVerifierDepGuardProcessor
++  budget_margin: 6
++  fallback_max_steps: 80
++  _hook_: '*'
+ workspace: null

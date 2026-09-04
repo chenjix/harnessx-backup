@@ -1,0 +1,46 @@
+421	
+422	    This config contains only the processor pipeline and tool registry — no
+423	    runtime-only slots (``sandbox_provider``, ``tracer``).  It can be saved to
+424	    YAML via ``cfg.to_yaml_file(path)`` and evolved by the meta-harness.
+425	
+426	    The agent injects the runtime slots at run time::
+427	
+428	        base = make_tb2_harness_config(timeout_seconds=task_timeout)
+429	        harness_config = base.copy(
+430	            sandbox_provider=HarborSandboxProvider(environment, ...),
+431	            tracer=HarnessJournal(...),
+432	        )
+433	        harness = ModelConfig(main=provider).agentic(harness_config)
+434	
+435	    Args:
+436	        timeout_seconds:  Task timeout disclosed to the model via
+437	                          ``EnvironmentContextInjector`` and
+438	                          ``TaskTimeReminderProcessor``.
+439	        workspace_path:   Absolute path inside the container where task files live.
+440	        output_limit:     Maximum characters captured per tool call (passed
+441	                          through to ``HarborSandboxProvider`` at run time via
+442	                          the agent; stored here for reference only).
+443	    """
+444	    _ = output_limit  # documented here; consumed by HarborSandboxProvider in agent.py
+445	
+446	    return (
+447	        HarnessBuilder()
+448	        .add(SystemPromptProcessor(_StaticSystemPromptBuilder()), order=1)
+449	        .add(
+450	            EnvironmentContextInjector(
+451	                working_dir=workspace_path,
+452	                timeout_seconds=timeout_seconds,
+453	                show_project_dir=False,
+454	            ),
+455	            order=2,
+456	        )
+457	        .add(TaskTimeReminderProcessor(timeout_seconds=timeout_seconds))
+458	        .add(CompactionProcessor())
+459	        .add(PostCompactionRefreshProcessor())
+460	        .add(ToolCallCorrectionLayer())
+461	        .add(ParseRetryProcessor())
+462	        .add(BgInstallGuard())
+463	        .add(CustomEditToolProcessor())
+464	        .add(CustomSelfVerifyProcessor())
+465	        .slot(tool_registry=_build_tb2_tools())
+466	    ).build()

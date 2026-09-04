@@ -1,0 +1,72 @@
+141	    instruction: str,
+142	    api_base: str,
+143	    model: str,
+144	    max_steps: int,
+145	    temperature: float,
+146	    api_key: str,
+147	    journal_dir: Path | None,
+148	    workspace_path: str = "/home/user",
+149	) -> HarnessAgentResult:
+150	    cfg_path = Path(harness_config).resolve()
+151	    if not cfg_path.is_file():
+152	        raise FileNotFoundError(f"harness config not found: {cfg_path}")
+153	
+154	    # SiblingSystemPromptBuilder + promote paths resolve via this env.
+155	    os.environ["TB2_HARNESS_CONFIG"] = str(cfg_path)
+156	    os.environ["TMAX_HARNESS_CONFIG"] = str(cfg_path)
+157	    sibling_prompt = cfg_path.parent / "system_prompt.txt"
+158	    if sibling_prompt.is_file():
+159	        os.environ["TMAX_SYSTEM_PROMPT_FILE"] = str(sibling_prompt)
+160	
+161	    base_config = _prefer_sibling_prompt_builder(
+162	        HarnessConfig.from_yaml_file(str(cfg_path)), cfg_path
+163	    )
+164	    tracer = None
+165	    if journal_dir is not None:
+166	        journal_dir.mkdir(parents=True, exist_ok=True)
+167	        tracer = HarnessJournal(base_dir=str(journal_dir), export_jsonl=True)
+168	
+169	    harness_config_rt = base_config.copy(
+170	        sandbox_provider=TmaxDockerSandboxProvider(
+171	            container,
+172	            workspace_path=workspace_path,
+173	        ),
+174	        tracer=tracer,
+175	    )
+176	
+177	    provider_kwargs: dict[str, Any] = {
+178	        "base_url": api_base.rstrip("/"),
+179	        "api_key": api_key or "EMPTY",
+180	    }
+181	    if temperature is not None:
+182	        provider_kwargs["temperature"] = float(temperature)
+183	    provider = OpenAIProvider(model=model, **provider_kwargs)
+184	    harness = ModelConfig(main=provider).agentic(harness_config_rt)
+185	    task = BaseTask(description=instruction, max_steps=max_steps)
+186	
+187	    try:
+188	        result = await harness.run(task)
+189	    except Exception as e:
+190	        return HarnessAgentResult(
+191	            steps=0,
+192	            finished="error",
+193	            messages=[],
+194	            error=f"{type(e).__name__}: {e}",
+195	            exit_reason="error",
+196	            log=[{"traceback": traceback.format_exc()[-3000:]}],
+197	        )
+198	
+199	    state = getattr(result, "resume_state", None)
+200	    messages = _messages_from_state(state) if state is not None else []
+201	    finished, exit_reason, err = _finished_from_result(result)
+202	    steps = 0
+203	    if state is not None:
+204	        steps = int(getattr(state, "step", 0) or 0)
+205	    if steps <= 0:
+206	        # Fall back to counting assistant turns.
+207	        steps = sum(1 for m in messages if m.get("role") == "assistant")
+208	    return HarnessAgentResult(
+209	        steps=steps,
+210	        finished=finished,
+
+[Showing lines 141–210 of 247 total. Use offset=210 to read the next section.]

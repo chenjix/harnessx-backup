@@ -1,0 +1,57 @@
+253	        # Detect force_compact from task (StepStartEvent carries the task object)
+254	        if getattr(event.task, "force_compact", False):
+255	            self._force_compact_mode = True
+256	            self._task_anchor = None  # management op — don't prepend description to compacted history
+257	
+258	        messages_to_compact = event.messages if event.messages else event.raw_messages
+259	        before_msgs = len(messages_to_compact)
+260	        before_tokens = rough_token_count(list(messages_to_compact))
+261	
+262	        if (
+263	            not self._force_compact_mode
+264	            and before_tokens <= self.token_threshold
+265	            and before_msgs <= self.message_threshold
+266	        ):
+267	            yield event
+268	            return
+269	
+270	        new_messages = await self._compact(messages_to_compact, run_id=event.run_id)
+271	        new_count = rough_token_count(list(new_messages))
+272	
+273	        self._compact_stats = (before_msgs, len(new_messages), before_tokens, new_count)
+274	
+275	        logger.info(
+276	            "Context compacted: %d → %d messages (~%d → ~%d tokens)",
+277	            before_msgs,
+278	            len(new_messages),
+279	            before_tokens,
+280	            new_count,
+281	        )
+282	
+283	        # Always set the hint so RunLoop labels the auto-boundary as "compaction".
+284	        # If the content didn't actually change, hash comparison won't fire a boundary
+285	        # and this hint is never read.
+286	        hint = BoundaryHint(
+287	            reason="compaction",
+288	            before_msgs=before_msgs,
+289	            after_msgs=len(new_messages),
+290	            before_tokens=before_tokens,
+291	            after_tokens=new_count,
+292	        )
+293	
+294	        yield dataclasses.replace(
+295	            event,
+296	            messages=new_messages,
+297	            raw_messages=new_messages,
+298	            token_count=new_count,
+299	            boundary_hint=hint,
+300	        )
+301	
+302	    async def on_before_model(self, event: BeforeModelEvent):
+303	        if not self._force_compact_mode:
+304	            yield event
+305	            return
+306	
+307	        stats = self._compact_stats
+
+[Showing lines 253–307 of 317 total. Use offset=307 to read the next section.]

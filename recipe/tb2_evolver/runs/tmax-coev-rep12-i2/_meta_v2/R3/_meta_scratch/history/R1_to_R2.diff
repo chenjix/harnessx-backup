@@ -1,0 +1,28 @@
+--- R1
++++ R2
+@@ -55,2 +55,20 @@
+   _hook_: '*'
++# R2 (meta): break the *normal-finish* narration repetition loop that
++# LengthTruncationRecoveryProcessor cannot see. Trajectory evidence: several
++# budget_exceeded tasks emit 4-15 near-identical assistant turns in a row
++# ("I keep getting the same error, let me try a different approach") while never
++# actually changing tactic, burning the entire step budget and exiting with the
++# required output file never written. The length-recovery guard only fires on
++# finish_reason=length; the edit-loop guard only watches file-write commands;
++# neither catches a diagnostic/compile narration loop with a normal finish.
++# This processor fingerprints assistant content and, after N consecutive
++# look-alike turns, injects an escalating corrective nudge (change tactic /
++# write the required output to its exact path). Mutates messages by at most +1
++# user turn per chain; no task-specific literals.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R2/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
++  repeat_threshold: 3
++  escalate_threshold: 5
++  prefix_chars: 120
++  min_content_chars: 40
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor
+@@ -86,3 +104,3 @@
+ # round-trip; no task-specific literals.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R1/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R2/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+   _hook_: '*'

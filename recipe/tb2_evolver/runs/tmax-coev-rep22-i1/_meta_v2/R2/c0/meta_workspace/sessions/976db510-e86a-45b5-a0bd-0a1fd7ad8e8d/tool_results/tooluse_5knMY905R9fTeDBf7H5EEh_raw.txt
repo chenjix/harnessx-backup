@@ -1,0 +1,80 @@
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:15:    role: str  # "user" | "assistant" | "tool"
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:16:    content: str | list  # str for text; list of content blocks for multimodal (Anthropic format)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:17:    tool_call_id: str | None = None
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:19:    tool_calls: tuple = ()  # tuple[ToolCall, ...] — populated for role=assistant with tool calls
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:75:class Event:
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:86:class TaskStartEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:115:class StepStartEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:131:class BeforeModelEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:141:class ModelResponseEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:143:    content: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:144:    thinking: str = ""  # extended thinking / reasoning content from the model
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:146:    tool_calls: tuple[ToolCall, ...] = ()
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:147:    finish_reason: str = "end_turn"
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:154:class ToolCallEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:155:    type: str = field(default="tool_call", init=False)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:158:    tool_call_id: str = ""
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:168:class ToolResultEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:169:    type: str = field(default="tool_result", init=False)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:171:    tool_call_id: str = ""
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:175:    content_blocks: tuple = field(default=(), hash=False, compare=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:176:    # Native multimodal blocks (Anthropic content format) from MCP tools.
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:181:class StepEndEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:184:    tool_call_summary: str = ""  # "tool1(args)|tool2(args)" — used by LoopDetectionProcessor
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:198:class TaskEndEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:221:class SegmentBoundaryEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:270:class SpawnSubAgentEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:302:class ProcessorTriggerEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:346:        * last role is ``"user"``: messages between system and last-user (exclusive both ends)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:347:        * last role is not ``"user"``: messages after system to end (inclusive)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:355:    system_window: tuple[Message, ...] = (msgs[0],) if msgs[0].role == "system" else ()
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:358:    if msgs[-1].role == "user":
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:370:    d: dict = {"role": m.role}
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:372:    if isinstance(m.content, list):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:373:        d["content"] = [dict(sorted(b.items())) if isinstance(b, dict) else b for b in m.content]
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:375:        d["content"] = m.content or ""
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:377:    if m.tool_call_id is not None:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:378:        d["tool_call_id"] = m.tool_call_id
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:381:    if m.tool_calls:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:382:        d["tool_calls"] = [
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:383:            {"id": tc.id, "name": tc.name, "input": dict(sorted(tc.input.items()))} for tc in m.tool_calls
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:394:    Fields included: role, content, tool_call_id, name, tool_calls, thinking_blocks.
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:399:    When a message has no in-memory content (content is empty string / empty list)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:401:    (we never read content_ref files during hashing).
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:419:        "role": m.role,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:420:        "content": m.content if isinstance(m.content, list) else (m.content or ""),
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:422:    if m.tool_call_id:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:423:        d["tool_call_id"] = m.tool_call_id
+--

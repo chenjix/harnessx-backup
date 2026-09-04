@@ -1,0 +1,130 @@
+# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+#
+# Live surfaces MetaAgent may edit:
+#   - processors (this file)
+#   - tool_registry (this file)
+#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+#
+# Runtime-only slots (sandbox_provider, tracer) are injected by
+# recipe.tmax_eval.harness_runner — do not put them here.
+#
+# Per-call output cap is NOT in this YAML: harness_runner sets
+# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+# runaway generation cannot burn an hour of wall-clock on one task.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /home/user
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  show_project_dir: false
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at:
+  - 0.7
+  - 0.9
+  _hook_: '*'
+# External-HTTP-verifier dependency reminder. A whole cluster of Tmax tasks
+# ask the agent to stand up a service (HTTP server / nginx reverse proxy /
+# UNIX-socket backend / web microservice) that an EXTERNAL automated verifier
+# then exercises with Python `requests`. The base image ships without
+# `requests`, so the verifier's `test_final_state.py` fails to even collect
+# (ModuleNotFoundError) and the task scores 0 even when the service is
+# correct. The agent cannot see the verifier's test files (they are injected
+# after it exits), so it never installs the dep — but outbound pip DOES work
+# here. This processor injects ONE reminder, only on tasks whose description
+# signals a build-a-service-the-verifier-calls shape, to ensure the system
+# Python has the client library before finishing. No task-specific literals.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i3/R0/assets/processors/verifier_http_dep_reminder.py::VerifierHttpDepReminder
+  dep_module: requests
+  _hook_: '*'
+# Step-budget-proximity verification nudge. Complements CustomSelfVerifyProcessor
+# (which fires only on a voluntary exit-intent turn) and TaskTimeReminderProcessor
+# (a no-op without timeout_seconds): fires ONCE when the run crosses a fraction of
+# the hard step cap, forcing the agent to confirm every required output artifact
+# exists at its exact path before the budget_exceeded cap terminates the run.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i3/R0/assets/processors/step_budget_verify.py::StepBudgetVerifyProcessor
+  step_budget: 80
+  warn_fraction: 0.8
+  _hook_: '*'
+# Break max_tokens repetition loops (finish_reason=length, no tool call).
+# Without this, one stuck task can block an entire evolve round.
+- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+  repeat_threshold: 2
+  head_chars: 1200
+  tail_chars: 600
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+# Break degenerate identical-command loops (same Bash command re-issued
+# turn after turn with the same result). Complements CustomEditToolProcessor
+# (which counts file edits): this keys on a normalised hash of the whole
+# command, so it fires for OCR/extraction loops, compile loops, SQL/file
+# rewrites — any stuck-repeat class — and escalates a directive that also
+# warns against silently fabricating unreadable required data.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i3/R0/assets/processors/repeated_command_breaker.py::RepeatedCommandBreaker
+  tool_name: Bash
+  warn_threshold: 3
+  hard_threshold: 5
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+# Spec-convention audit nudge for exact-computed-value / exact-string deliverables.
+# The whole scientific_computing cluster scored 0 this round with a SINGLE
+# recurring mechanism: a textbook, self-consistent implementation that is off by
+# a SPECIFICATION CONVENTION (regression axis/order, RNG seed & call order,
+# indexing / off-by-one, integration endpoint/bin boundaries, search stopping
+# rule, rounding) — committed after one run with only the FILE's existence and
+# FORMAT re-checked, never the VALUE's conventions. The hidden grader is injected
+# only after the agent exits, so the agent's only defence is to adversarially
+# re-read every value-changing spec convention against its code before committing.
+# This SUPERSEDES the R1 NumericCrossCheckNudge (whose "re-derive by a second
+# independent method" framing is weak against convention bugs: two methods that
+# share the same misread convention agree and stay wrong). It fires ONCE, on the
+# same exit-intent signal CustomSelfVerifyProcessor keys on (ordered right after
+# it, adds no tool call of its own), appending a general convention-audit
+# reminder. It names no task, dataset, algorithm, constant, expected value, or
+# path — a pure strategy nudge that is a no-op on non-computational tasks and on
+# runs that never reach an exit-intent turn.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i3/_meta_v2/R2/c3/processors/spec_convention_audit.py::SpecConventionAuditNudge
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

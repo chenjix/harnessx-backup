@@ -1,0 +1,60 @@
+## Round 1 — OCR-quality prompt rule
+
+<!-- journal:frontmatter
+round: 1
+timestamp: 2026-04-27T00:00:00Z
+hypothesis_id: h_ocr_quality_v1
+levers: [instruction]
+predicted_affected: [task_000015_89886d8d, task_000505_50b5162d]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Flips the hard-image-OCR sub-cluster (>=2 tasks) where exact/structured text must be read from a low-DPI image; keys off the tesseract warning shape so it generalizes to unseen image tasks"
+regression_risk: "Low — rule only adds verify/upscale guidance for image OCR; no processor-pipeline change, non-image tasks structurally untouched"
+cost_shift: "Negligible; a few extra tesseract re-runs on image tasks only, ~0 on the ~43 non-image tasks (<1% per-round token delta)"
+rollback_trigger: "If image-OCR tasks stay failing AND overall pass_rate drops, revert the prompt edit"
+-->
+
+### Why
+
+Assigned focus task_000015_89886d8d fails (accuracy 0.6875 < 0.98). Root
+cause: the routing-schema image is stored with 0 DPI, so `tesseract` prints
+`Invalid resolution 0 dpi. Using 70 instead` and returns garbled text. The
+agent could not get a clean read, then *guessed* the schema mapping from the
+garbled OCR + the sample URLs — the guess was wrong. Same shape recurs on
+task_000505_50b5162d: an ed25519 SSH key is mis-OCR'd (`lZDI1NTE5`→`IZDIINTES`,
+stray spaces + a `|`) and embedded verbatim into the detector. Both are
+Instruction gaps: tesseract (via the only tool, Bash) fires and returns data,
+but the agent lacks the standard OCR-quality technique (upscale + explicit
+high DPI, plausibility cross-check) and never applies it. task_001013 OCR'd a
+short clean token successfully, confirming the fix is scoped to hard reads.
+
+### Changes
+
+- `system_prompt.txt` — appended a general OCR-quality strategy: distrust a
+  raw pass, watch for the low-DPI/resolution warning, re-run with upscale +
+  ~300 DPI + preprocessing, sanity-check extracted strings against their
+  known shape, never fabricate/guess an exact value. No task literals.
+- `config.yaml` — byte-identical to R0 (SiblingSystemPromptBuilder reads the
+  new sidecar from output_dir); processor pipeline unchanged.
+
+### Evidence
+
+- task_000015 step 1 output: `Warning: Invalid resolution 0 dpi. Using 70
+  instead. Estimating resolution as 111 ... 1. atalogyitem <item _id>...`
+  garbled; agent later "infer[s] the following mapping" and hardcodes a wrong
+  guessed schema → accuracy 0.6875.
+- task_000505 step 2 output: `... Using 70 instead. Estimating resolution as
+  173 ssh-ed25519 AAAAC3NzaC1IZDIINTESAAAAIOrXQ50Bf4PZU0H9 + |J9tY +X07yG/...`
+  corrupt key embedded verbatim → reward 0.
+
+### Uncertainty
+
+The agent must actually act on the guidance (upscale/DPI) rather than just
+re-running the same command; the truncation loop on task_000015 shows a
+tendency to repeat cosmetic variations. If the OCR tasks stay failing with no
+DPI-override attempt, the gap is capability-of-following-strategy, not
+knowledge — next round consider a Control hook that appends a DPI-fix hint
+when a tesseract call with the low-DPI warning is detected in Bash output.
+=== EXISTS? ===
+-rw-r--r-- 1 jixuan.chen xuser 3157 Sep  2 03:59 /fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep22-i5/learnings.md

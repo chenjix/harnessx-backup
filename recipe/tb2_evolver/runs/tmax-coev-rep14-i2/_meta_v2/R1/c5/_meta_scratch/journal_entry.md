@@ -1,0 +1,70 @@
+
+
+## Round 1 (c5) — warn-only loop nudge, regression-safe calibration
+
+<!-- journal:frontmatter
+round: 1
+timestamp: 2026-08-29T00:00:00Z
+hypothesis_id: h_loop_detection_v2
+levers: [configuration]
+predicted_affected: [task_000313_1dce9844, task_001098_f5acdd79, task_001979_a1e24b6f, task_001032_1adaccb9]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Reclaims wasted compute from the non-recovering byte-identical tool-call loop cluster (>=3 tasks, 33-42 repeats ending in budget_exceeded/error) via a clean loop_detected exit"
+regression_risk: "A task legitimately issuing >=30 byte-identical calls in a row would be cut short; the only observed recover-after-loop case (task_000936, PASSED) peaks at 26 identical calls, safely under threshold=30"
+cost_shift: "Net negative (lower) - extreme loops exit ~30-70 steps earlier; one processor adds negligible per-call hashing overhead"
+rollback_trigger: "Next-round pass_rate drops OR any loop_detected exit appears on a task that previously passed (especially task_000936_2a78f3ca)"
+retry_rationale: "R1 c-batch sibling proposed h_loop_detection_v1 raise-at-5; NEW evidence this focus surfaced - task_000936 PASSED after 26 identical consecutive tool calls, so any raise <=26 regresses it. This is a different shape (warn-only escalation, threshold above the recovery ceiling, Strategy 2 off) at the same lever."
+-->
+
+### Why
+
+Assigned focus task_000118_3043e92d (write a log-quota monitor daemon) failed
+reward=0 exit=done at 48 steps. Root cause verified at step 14: the agent's own
+test printed "Monitor PID: 91 / All worker processes have completed. Exiting. /
+Starting deployment..." - its worker-check + break sits at the TOP of the loop,
+so when the verifier starts the monitor before the deployment (start monitor,
+sleep 0.5s, start deploy) the monitor exits immediately, never monitors, and 20
+logs reach 10 MB each = 209 MB, far over the 45 MB threshold. The agent
+CORRECTLY diagnosed this in natural language (steps 37/39/79/95) but could not
+implement the fix - it fell into a byte-identical rewrite loop (6 consecutive
+identical file writes), and the existing EditDetection WARN at step 62 was
+ignored. task_000118's terminal blocker is thus a MODEL CAPABILITY GAP (cannot
+turn a correct diagnosis into a working daemon with a startup grace period), not
+harness-fixable without task-specific knowledge injection.
+
+The systemic harness deficiency the failure exposes is real: a cross-task
+cluster loops on byte-identical tool calls with NO clean-exit escape. Measured
+max-consecutive-identical runs: task_000313=33 (budget_exceeded),
+task_001098=33 (error), task_001979=42 (error), task_001032=13 (budget_exceeded),
+task_000118=6. All already reward=0. The fix reclaims their wasted budget.
+
+### Changes
+
+- config.yaml - wire the existing-but-unwired LoopDetectionProcessor in
+  warn-only escalating mode: warn_threshold=4, threshold=30 (raise to clean
+  loop_detected exit), name_warn_threshold=999 (Strategy 2 disabled since a
+  Bash-only agent issues many legit consecutive Bash calls), window_size=50
+  (greater than threshold so the consecutive-run tail can reach 30),
+  compaction_drop_threshold=5.
+
+### Evidence
+
+- task_000118 step 14 tool result: monitor exits before workers start; logs
+  listing shows all 20 x 10 MB files = 209 MB (verifier threshold 45 MB).
+- task_000118 steps 57,61,65,69,73,77: 6 byte-identical file writes in a row;
+  step 62 EditDetection warn ignored.
+- task_000313: 33 byte-identical consecutive tool calls, 0 truncation markers,
+  budget_exceeded (pure non-recovering loop).
+- task_000936_2a78f3ca (REGRESSION probe, reward=1): 26 byte-identical
+  "cd /home/user/pipeline && ls -la" at steps 2-52, recovered at step 55,
+  PASSED. threshold=30 leaves it untouched.
+
+### Uncertainty
+
+Honest: this does NOT flip the focus task_000118 (capability gap) - its value is
+budget reclamation on the loop cluster (all already failing, near-zero
+regression) plus a marginal early-nudge chance. If a legitimate 30+ identical-
+repeat task exists in the eval, threshold=30 could cut it short; the observed
+recovery ceiling is 26, giving a 4-repeat margin. Watched via rollback_trigger.

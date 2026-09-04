@@ -1,0 +1,89 @@
+1	# SPDX-License-Identifier: MIT
+2	"""Exit-time self-verification augmented with process-lifecycle reconciliation.
+3	
+4	Extends the stock TB2 ``CustomSelfVerifyProcessor`` one-shot exit checklist
+5	with a *process/service lifecycle* reconciliation step. The stock checklist
+6	covers output files and "services still alive", but has no coverage for two
+7	recurring, verifier-checked failure shapes on process-management tasks:
+8	
+9	  1. Processes that the task requires to be **stopped/cleaned up** are left
+10	     lingering after the agent's own testing spawned them (the verifier greps
+11	     for them and fails on any survivor).
+12	  2. A recorded PID (e.g. a ``*.pid`` file) points at a shell wrapper rather
+13	     than the target binary, so ``/proc/<pid>/comm`` reads ``bash`` / ``sh``
+14	     instead of the program name the verifier expects.
+15	
+16	Both are general shell-lifecycle disciplines, not task-specific knowledge.
+17	The augmented checklist prompts the agent to reconcile the final process
+18	table against the task's stated lifecycle requirements (which processes must
+19	persist, which must be gone) and to confirm any recorded PID names the actual
+20	program. Everything mechanical (one-shot keepalive, singleton group, before
+21	model injection) is inherited unchanged from the stock processor, so this adds
+22	no new mechanical regression surface.
+23	"""
+24	
+25	from __future__ import annotations
+26	
+27	import dataclasses
+28	import uuid
+29	
+30	from harnessx.core.events import ModelResponseEvent, ToolCall
+31	
+32	from benchmarks.terminal_bench_2.harness import (
+33	    CustomSelfVerifyProcessor,
+34	    _SELF_VERIFY_MSG,
+35	    _SELF_VERIFY_TOOL,
+36	)
+37	
+38	
+39	# The stock checklist plus a general process-lifecycle reconciliation step.
+40	# No task ids, paths, ports, or process names from any training task appear
+41	# here — it describes the *class* of check, letting the agent fill in the
+42	# concrete requirements from the task description it re-reads in step 1.
+43	_LIFECYCLE_CLAUSE = """
+44	6. **Reconcile the final process/service state with the task's lifecycle requirements.** \
+45	Run `ps -ef` (or `pgrep -a`) and read the task description again for lifecycle wording:
+46	   - Every process/service the task requires to keep **running** must still be alive right now.
+47	   - Every process the task requires to be **stopped, cleaned up, or not left lingering** \
+48	(including any you spawned only for your own testing) must be gone — kill leftovers before exiting.
+49	   - If the task asks you to record a PID (e.g. a `*.pid` file), confirm that PID names the \
+50	**actual target program**, not a shell wrapper: check `cat /proc/<pid>/comm`. Launching via \
+51	`bash -lc "... &"` or `nohup sh -c "prog &"` records the wrapper's PID, not `prog`'s — start \
+52	the binary directly (or `exec` it) so the recorded PID is the program itself.
+53	"""
+54	
+55	
+56	class ProcessLifecycleSelfVerifyProcessor(CustomSelfVerifyProcessor):
+57	    """CustomSelfVerifyProcessor with an appended process-lifecycle checklist item.
+58	
+59	    Reuses the stock singleton group ``tb2_self_verify`` so it *replaces* the
+60	    stock processor in the pipeline rather than firing a second, conflicting
+61	    keepalive. Only ``on_after_model`` is overridden — to arm the extended
+62	    message; ``on_before_model`` / ``on_before_tool`` / task lifecycle hooks
+63	    are inherited verbatim.
+64	    """
+65	
+66	    def __init__(self) -> None:
+67	        super().__init__()
+68	        # Splice the lifecycle clause in before the closing "Fix anything..."
+69	        # instruction so the SUCCESS marker guidance stays last.
+70	        marker = "\nFix anything that looks wrong before exiting."
+71	        if marker in _SELF_VERIFY_MSG:
+72	            head, tail = _SELF_VERIFY_MSG.split(marker, 1)
+73	            self._message = head + _LIFECYCLE_CLAUSE + marker + tail
+74	        else:
+75	            self._message = _SELF_VERIFY_MSG + "\n" + _LIFECYCLE_CLAUSE
+76	
+77	    async def on_after_model(self, event: ModelResponseEvent):
+78	        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+79	        if exit_intent and not self._verified:
+80	            self._verified = True
+81	            self._pending_message = self._message
+82	            keepalive = ToolCall(
+83	                id=f"sv-{uuid.uuid4().hex[:8]}",
+84	                name=_SELF_VERIFY_TOOL,
+85	                input={},
+86	            )
+87	            yield dataclasses.replace(event, tool_calls=(keepalive,))
+88	        else:
+89	            yield event

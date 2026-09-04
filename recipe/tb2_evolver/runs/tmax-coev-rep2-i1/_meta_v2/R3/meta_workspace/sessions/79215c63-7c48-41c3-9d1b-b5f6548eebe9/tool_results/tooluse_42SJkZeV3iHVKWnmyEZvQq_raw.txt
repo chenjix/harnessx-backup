@@ -1,0 +1,200 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatedCommandBreakerProcessor — escalating, deliverable-grounded nudge for
+4	identical-command repetition loops.
+5	
+6	Systemic failure mode observed on the weak-model Tmax eval (R1 trajectories):
+7	several ``budget_exceeded``-at-80-steps tasks are dominated by the agent
+8	re-issuing the **exact same Bash command** turn after turn, each returning the
+9	same result (frequently ``(exit 0, no output captured)``), while never producing
+10	the concrete output artifacts the task requires.
+11	
+12	Verified (R1 run):
+13	  * task_000958: 33 tool calls, ALL 33 identical (a broken server restart loop).
+14	  * task_001818: 27 of 29 identical.
+15	  * task_001032: 25 of 29 identical.
+16	  * task_000264: 21 consecutive identical ``cat > /tmp/test.sql`` heredoc writes;
+17	    the agent had a correct recursive CTE but re-wrote the intermediate SQL file
+18	    over and over and NEVER referenced the required deliverables
+19	    (top_managers.csv / query_plan.txt) in a single command.
+20	
+21	Why the existing guards don't close this:
+22	  * ``LengthLoopDeprimeProcessor`` (R1) only fires on ``finish_reason == "length"``
+23	    truncations; these loops complete normally with a tool call each turn.
+24	  * ``CustomEditToolProcessor`` warns on file over-editing, but (a) fired 3x on
+25	    task_000264 and was **ignored** — a generic "try something different" nudge
+26	    is too weak for this model — and (b) never fires on non-edit command loops
+27	    like task_000958's ``pkill; ./server; ps`` cycle.
+28	
+29	Why NOT the stock ``LoopDetectionProcessor`` (which *raises* LoopDetectedError
+30	at 5 identical calls): two currently-PASSING tasks issue 27 consecutive
+31	identical commands and still pass (task_000536 re-writes an audit script 27x;
+32	task_001089 loops on a malformed empty tool call 27x). A hard raise would kill
+33	both → a 2-task regression to chase 1 speculative flip. The identical-command
+34	signature does NOT discriminate pass from fail, so this processor is
+35	**warn-only, never raises**. It preserves the passing loopers untouched while
+36	giving the failing loopers an escalating, deliverable-grounded directive that
+37	the generic edit-warning did not provide.
+38	
+39	Mechanism (Control lever): fingerprint each tool call (name + serialised
+40	inputs) in ``on_before_tool``; in ``on_after_tool`` count the consecutive
+41	identical run at the tail. At ``warn_at`` repeats append a directive telling the
+42	agent it is repeating a command with no change and to STOP and instead VERIFY
+43	the task's required output artifacts exist / are non-empty (or take a
+44	fundamentally different action). At ``escalate_at`` the directive hardens: the
+45	loop is confirmed unproductive; produce the required deliverable now. Interleaving
+46	any different command resets the run count, so legitimate varied exploration is
+47	never touched.
+48	
+49	Contract-safe: only appends to the current ``ToolResultEvent.result`` string in
+50	``on_after_tool`` (same surface the stock LoopDetectionProcessor mutates) — it
+51	never touches ``event.messages``, the system prompt, or history ordering.
+52	"""
+53	
+54	from __future__ import annotations
+55	
+56	import dataclasses
+57	import hashlib
+58	import json
+59	from collections import deque
+60	
+61	from harnessx.core.events import (
+62	    StepStartEvent,
+63	    TaskEndEvent,
+64	    TaskStartEvent,
+65	    ToolCallEvent,
+66	    ToolResultEvent,
+67	)
+68	from harnessx.core.processor import MultiHookProcessor
+69	
+70	
+71	_WARN_TEMPLATE = (
+72	    "\n\n[RepeatedCommand] ⚠️  You have run the EXACT same command {count} times "
+73	    "in a row and the result has not changed. Repeating it again will not help. "
+74	    "STOP repeating it. Re-read the task description and list the concrete output "
+75	    "artifacts it requires (files at specific paths, a running service, a report). "
+76	    "Your next command should either (a) VERIFY one of those required deliverables "
+77	    "actually exists and is non-empty (e.g. `ls -l <path>`, `cat <path>`), or "
+78	    "(b) take a fundamentally different action toward producing it — not another "
+79	    "copy of the same command."
+80	)
+81	
+82	_ESCALATE_TEMPLATE = (
+83	    "\n\n[RepeatedCommand] ⛔ STOP — this is the {count}th identical run of the same "
+84	    "command and it is producing no progress. You are burning the step budget in a "
+85	    "loop. Do NOT run this command again. The task will only be scored on its "
+86	    "required output artifacts, which you have not yet produced. In your next turn, "
+87	    "issue ONE different command that writes or verifies a required deliverable at "
+88	    "the exact path the task specifies. If you believe the deliverable is already "
+89	    "correct, verify it directly (`ls -l` / `cat` the required path) and then finish."
+90	)
+91	
+92	
+93	class RepeatedCommandBreakerProcessor(MultiHookProcessor):
+94	    """Warn-only escalating breaker for consecutive identical tool-call loops.
+95	
+96	    Args:
+97	        warn_at:      Consecutive-identical count at which the first (verify-your-
+98	                      deliverables) directive is appended to the tool result
+99	                      (default 3).
+100	        escalate_at:  Consecutive-identical count at which the hardened directive
+101	                      is appended instead (default 5). Never raises.
+102	        window_size:  Sliding fingerprint window (default 12).
+103	        compaction_drop_threshold: message-count drop that signals compaction and
+104	                      clears the fingerprint window to avoid stale counts (default 5).
+105	    """
+106	
+107	    _singleton_group = "tmax_repeated_command_breaker"
+108	    _order = 21  # after loop_detection's slot; operates only on tool results
+109	
+110	    def __init__(
+111	        self,
+112	        warn_at: int = 3,
+113	        escalate_at: int = 5,
+114	        window_size: int = 12,
+115	        compaction_drop_threshold: int = 5,
+116	    ) -> None:
+117	        self.warn_at = max(2, int(warn_at))
+118	        self.escalate_at = max(self.warn_at + 1, int(escalate_at))
+119	        self.window_size = max(2, int(window_size))
+120	        self.compaction_drop_threshold = max(1, int(compaction_drop_threshold))
+121	
+122	        self._fingerprints: deque[str] = deque(maxlen=self.window_size)
+123	        self._pending_fp: dict[str, str] = {}
+124	        self._current_run_id: str = ""
+125	        self._prev_message_count: int = 0
+126	
+127	    # ------------------------------------------------------------------
+128	    def _fingerprint(self, tool_name: str, tool_input) -> str:
+129	        try:
+130	            input_str = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
+131	        except Exception:
+132	            input_str = repr(tool_input)
+133	        return hashlib.sha256(f"{tool_name}\x00{input_str}".encode()).hexdigest()[:16]
+134	
+135	    @staticmethod
+136	    def _consecutive_tail(window: deque, fp: str) -> int:
+137	        count = 0
+138	        for past in reversed(window):
+139	            if past == fp:
+140	                count += 1
+141	            else:
+142	                break
+143	        return count
+144	
+145	    def _reset(self) -> None:
+146	        self._fingerprints.clear()
+147	        self._pending_fp.clear()
+148	        self._prev_message_count = 0
+149	
+150	    # ------------------------------------------------------------------
+151	    async def on_task_start(self, event: TaskStartEvent):
+152	        self._reset()
+153	        self._current_run_id = event.run_id
+154	        yield event
+155	
+156	    async def on_step_start(self, event: StepStartEvent):
+157	        if event.run_id != self._current_run_id:
+158	            self._reset()
+159	            self._current_run_id = event.run_id
+160	        current = len(event.messages)
+161	        if (
+162	            self._prev_message_count > 0
+163	            and self._prev_message_count - current >= self.compaction_drop_threshold
+164	        ):
+165	            self._fingerprints.clear()
+166	            self._pending_fp.clear()
+167	        self._prev_message_count = current
+168	        yield event
+169	
+170	    async def on_before_tool(self, event: ToolCallEvent):
+171	        self._pending_fp[event.tool_call_id] = self._fingerprint(
+172	            event.tool_name, event.tool_input
+173	        )
+174	        yield event
+175	
+176	    async def on_after_tool(self, event: ToolResultEvent):
+177	        fp = self._pending_fp.pop(event.tool_call_id, None)
+178	        if not fp:
+179	            # No fingerprint captured → treat as a run-breaking step.
+180	            self._fingerprints.append("")
+181	            yield event
+182	            return
+183	
+184	        run = self._consecutive_tail(self._fingerprints, fp) + 1
+185	        self._fingerprints.append(fp)
+186	
+187	        directive = ""
+188	        if run >= self.escalate_at:
+189	            directive = _ESCALATE_TEMPLATE.format(count=run)
+190	        elif run >= self.warn_at:
+191	            directive = _WARN_TEMPLATE.format(count=run)
+192	
+193	        if directive:
+194	            yield dataclasses.replace(event, result=(event.result or "") + directive)
+195	        else:
+196	            yield event
+197	
+198	    async def on_task_end(self, event: TaskEndEvent):
+199	        self._reset()
+200	        yield event

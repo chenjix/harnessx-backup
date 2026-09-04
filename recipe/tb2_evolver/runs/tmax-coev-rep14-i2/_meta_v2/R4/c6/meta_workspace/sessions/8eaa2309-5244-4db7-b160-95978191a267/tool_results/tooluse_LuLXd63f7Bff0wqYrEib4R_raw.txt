@@ -1,0 +1,67 @@
+=== config loop_detection block ===
+46:  repeat_threshold: 2
+47-  head_chars: 1200
+48-  tail_chars: 600
+49-  _hook_: '*'
+50-# Break ACTION-level repetition loops (identical Bash calls repeated with no
+51-# state progress). This is a COMPACTION-SAFE drop-in replacement for the stock
+52:# LoopDetectionProcessor (same _singleton_group="loop_detection", _order=20).
+53-#
+54-# Why the replacement: the stock processor fully clears its fingerprint window
+55:# on every compaction-driven message drop (>= compaction_drop_threshold). When
+56-# the agent is stuck emitting the SAME Bash call repeatedly, each repeated turn
+57-# re-narrates and re-grows the context, which itself trips CompactionProcessor
+58-# — so the reset wipes the in-progress identical run before the consecutive
+59:# counter can reach `threshold`, silently defeating the detector. Verified on
+60-# this benchmark: tasks issued 9-33 byte-identical consecutive calls yet NO task
+61-# ever produced a clean `loop_detected` exit; they burned the whole step budget
+62-# (budget_exceeded/error) instead, and the warn-nudge never reached the agent.
+63-#
+64-# The fix preserves ONLY the trailing consecutive run across a compaction reset
+65-# (dropping older heterogeneous fingerprints, which was the real stale-false-
+66-# positive risk the reset targeted), so a genuine loop still accumulates toward
+67:# threshold and the warn escalation still reaches the model.
+68-#
+69-# Knobs are recalibrated for this Bash-only agent:
+70:#   - warn_threshold=8: injects "you are stuck, try something different" starting
+71-#     at 8 consecutive identical calls — now reaches loop tasks that compaction
+72-#     previously silenced, while tolerating short legit repeats.
+73:#   - threshold=30 raises LoopDetectedError -> graceful `loop_detected` exit; set
+74-#     ABOVE the observed recover-after-loop ceiling (task_000936 PASSED after 26
+75-#     identical calls then recovered) so a recovering loop is never cut short,
+76-#     while the pathological 30+ non-recovering loops get their budget reclaimed.
+77:#   - window_size=40 > threshold so the consecutive-run tail can reach 30.
+78:#   - name_warn_threshold=999 disables Strategy 2 (a Bash-only agent issues many
+79-#     legit consecutive Bash calls with varying args).
+80:- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep14-i2/_meta_v2/R4/c6/processors/loop_detection_compaction_safe.py::CompactionSafeLoopDetectionProcessor
+81:  window_size: 40
+82:  warn_threshold: 8
+83:  threshold: 30
+84:  name_warn_threshold: 999
+85:  compaction_drop_threshold: 5
+86-  _hook_: '*'
+87-- _target_: harnessx.processors.control.compaction.CompactionProcessor
+88:  token_threshold: 140000
+89:  message_threshold: 100
+90-  retention_window: 6
+91-  eviction_fraction: 0.5
+92-  summarize_key: summarize
+93-  preserve_first_message: true
+94-  _hook_: '*'
+95-- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+96-  max_consecutive_errors: 1
+97-  _hook_: '*'
+98-- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+99:  drop_threshold: 5
+100-  _hook_: '*'
+101-- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+102-  _hook_: '*'
+103-- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+104:  threshold: 7
+105-  _hook_: '*'
+=== TASK.md memo path ===
+12:- `memo_path`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep14-i2/learnings.md`
+13:- `journal_context`: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep14-i2/_meta_v2/R4/c6/_meta_scratch/CONTEXT.md` — machine-rendered lever scoreboard, recent hypotheses, reverted bets, per-task history matrix, recent changesets. Read this after the memo to see which levers have been tried and how well their predicted-affected tasks actually flipped
+64:   - a new `## Round N` section appended to `memo_path` journal with
+76:2. **novelty** — a journal hypothesis_id marked `reverted` in
+80:   one `## Candidate C-N` section, and the journal entry's

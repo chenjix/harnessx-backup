@@ -1,0 +1,73 @@
+1	## Round 1 — numeric-result interpretation audit
+2	
+3	<!-- journal:frontmatter
+4	round: 1
+5	timestamp: 2026-06-01T00:00:00Z
+6	hypothesis_id: h_numeric_audit_v1
+7	levers: [control]
+8	predicted_affected: [task_000111_cbada64a, task_001330_f5aff1f5, task_001937_ac874115]
+9	cited_candidates: [C-001]
+10	gating_outcome: accepted
+11	gating_attribution: score=20/50; +1/-4 gained=task_001653_c4cafa73 lost=task_000682_af0248a6,task_000939_1592be48,task_001098_f5acdd79,task_001832_dd672877; gating disabled (tolerance < 0)
+12	expected_global_gain: "Raise catch-rate on the scientific_computing/data_science close-but-wrong-numeric cluster (only 1/5 sci-comp passed in r0) by steering the existing self-verify turn toward interpretation audit"
+13	regression_risk: "Numeric tasks that were already correct spend a few extra Bash verification turns; non-numeric tasks untouched (processor stays silent). No correctness risk — only augments a tool result, never injects a message."
+14	cost_shift: "Small + on numeric tasks (a few extra verification Bash calls); ~0 on non-numeric tasks; per-call token cap unchanged"
+15	rollback_trigger: "If next round shows the numeric cluster pass-rate flat/down AND numeric tasks' mean step-count materially up, revert (cost without catches)"
+16	-->
+17	
+18	### Why
+19	
+20	Assigned focus `task_000111_cbada64a` (scientific_computing) fails: the agent
+21	wrote structurally-correct OLS+bootstrap C++, ran it in 7 steps / 16.9s, and
+22	committed `m=2.5056` where the verifier expected `m≈2.5997`. OLS is
+23	deterministic in the data, so the miss is an *interpretation* error (parsing /
+24	index / formula), not a harness crash. The same shape recurs across the
+25	numeric cluster: `task_001330` (Monte-Carlo fit, m=0.048 vs 0.050, 7 steps)
+26	and `task_001937` (grid opt, 60 vs 50, 15 steps). In every case the agent
+27	exited fast (`no_tool_calls`) and its one-shot `_tb2_self_verify` turn only
+28	re-`cat`'d the output and re-confirmed format — it never re-audited the
+29	algorithmic interpretation where the answer actually went wrong. The built-in
+30	`CustomSelfVerifyProcessor` prompt (read-only) is oriented to file
+31	existence/format, which is the wrong lens for numeric-computation tasks.
+32	
+33	### Changes
+34	
+35	- `processors/numeric_result_audit.py` — new `NumericResultAuditProcessor`
+36	  (`MultiHookProcessor`). On `on_after_tool`, when the built-in synthetic
+37	  `_tb2_self_verify` tool fires, it appends a computational-interpretation
+38	  audit directive (re-read the method; check draw-order/seed, index/axis
+39	  conventions, parsing edge cases, formula/rounding variant; recompute an
+40	  independent second way; try the alternative reading of any ambiguity). Fires
+41	  at most once, and only when the session produced a value-agnostic
+42	  numeric-result signature. Contract-safe: augments `event.result` only.
+43	- `config.yaml` — register the new processor immediately after
+44	  `CustomSelfVerifyProcessor` (`_order=95`, after self-verify's `_order=90`).
+45	
+46	### Evidence
+47	
+48	- `task_000111_cbada64a` result.json: `finished=no_tool_calls`, `steps=7`,
+49	  `elapsed_s=16.9`, verifier `abs(2.5056-2.5997)=0.094 > 0.001`. Messages
+50	  after `_tb2_self_verify` (msgs 87-128): only `ls -lh`/`cat result.txt` +
+51	  format narration — no re-derivation.
+52	- `task_001330_f5aff1f5` result.json: `steps=7`, verifier `'0.048' != '0.050'`
+53	  with hint "Ensure you used numpy.random.seed(42) and the correct
+54	  parameters". Messages after `_tb2_self_verify` (msgs 86-129): `cat
+55	  trajectory_fit.txt` + "Both values are rounded to 3 decimal places" — never
+56	  questions the RNG draw order producing 0.048.
+57	- `task_001937_ac874115` result.json: `steps=15`, verifier "Expected Optimal
+58	  Grid to be 50, but got 60".
+59	- Heuristic unit-checked: `_looks_numeric` fires on `2.5056,1.2262,...`,
+60	  `m=0.048, c=40.237`, `Frame 0: X=41, Y=20`; silent on `ls -lh` output,
+61	  version banners, and prose.
+62	
+63	### Uncertainty
+64	
+65	Honest weak point: for `task_000111`/`task_001330` the misread is subtle, so
+66	re-reading may not deterministically flip them — the directive raises the
+67	probability of catching an interpretation error, it does not guarantee it (the
+68	retroactive check is partial-yes, strongest on `task_001937`-style
+69	"alternative reading" misses). The intervention is deliberately free on tasks
+70	where it doesn't fire, so the downside is bounded. If the numeric cluster
+71	doesn't move next round while step-counts rise, revert per the trigger. This
+72	was NOT patched by embedding any task answer or constant — it is a
+73	generalizable strategy nudge gated on a value-agnostic signal.

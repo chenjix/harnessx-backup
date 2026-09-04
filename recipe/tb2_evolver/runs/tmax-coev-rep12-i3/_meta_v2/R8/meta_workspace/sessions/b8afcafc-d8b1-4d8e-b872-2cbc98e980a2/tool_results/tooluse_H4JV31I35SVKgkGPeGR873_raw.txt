@@ -1,0 +1,213 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""TruncationLoopCompactor — collapse repeated max_tokens-truncation turns.
+4	
+5	Closes a systemic *self-reinforcing verbosity loop* observed on the eval
+6	model (a small, chatty model run with a hard ``max_tokens`` output cap).
+7	
+8	Failure shape (from the r6 trajectories):
+9	
+10	    assistant  ~4096-token prose, finish_reason=length, NO tool call
+11	    user       "Your previous response was cut off by the token limit.
+12	                Please continue from where you left off."   (run-loop default)
+13	    assistant  ~identical prose again ...
+14	    user       (same passive nudge) ...
+15	    ... repeated 8-23 times until budget_exceeded ...
+16	
+17	The run loop appends a *passive* "please continue" nudge after every
+18	length-truncation. Because the model then sees a growing wall of its own
+19	near-identical truncated narration (measured: the SAME assistant prefix
+20	repeated 10-13 times in a single run), it pattern-matches on that wall and
+21	reproduces it — the passive nudge literally instructs it to *continue* the
+22	runaway generation. The pre-existing ``LengthTruncationRecoveryProcessor``
+23	collapses each *individual* truncated turn and swaps the nudge in
+24	``on_before_model``, but that edit is ephemeral (it never lands in
+25	``state.raw_messages``) so the accumulated wall of duplicates keeps growing
+26	and keeps priming the loop.
+27	
+28	This processor runs at ``on_step_start`` (after context assembly / after the
+29	CompactionProcessor at order 8). When it detects a run of >= ``min_run``
+30	consecutive near-identical *truncated* assistant turns — each optionally
+31	followed by the run loop's passive "continue" nudge — it **collapses the run
+32	into a single note** plus one actionable directive. Because the run loop
+33	persists a step_start structural history change into ``state.raw_messages``
+34	(the auto-boundary path), the collapse is durable: the model no longer sees
+35	its own repetition wall and is redirected to emit one concrete Bash command.
+36	
+37	Safety / scope:
+38	* Only touches consecutive *assistant* turns with no ``tool_calls`` whose
+39	  normalized prefixes are near-identical, plus the immediately-following
+40	  passive-continue *user* messages. Never touches ``tool`` messages,
+41	  assistant turns that carry a tool call, the system message, or the first
+42	  (task-description) message.
+43	* Requires a run of at least ``min_run`` (default 3) duplicates before it
+44	  fires, so ordinary iteration (a couple of retries) is left untouched —
+45	  normal passing trajectories never repeat one truncated narration 3x.
+46	* Never blocks or drops a tool call, never fabricates a tool result. It only
+47	  compresses redundant self-narration the model already produced.
+48	
+49	No task ids, paths, commands, or domain literals are hard-coded — the trigger
+50	is a structural repetition pattern, so it generalizes to any task that falls
+51	into the truncation loop.
+52	"""
+53	
+54	from __future__ import annotations
+55	
+56	import dataclasses
+57	
+58	from harnessx.core.events import (
+59	    Message,
+60	    StepStartEvent,
+61	    TaskEndEvent,
+62	    TaskStartEvent,
+63	)
+64	from harnessx.core.processor import MultiHookProcessor
+65	
+66	# Substring that identifies the run loop's default passive length-truncation
+67	# nudge (see harnessx/core/runloop.py). Matched loosely so minor wording drift
+68	# still classifies the message as a passive continue nudge.
+69	_PASSIVE_NUDGE_MARKER = "cut off by the token limit"
+70	
+71	_COLLAPSE_NOTE = (
+72	    "[harness: the previous {n} turns hit the output token limit while writing "
+73	    "long reasoning WITHOUT running any command, and repeated near-identical "
+74	    "text. Those redundant turns were collapsed to keep context clean. "
+75	    "STOP writing long analysis. Your next turn must be SHORT: at most two "
+76	    "sentences, then exactly ONE concrete Bash command that makes progress "
+77	    "(inspect a file, run a script, or write the required output). Do not "
+78	    "re-explain the plan.]"
+79	)
+80	
+81	
+82	def _norm_prefix(text: str, n: int = 80) -> str:
+83	    """Whitespace-normalized leading-``n``-char signature of a message."""
+84	    return " ".join((text or "").split())[:n]
+85	
+86	
+87	class TruncationLoopCompactor(MultiHookProcessor):
+88	    """Collapse a run of repeated max_tokens-truncation turns into one directive."""
+89	
+90	    _singleton_group = "tmax_truncation_loop_compactor"
+91	    # Run after context assembly and after CompactionProcessor (order 8), so we
+92	    # operate on the assembled window the model will actually see.
+93	    _order = 20
+94	
+95	    def __init__(
+96	        self,
+97	        min_run: int = 3,
+98	        prefix_chars: int = 80,
+99	        max_content_chars: int = 4000,
+100	    ) -> None:
+101	        # Minimum number of consecutive near-identical truncated assistant
+102	        # turns before we collapse. >=1; default 3 leaves normal iteration alone.
+103	        self.min_run = max(2, int(min_run))
+104	        self.prefix_chars = max(16, int(prefix_chars))
+105	        # An assistant turn only counts as a "truncated narration" candidate when
+106	        # it is a large prose blob with no tool call. Anything shorter is treated
+107	        # as ordinary content and never collapsed.
+108	        self.max_content_chars = max(200, int(max_content_chars))
+109	
+110	    async def on_task_start(self, event: TaskStartEvent):
+111	        yield event
+112	
+113	    async def on_task_end(self, event: TaskEndEvent):
+114	        yield event
+115	
+116	    def _is_truncated_narration(self, m: Message) -> bool:
+117	        if getattr(m, "role", None) != "assistant":
+118	            return False
+119	        if getattr(m, "tool_calls", None):
+120	            return False
+121	        content = getattr(m, "content", "") or ""
+122	        # Must be substantive prose; tiny assistant lines (e.g. "Let me run it")
+123	        # are normal and must not be collapsed.
+124	        return len(content) >= 200
+125	
+126	    def _is_passive_nudge(self, m: Message) -> bool:
+127	        return (
+128	            getattr(m, "role", None) == "user"
+129	            and _PASSIVE_NUDGE_MARKER in (getattr(m, "content", "") or "")
+130	        )
+131	
+132	    async def on_step_start(self, event: StepStartEvent):
+133	        msgs = list(event.messages)
+134	        if len(msgs) < self.min_run + 1:
+135	            yield event
+136	            return
+137	
+138	        # Identify the maximal run(s) of near-identical truncated assistant
+139	        # narration turns, each optionally followed by a passive continue nudge.
+140	        # Collapse each qualifying run in place.
+141	        out: list[Message] = []
+142	        i = 0
+143	        n = len(msgs)
+144	        changed = False
+145	        while i < n:
+146	            m = msgs[i]
+147	            if not self._is_truncated_narration(m):
+148	                out.append(m)
+149	                i += 1
+150	                continue
+151	
+152	            # Start a run of near-identical truncated narration turns.
+153	            sig = _norm_prefix(getattr(m, "content", ""), self.prefix_chars)
+154	            run_idxs = [i]
+155	            j = i + 1
+156	            while j < n:
+157	                # Skip an interleaved passive continue nudge without breaking the run.
+158	                if self._is_passive_nudge(msgs[j]):
+159	                    j += 1
+160	                    continue
+161	                if (
+162	                    self._is_truncated_narration(msgs[j])
+163	                    and _norm_prefix(getattr(msgs[j], "content", ""), self.prefix_chars) == sig
+164	                ):
+165	                    run_idxs.append(j)
+166	                    j += 1
+167	                    continue
+168	                break
+169	
+170	            run_len = len(run_idxs)
+171	            if run_len >= self.min_run:
+172	                # Collapse: keep the FIRST narration turn (trimmed), drop the rest
+173	                # and any passive nudges inside the run, then append one directive
+174	                # user message so the assembled window still ends on a "user" turn
+175	                # when appropriate.
+176	                first = msgs[run_idxs[0]]
+177	                first_content = (getattr(first, "content", "") or "")[: self.max_content_chars]
+178	                out.append(dataclasses.replace(first, content=first_content))
+179	                note = Message(role="user", content=_COLLAPSE_NOTE.format(n=run_len))
+180	                # Avoid emitting two consecutive user messages: if the message
+181	                # that follows the collapsed run is itself a user turn, fold the
+182	                # directive into it instead of inserting a separate user message.
+183	                if j < n and getattr(msgs[j], "role", None) == "user":
+184	                    nxt = msgs[j]
+185	                    merged = _COLLAPSE_NOTE.format(n=run_len) + "\n\n" + (
+186	                        getattr(nxt, "content", "") or ""
+187	                    )
+188	                    out.append(Message(role="user", content=merged))
+189	                    j += 1
+190	                else:
+191	                    out.append(note)
+192	                changed = True
+193	                i = j
+194	            else:
+195	                # Run too short to be a loop; leave the turns untouched.
+196	                for k in range(i, j):
+197	                    out.append(msgs[k])
+198	                i = j
+199	
+200	        if not changed:
+201	            yield event
+202	            return
+203	
+204	        # Guard: never emit an empty window and never drop the leading message.
+205	        if not out or out[0] is not msgs[0]:
+206	            # If we somehow disturbed the head, fall back to no-op to stay safe.
+207	            if not out:
+208	                yield event
+209	                return
+210	            if out[0] is not msgs[0]:
+211	                out = [msgs[0]] + [x for x in out if x is not msgs[0]]
+212	
+213	        yield dataclasses.replace(event, messages=tuple(out))

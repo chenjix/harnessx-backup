@@ -1,0 +1,81 @@
+
+
+class BudgetExceededError(HarnessError):
+    pass
+
+
+class LoopDetectedError(HarnessError):
+    pass
+
+
+class ModelParseError(HarnessError):
+    pass
+
+
+_USER_INTERRUPTED_MESSAGE = "user actively interrupted execution"
+
+
+def _append_user_interrupted_message(state: State) -> None:
+    """Append one terminal assistant message describing user interruption.
+
+    The message is written into the factual track (`raw_messages`) so the
+    effective track (`messages`) stays in sync and resumed turns keep a complete
+    user/assistant transcript.
+    """
+    if state.raw_messages:
+        last = state.raw_messages[-1]
+        if last.role == "assistant" and str(last.content).strip() == _USER_INTERRUPTED_MESSAGE:
+            return
+    state.add_raw_message(Message(role="assistant", content=_USER_INTERRUPTED_MESSAGE))
+
+
+async def run_loop(
+    task: object,
+    state: State,
+    model_provider: "BaseModelProvider",
+    tool_registry: "BaseToolRegistry",
+    tracer: "BaseTracer",
+    processors: dict[str, list[Processor]],
+    workspace: "Workspace | None" = None,
+    parent_run_id: "str | None" = None,
+    step_snapshots: bool = True,
+    stream_callback: "object | None" = None,
+    model_selector: "Callable[[State], BaseModelProvider] | None" = None,
+    model_config: "object | None" = None,
+    harness_config: "object | None" = None,
+    child_harness_config: "object | None" = None,
+) -> "tuple[TaskEndEvent, StatefulTrajectory, ToolCall | None]":
+    """
+    Core RunLoop. Pure loop — context assembly, memory, and evaluation
+    are all handled by processors registered on the step_start / step_end /
+    task_end hooks.
+
+    Returns (TaskEndEvent, StatefulTrajectory, interrupted_at) triple.
+
+    Interrupt/resume: if model calls a tool whose name is in task.interrupt_on,
+    run_loop exits immediately with exit_reason='interrupted' and returns the
+    ToolCall as the third element. Caller can resume by passing the state back.
+
+    step_snapshots=False skips storing large message data inside trajectory
+    steps to reduce memory usage (O(n²) → O(n) across n steps).  Disable in
+    RL training where reward_func never reads step snapshots or step_start_event.
+=== where LoopDetectedError raised ===
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/__init__.py:43:    LoopDetectedError,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/__init__.py:190:    "LoopDetectedError",
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/rl_signal.py:9:from harnessx.core.runloop import LoopDetectedError
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/rl_signal.py:23:        steps, on_before_model raises LoopDetectedError on the NEXT step.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/rl_signal.py:59:        """Raise LoopDetectedError if a loop was confirmed on the previous step.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/rl_signal.py:61:        run_loop catches LoopDetectedError → exit_reason = "loop_detected".
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/rl_signal.py:64:            raise LoopDetectedError(f"Repeated tool calls detected at step {self.loop_step_ids[-1]}")
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/loop_detection.py:19:from ...core.runloop import LoopDetectedError
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/loop_detection.py:65:                                   raises :exc:`LoopDetectedError` (default 5).
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/loop_detection.py:184:            raise LoopDetectedError(
+
+STDERR: grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/__pycache__/loop_detection.cpython-312.pyc: binary file matches
+grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/processors/control/__pycache__/loop_detection.cpython-310.pyc: binary file matches
+grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/__pycache__/__init__.cpython-310.pyc: binary file matches
+grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/__pycache__/__init__.cpython-312.pyc: binary file matches
+grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/core/__pycache__/__init__.cpython-312.pyc: binary file matches
+grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/core/__pycache__/runloop.cpython-312.pyc: binary file matches
+grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/core/__pycache__/runloop.cpython-310.pyc: binary file matches
+grep: /fsx/home/jixuan.chen/harnessx-backup/harnessx/core/__pycache__/__init__.cpython-310.pyc: binary file matches

@@ -1,0 +1,81 @@
+1	# Evolve Journal — tmax-coev-rep15-i1
+2	
+3	## Round 1 — OCR robustness + verify-before-finish
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_ocr_robustness_v1
+9	levers: [instruction]
+10	predicted_affected: [task_000015_89886d8d, task_000505_50b5162d]
+11	cited_candidates: [C-001, C-002]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Flip the OCR-dense-text failure cluster (>=2 tasks) and generalize to any image-extraction task where the target is multi-line/dense rather than a single grep-able token"
+15	regression_risk: "Passing short-target OCR tasks (000536, 001264, 001652) already succeed with one pass; guidance is conditional so the happy path is unchanged. Slight step-count growth only when OCR is actually noisy or a hidden suite is announced."
+16	cost_shift: "+~15 lines of static system prompt on every task (negligible); a few extra tesseract passes only on image tasks with noisy first pass"
+17	rollback_trigger: "If R2 pass_rate is flat/down and the two OCR tasks stay failing, or any previously-passing OCR/non-OCR task regresses, revert the prompt sibling."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus task_000015_89886d8d fails at final_pytest accuracy 0.3389
+23	(< 0.98 gate). The task requires OCR-reading a dense multi-line URL→JSON schema
+24	from `/app/routing_schema.png` with tesseract, then building a migration script
+25	whose output keys must exactly match the golden schema. The agent's first
+26	`tesseract … stdout` pass returned garbled text (`atalogyitem <item _id>…ordert
+27	*<sort order»`); it then tried ad-hoc contrast/brightness/threshold enhancement
+28	(one of which produced pure garbage), never upscaled the 800x400 image or varied
+29	`--psm`/`--dpi`, gave up, and *guessed* the JSON key names — getting roughly one
+30	of three route key-sets right (hence ~1/3 accuracy).
+31	
+32	The same mechanism recurs: task_000505_50b5162d (security) also fails after a
+33	single tesseract pass on `/app/evidence.png` extracts a corrupted SSH key. By
+34	contrast, the passing OCR tasks (000536, 001264, 001652) only needed a single
+35	short grep-able token (an `EMP-…` id / a key), which survives noisy OCR — so they
+36	never needed a robustness technique. The gap is method knowledge: when the first
+37	OCR pass is garbled and the target is dense, upscale + sweep page-segmentation
+38	modes and cross-check, rather than guess. I independently confirmed the schema
+39	image is a clean, high-contrast target (light bg, ~2132 dark text px / 320000),
+40	so the failure is low-resolution single-pass OCR — exactly what upscale + psm
+41	recovers.
+42	
+43	A second, complementary gap: the agent tested migrate.py only on the 4-line
+44	happy-path sample and stopped, despite the prompt warning of a "massive hidden
+45	dataset of edge-case URLs" and to "handle URL decoding correctly" — no edge-case
+46	self-verification before declaring done.
+47	
+48	### Changes
+49	
+50	- `system_prompt.txt` (sibling of config.yaml, read by
+51	  `SiblingSystemPromptBuilder`) — added two general strategy sections:
+52	  (1) image/OCR robustness (upscale ~3-4x, `--dpi 300`, sweep `--psm 6/4/11`,
+53	  cross-check readings, never hardcode a guessed character); (2) verify-before-
+54	  finish (run on all provided samples + construct edge-case inputs implied by the
+55	  stated constraints before declaring done).
+56	- `config.yaml` — copied byte-for-byte from R0 (unchanged); the change rides on
+57	  the prompt sibling, so no processor/tool/template was authored.
+58	
+59	### Evidence
+60	
+61	- `task_000015_89886d8d` final_pytest: `AssertionError: Accuracy metric 0.3389
+62	  is below the 0.98 threshold`.
+63	- `task_000015` step 1 body: `tesseract /app/routing_schema.png stdout` →
+64	  `atalogyitem <item _id>…ordert *<sort order»` (garbled). Steps 9-31: grayscale
+65	  + contrast(2.0/3.0) + autocontrast + SHARPEN + binary threshold, never upscale
+66	  / vary psm; step 25 body: "OCR is still garbled … make reasonable inferences"
+67	  then hardcodes guessed keys.
+68	- `task_000505_50b5162d` body: single `tesseract /app/evidence.png stdout`; the
+69	  detection script then greps for a key carrying OCR artifacts (`+ |J9tY +X07yG`).
+70	- Contrast (passing) `task_000536_9c16e8ef` body:
+71	  `tesseract … | grep -oE 'EMP-[0-9]+'` — short regex-recoverable target,
+72	  no robustness needed.
+73	
+74	### Uncertainty
+75	
+76	The intervention assumes the model will actually apply the upscale+psm recipe
+77	when it sees garbled OCR rather than ignoring the prompt section. If R2 shows the
+78	two OCR tasks still failing at the same "guess the schema" step, the lever is
+79	weaker than expected and a Control/Action approach (e.g. a helper the agent can
+80	call) would be the next escalation. Watch for any regression on the currently-
+81	passing short-target OCR tasks — none expected since the guidance is conditional.

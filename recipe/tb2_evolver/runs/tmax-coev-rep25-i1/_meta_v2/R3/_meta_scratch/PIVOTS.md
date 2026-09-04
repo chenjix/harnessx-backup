@@ -1,0 +1,5 @@
+| id | score | config | trajectories | unique solves | unique losses | this proposal starts from |
+|----|------:|--------|--------------|---------------|---------------|---------------------------|
+| `n0_8743947a` | 0.500 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R0/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r0-traj` | task_001089_220cc46b, task_001536_acfe6c35 | task_000329_a3ac56b0, task_000338_27d6a1be, task_001032_1adaccb9, task_001264_9f4ca84a, task_001498_df8254c9, task_001673_86224c91 |  |
+| `n1_06551c3b` | 0.580 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R2/c0/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r1-fe-c0-traj` | — | — |  |
+| `n2_b44cc6da` | 0.580 | `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/R2/config.yaml` | `/fsx/home/jixuan.chen/harnessx-backup/.benchmarks/tmax/tmax-coev-rep25-i1-r1-fe-c0-traj` | — | — |  |

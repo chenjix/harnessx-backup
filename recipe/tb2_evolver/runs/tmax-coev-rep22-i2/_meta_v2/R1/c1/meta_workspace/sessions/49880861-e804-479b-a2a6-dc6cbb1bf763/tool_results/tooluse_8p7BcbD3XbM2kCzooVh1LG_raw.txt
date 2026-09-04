@@ -1,0 +1,47 @@
+779	        # Try to recover the best output from assistant messages
+780	        final_output = _recover_best_output(state.raw_messages, final_output)
+781	    except LoopDetectedError:
+782	        exit_reason = "loop_detected"
+783	        final_output = _recover_best_output(state.raw_messages, final_output)
+784	    except asyncio.CancelledError:
+785	        # User actively interrupted the execution (Ctrl+C / API cancel).
+786	        interrupt_step = state.step - 1 if state.step > 0 else state.step
+787	        await tracer.on_event(
+788	            ModelResponseEvent(
+789	                run_id=state.run_id,
+790	                step_id=interrupt_step,
+791	                content=_USER_INTERRUPTED_MESSAGE,
+792	                finish_reason="interrupted",
+793	                usage=Usage(),
+794	            )
+795	        )
+796	        _append_user_interrupted_message(state)
+797	        exit_reason = "interrupted"
+798	        final_output = _USER_INTERRUPTED_MESSAGE
+799	    except Exception as e:
+800	        # RL rollout: ContextLengthExceeded and GenerationAborted are expected
+801	        # flow-control signals (not bugs).  Log at debug to avoid flooding the
+802	        # console with thousands of tracebacks per run.
+803	        _exc_name = type(e).__name__
+804	        if _exc_name in ("ContextLengthExceeded", "GenerationAborted"):
+805	            _logger.debug("run_loop: %s: %s", _exc_name, e)
+806	        else:
+807	            # Warning without traceback so non-verbose CLI stays clean.
+808	            # Full traceback is available at DEBUG level (harnessx -v).
+809	            _logger.warning("run_loop error: %s: %s", _exc_name, e)
+810	            _logger.debug("run_loop error traceback:", exc_info=True)
+811	        exit_reason = "error"
+812	        final_output = f"Error: {e}"
+813	        error_message = f"{_exc_name}: {e}"
+814	
+815	    # Recover best output for non-clean exits (budget/loop hit via normal break)
+816	    if exit_reason in ("budget_exceeded", "loop_detected") and not final_output:
+817	        final_output = _recover_best_output(state.raw_messages, final_output)
+818	    if _model_empty_end_turn_seen:
+819	        state.set_slot("__model_empty_end_turn_seen", "diagnostic", True)
+820	        state.set_slot(
+821	            "__empty_end_turn_recovered",
+822	            "diagnostic",
+823	            bool((final_output or "").strip()),
+
+[Showing lines 779–823 of 981 total. Use offset=823 to read the next section.]

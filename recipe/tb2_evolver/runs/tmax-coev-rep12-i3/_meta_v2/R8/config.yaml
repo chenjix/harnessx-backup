@@ -1,0 +1,168 @@
+# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+#
+# R8: adds IdenticalCommandLoopCompactor (C-008) after the R7
+# TruncationLoopCompactor. Everything else copied byte-for-byte from R7.
+#
+# Live surfaces MetaAgent may edit:
+#   - processors (this file)
+#   - tool_registry (this file)
+#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+#
+# Runtime-only slots (sandbox_provider, tracer) are injected by
+# recipe.tmax_eval.harness_runner — do not put them here.
+#
+# Per-call output cap is NOT in this YAML: harness_runner sets
+# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+# runaway generation cannot burn an hour of wall-clock on one task.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+# R3 (C-003): system-prompt sidecar (system_prompt.txt beside this YAML)
+# extended with a general service-persistence strategy. Observed failure: on
+# HTTP/socket-service tasks the agent starts a server with `nohup ... &`, which
+# inherits the exec'd command's process group; HarborSandbox.kill_running()
+# sends SIGTERM to that group between Bash calls, so the server dies (`exit 143`,
+# `[server] <defunct>` zombies) and the verifier hits `Connection refused`. The
+# added rule teaches the agent to launch required services detached in their OWN
+# new session (`setsid ... < /dev/null &`) so they survive across calls and into
+# the verify phase, and to re-confirm the listener is up before finishing.
+# Strategy-only; no task-specific literals. SiblingSystemPromptBuilder loads the
+# sidecar from beside THIS config.yaml (output_dir), i.e. the R3 sidecar.
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /home/user
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  show_project_dir: false
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at:
+  - 0.7
+  - 0.9
+  _hook_: '*'
+# Break max_tokens repetition loops (finish_reason=length, no tool call).
+# Without this, one stuck task can block an entire evolve round.
+- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+  repeat_threshold: 2
+  head_chars: 1200
+  tail_chars: 600
+  _hook_: '*'
+# R2: break identical-Bash-command loops. Observed across the R1 budget_exceeded
+# cluster: the agent issues the EXACT same Bash command 20-29 times in a row,
+# gets the same (often empty/failing) result each time, and burns the whole
+# 80-step budget on one unproductive command. LengthTruncationRecovery does not
+# catch this — those turns emit a well-formed tool call, so finish_reason != length.
+# This processor injects a firm redirect user message after the same command is
+# issued `repeat_threshold` times consecutively; it never blocks execution, so a
+# legitimately-slow retry is at worst nudged, never broken. Strategy/shape-only;
+# no task-specific commands or paths. See processors/repeat_command_breaker.py.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R2/processors/repeat_command_breaker.py::RepeatCommandBreakerProcessor
+  repeat_threshold: 3
+  _hook_: '*'
+# R1: token_threshold lowered 140000 -> 40000. The eval model's true context
+# window is 65536 tokens and harness_runner reserves 4096 for output, leaving a
+# ~61440-token input ceiling. Above it the server returns a hard 400 (context
+# length) that surfaces as exit_reason=error and crashes the whole task. The old
+# 140000 threshold was calibrated for a 128k+ model, so compaction NEVER fired
+# on this model and long tasks overflowed. rough_token_count (cl100k) also
+# under-counts the real request by ~9-10k (system prompt + Bash tool schema +
+# tokenizer skew), so we fire at 40000 rough tokens (~50k real) to keep every
+# request safely under the 61440 ceiling with margin for retention-window growth.
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 40000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+# R7 (C-007): break the max_tokens self-reinforcing verbosity loop. Distinct from
+# the R2 RepeatCommandBreaker (which targets identical *tool calls*) and the
+# reverted R5 tool-block. The eval model runs under a hard max_tokens=4096 output
+# cap it cannot self-limit; on hard tasks it emits ~4096 tokens of prose with NO
+# tool call (finish_reason=length), the run loop appends a passive "cut off by the
+# token limit, please continue" nudge, and the model — now staring at a growing
+# wall of its own near-identical truncated narration — reproduces that wall 8-23x
+# until budget_exceeded. LengthTruncationRecovery already fires but its
+# on_before_model edit is ephemeral (never lands in state.raw_messages), so the
+# duplicate wall keeps growing. This processor runs at on_step_start (after
+# compaction, order 20): when it sees >=3 consecutive near-identical *truncated*
+# assistant turns (>=200 chars, no tool_calls) plus their passive nudges, it
+# collapses them to one trimmed turn + one "emit ONE short Bash command" directive.
+# The run loop persists step_start structural edits, so the wall is durably removed
+# and the model gets a clean context. Never blocks/drops/fabricates a tool call;
+# fires on ZERO of the passing tasks (all have passive-nudge count 0). Structural
+# trigger only — no task ids, paths, or domain literals. See
+# processors/truncation_loop_compactor.py.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R7/processors/truncation_loop_compactor.py::TruncationLoopCompactor
+  min_run: 3
+  prefix_chars: 80
+  max_content_chars: 4000
+  _hook_: '*'
+# R8 (C-008): durably break identical-Bash-command loops. Distinct failure from
+# the R7 TruncationLoopCompactor (which only touches finish_reason=length
+# narration turns with NO tool call). Here the agent emits the byte-identical
+# single Bash command turn after turn, each with a well-formed tool call, gets
+# the same (empty/failing) result, and burns the whole 80-step budget on it
+# (measured this round: task_000730 x31 `tesseract ...`, task_001028 x19
+# `strings /home/user/log_analyzer`). The R2 RepeatCommandBreaker is registered
+# but is a SILENT NO-OP: its redirect is injected in on_before_model and the run
+# loop rebuilds input from state.raw_messages each step, so the nudge evaporates
+# (grep of "loop detected by the harness" across all 50 traces = 0 hits). The
+# reverted R5 blocker persisted but BLOCKED execution and disrupted legitimate
+# iteration. This processor is the middle path: it runs at on_step_start (like
+# the working TruncationLoopCompactor), so its edit to event.messages changes the
+# history_hash and the run loop auto-generates a SegmentBoundary that writes the
+# trimmed window durably into state.raw_messages/state.messages
+# (runloop.py ~345-368). It NEVER blocks/drops/fabricates a tool call — the
+# commands already ran; it collapses a maximal run of >=min_run consecutive
+# identical-command turns (+ their tool results) to the first one and appends ONE
+# corrective directive. min_run=10 sits safely above the passing set's max
+# identical non-empty Bash run (task_001537 x7, a truncation-interleaved iterative
+# PASS), so it cannot fire on any currently-passing trajectory. Structural trigger
+# only; no task ids/paths/commands. See processors/identical_command_loop_compactor.py.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R8/processors/identical_command_loop_compactor.py::IdenticalCommandLoopCompactor
+  min_run: 10
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+# Ensure common verifier test-deps (HTTP client / config parser) are importable
+# in the container Python before the agent exits. TB2 verifiers frequently
+# `import requests` to probe a running HTTP server; when the base image lacks
+# it the verifier aborts at pytest collection time (ModuleNotFoundError) and a
+# correct solution scores 0. Fires at most once per run, only on exit-intent,
+# and is a no-op when the module is already present.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/R0/assets/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

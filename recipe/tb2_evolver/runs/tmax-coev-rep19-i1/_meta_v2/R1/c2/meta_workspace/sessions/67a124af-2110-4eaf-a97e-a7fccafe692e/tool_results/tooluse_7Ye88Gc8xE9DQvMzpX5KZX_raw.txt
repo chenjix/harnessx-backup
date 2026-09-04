@@ -1,0 +1,59 @@
+14:All processor classes are kept in this module so that YAML round-trip
+21:import dataclasses
+60:def _extract_written_files(cmd: str) -> list[str]:
+79:_SELF_VERIFY_TOOL = "_tb2_self_verify"
+80:_SELF_VERIFY_ACK = "Verification check initiated. See the message above for instructions."
+81:_SELF_VERIFY_MSG = """\
+98:Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+109:    _singleton_group = "tb2_self_verify"
+112:    def __init__(self) -> None:
+114:        self._pending_message: str = ""
+116:    async def on_task_start(self, event: TaskStartEvent):
+118:        self._pending_message = ""
+121:    async def on_before_model(self, event: BeforeModelEvent):
+122:        if not self._pending_message:
+125:        msg = self._pending_message
+126:        self._pending_message = ""
+127:        # last message is a tool result (role≠user) → append exactly +1 user
+128:        yield dataclasses.replace(
+130:            messages=event.messages + (Message(role="user", content=msg),),
+133:    async def on_after_model(self, event: ModelResponseEvent):
+137:            self._pending_message = _SELF_VERIFY_MSG
+140:                name=_SELF_VERIFY_TOOL,
+143:            yield dataclasses.replace(event, tool_calls=(keepalive,))
+147:    async def on_before_tool(self, event: ToolCallEvent):
+148:        if event.tool_name == _SELF_VERIFY_TOOL:
+149:            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+153:    async def on_task_end(self, event: TaskEndEvent):
+155:        self._pending_message = ""
+159:class CustomEditToolProcessor(MultiHookProcessor):
+171:    def __init__(self, threshold: int = 7) -> None:
+176:    async def on_task_start(self, event: TaskStartEvent):
+181:    async def on_before_tool(self, event: ToolCallEvent):
+188:    async def on_after_tool(self, event: ToolResultEvent):
+198:            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+202:    async def on_task_end(self, event: TaskEndEvent):
+222:    "Do NOT start any new implementation. Write and verify output files NOW."
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+230:    def __init__(
+240:    async def on_task_start(self, event: TaskStartEvent):
+245:    async def on_step_start(self, event: StepStartEvent):
+266:            yield dataclasses.replace(
+268:                messages=event.messages + (msg,),
+269:                raw_messages=event.raw_messages + (msg,),
+274:    async def on_task_end(self, event: TaskEndEvent):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+289:    Detects compaction by a significant drop in message count between steps
+296:    def __init__(self, drop_threshold: int = 5) -> None:
+300:    async def on_task_start(self, event: TaskStartEvent):
+304:    async def on_step_start(self, event: StepStartEvent):
+305:        current_count = len(event.messages)
+341:        yield dataclasses.replace(
+343:            messages=event.messages + (msg,),
+344:            raw_messages=event.raw_messages + (msg,),
+347:    async def on_task_end(self, event: TaskEndEvent):
+373:3. **For complex tasks, decompose before implementing.** Break the problem into concrete subtasks. Solve and verify each subtask before moving to the next — do not attempt everything at once.
+381:7. **For background services**, keep them running after you exit and verify they are reachable:
+395:When all checks pass, end your final message with:
+400:class _StaticSystemPromptBuilder(BaseSystemPromptBuilder):

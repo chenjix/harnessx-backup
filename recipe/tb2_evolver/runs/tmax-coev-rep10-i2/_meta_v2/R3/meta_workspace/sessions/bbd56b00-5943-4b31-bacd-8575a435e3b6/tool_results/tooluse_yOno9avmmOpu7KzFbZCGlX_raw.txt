@@ -1,0 +1,139 @@
+1	# Evolve journal — tmax-coev-rep10-i2
+2	
+3	## Round 1 — functional verify gate
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_functional_verify_v1
+9	levers: [instruction, control]
+10	predicted_affected: [task_000059_e4b842f5, task_000118_3043e92d, task_000115_40adb445, task_000264_ab8c7253, task_000396_e56917e2, task_001937_ac874115]
+11	cited_candidates: [C-001, C-002]
+12	gating_outcome: accepted
+13	gating_attribution: score=23/50; +5/-3 gained=task_000090_d0fa254a,task_000505_50b5162d,task_000533_01bba2c2,task_001095_31b3cce4 lost=task_000191_578636e9,task_000714_2b74124a,task_000764_a0052743; score 0.4600 >= incumbent(mean) 0.4200 - tol 0.0400
+14	expected_global_gain: "Flip a chunk of the large done+'1 failed' near-miss cluster (23/29 R0 failures exited done after only a static self-check) by forcing one genuine end-to-end run before exit"
+15	regression_risk: "Bounded extra verify cycles (hard cap max_nudges=2) could add a few Bash calls on already-correct tasks; read-only heuristic could misclassify a legit inspection-only final turn, costing one extra nudge — never an infinite loop"
+16	cost_shift: "+bounded tokens/task (<=2 extra verify cycles + a few functional-test Bash calls); net positive if it flips >=2 near-miss tasks"
+17	rollback_trigger: "If R2 pass_rate is flat/down AND median steps/cost rise materially, revert to R0's single-shot self-verify"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 21/50 (42%). The dominant, systemic failure shape: **23 of 29
+23	failures exited `exit_reason=done`** — the agent believed it was finished.
+24	Only 4 were `budget_exceeded`, 2 `error`. Nearly every failing pytest tail
+25	reads "1 failed, N passed": the agent got most of the task right but shipped
+26	a semantic/functional bug (wrong numeric constant, a daemon that never
+27	actually keeps the invariant, a query using the wrong index) that a real
+28	end-to-end run would have caught. The existing single-shot
+29	`CustomSelfVerifyProcessor` fires exactly once (`_tb2_self_verify` shows 2
+30	refs = 1 call + 1 ack in ~all failing done-tasks); the agent answers it with
+31	a **shallow static re-check** (ls / grep / cat) and immediately re-exits.
+32	
+33	### Changes
+34	
+35	- `system_prompt.txt` (C-001) — rewrote the sidecar prompt to make
+36	  verification *functional, not cosmetic*: survey → restate every concrete
+37	  checkable requirement (exact paths, constants, thresholds, formats,
+38	  runtime behavior) → implement to those values → before stopping, RUN the
+39	  solution end-to-end against the real scenario and compare observed behavior
+40	  value-by-value, recomputing required constants independently. General
+41	  strategy only; no task literals.
+42	- `processors/functional_verify_gate.py` + `config.yaml` (C-002) — replaced
+43	  the single-shot `CustomSelfVerifyProcessor` with a stateful, functional-
+44	  aware `FunctionalVerifyGateProcessor` (same `_singleton_group` slot,
+45	  `_hook_='*'`, `max_nudges=2`). It nudges on exit intent, tracks whether the
+46	  agent runs a *substantive* command (executes/exercises the solution) vs.
+47	  purely read-only inspection (ls/cat/grep/head/find/...), and re-nudges once
+48	  more (bounded) when an exit attempt is preceded only by inspection.
+49	
+50	### Evidence
+51	
+52	- `task_000059_e4b842f5` final turn: "verified" by `ls -lh final_mac.txt &&
+53	  cat final_mac.txt` + `cat verify_mac.py` — never independently recomputed
+54	  the MAC; verifier failed `test_verify_mac_py_python3_compatible`.
+55	- `task_000118_3043e92d` final turn: "verified" by `ls -lh
+56	  deployment_monitor.py` and `grep -n THRESHOLD_BYTES/SIGSTOP` — never ran
+57	  `run_deployment.sh` to confirm the monitor keeps disk under quota; verifier
+58	  failed `test_deployment_monitor`.
+59	- Aggregate: `exit_reason=done` on 23/29 failures; `_tb2_self_verify`==2 refs
+60	  in ~all of them; post-ack turn contains only read-only Bash then re-exit.
+61	
+62	### Uncertainty
+63	
+64	Two changes ship together (instruction + control), so attribution will be
+65	ambiguous — but they are independent (either helps alone) and both target the
+66	same cluster via complementary mechanisms (knowledge vs. enforcement). The
+67	main risk is that some near-misses are genuine capability gaps the model
+68	can't fix even after running its own test; those will stay F. Watch for cost
+69	inflation without pass-rate gain — that's the rollback signal. Structural
+70	failures (e.g. task_000958's verifier missing `requests`) are out of scope.
+71	
+72	## Round 2 — warn-only loop breaker
+73	
+74	<!-- journal:frontmatter
+75	round: 2
+76	timestamp: 2026-04-28T00:00:00Z
+77	hypothesis_id: h_loop_break_warnonly_v1
+78	levers: [control]
+79	predicted_affected: [task_000015_89886d8d, task_000118_3043e92d, task_000191_578636e9, task_000257_3cd35e11, task_000010_644ab1c2, task_000300_7d6b511c, task_000396_e56917e2, task_000442_502566d6, task_001653_c4cafa73]
+80	cited_candidates: [C-001]
+81	gating_outcome: accepted
+82	gating_attribution: score=23/50; +3/-3 gained=task_000191_578636e9,task_000396_e56917e2,task_000748_c9807703 lost=task_000090_d0fa254a,task_000533_01bba2c2,task_001883_6e356e21; score 0.4600 >= incumbent(mean) 0.4600 - tol 0.0400
+83	expected_global_gain: "Flip a subset of the dominant budget_exceeded cluster (11/27 R1 failures exited at the 80-step cap, +1 error) whose shared root cause is a byte-identical no-progress command loop; an early warn frees the remaining budget for a different approach"
+84	regression_risk: "3 currently-passing tasks (878/890/505) also repeat identical commands deliberately; mitigated by making the guard WARN-ONLY (threshold=999, never raises) so no pass can become loop_detected - they only see an ignorable advisory line in a tool result"
+85	cost_shift: "Near-neutral to negative: a few warning tokens on affected tasks, but converting 80-step budget_exceeded runs into earlier completions should reduce median steps/cost on the cluster"
+86	rollback_trigger: "If R3 pass_rate is flat/down while budget_exceeded count is unchanged, OR any of 878/890/505 flips T to F, revert the LoopDetectionProcessor"
+87	-->
+88	
+89	### Why
+90	
+91	R1 landed at 23/50 (accepted). The largest remaining failure cluster is
+92	exit_reason=budget_exceeded at the hard 80-step cap: 11 of 27 R1 failures,
+93	plus 1 error. Extracting the Bash command stream from the messages log shows
+94	the dominant shape is a byte-identical command repeated consecutively with no
+95	change of approach - the agent re-issues the exact same failing command instead
+96	of diagnosing why it fails, exhausting the whole step budget. Max
+97	consecutive-identical run: task_000015=21 (same 21-line OCR heredoc), 1653=25
+98	(same etl.c write), 191=12 (same go build + go test), 118=11 (same
+99	pkill/restart), 257=9. The pipeline had no mechanism to notice "you have run
+100	this exact command N times with the same result - change approach". A
+101	well-designed LoopDetectionProcessor already exists in harnessx but was absent
+102	from the config.
+103	
+104	### Changes
+105	
+106	- config.yaml (C-001) - added
+107	  harnessx.processors.control.loop_detection.LoopDetectionProcessor in
+108	  WARN-ONLY mode: warn_threshold=3 (advisory appended to tool result after 3
+109	  byte-identical consecutive Bash calls), threshold=999 (hard-raise disabled -
+110	  never terminates a task), name_warn_threshold=999 (Strategy 2 disabled
+111	  because every call here is Bash and name-only would fire on nearly every
+112	  task). window_size=12, compaction_drop_threshold=5 (defaults).
+113	- Carried system_prompt.txt (R1 functional-verify rewrite) and the R1
+114	  FunctionalVerifyGateProcessor + R0 StepBudgetDeadlineProcessor forward
+115	  unchanged.
+116	
+117	### Evidence
+118	
+119	- task_000015_89886d8d: the same pytesseract python heredoc appears 21x
+120	  verbatim; exit_reason=budget_exceeded at 80 steps.
+121	- task_001653_c4cafa73: the same etl.c heredoc written 37x, 25 in one unbroken
+122	  consecutive run; exit_reason=error.
+123	- task_000118_3043e92d: the same pkill/sleep/restart command repeated 11x
+124	  consecutively; budget_exceeded.
+125	- task_000191_578636e9: the same go build + go test command repeated 12x
+126	  consecutively; budget_exceeded (was a R0 pass, R1 regressed it).
+127	- Aggregate: at max-consecutive-run >= 3, 12 failing tasks would receive the
+128	  warn vs only 3 passing (878 run=11, 890 run=9, 505 run=3) - and those 3 only
+129	  get a harmless advisory, never a termination.
+130	
+131	### Uncertainty
+132	
+133	The warn is soft - the agent may ignore it and keep looping, in which case the
+134	task still fails (no worse than now). The gain depends on the model reacting to
+135	"try something fundamentally different". Risk that a task legitimately polling a
+136	slow process gets a distracting advisory; mitigated by requiring byte-identical
+137	consecutive calls (polling usually varies the target/sleep or interleaves
+138	checks). If R3 shows no budget_exceeded reduction and cost is flat, this lever
+139	is the wrong shape for this cluster and should be reverted.

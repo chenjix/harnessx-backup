@@ -1,0 +1,28 @@
+1	{
+2	  "task_id": "task_000118_3043e92d",
+3	  "domain": "system_administration",
+4	  "reward": 0,
+5	  "status": "ok",
+6	  "elapsed_s": 319.2,
+7	  "api_base": "http://127.0.0.1:8304/v1",
+8	  "model": "Qwen/Qwen3.5-9B",
+9	  "image": "tmax-eval:task_000118_3043e92d-7852f691b833",
+10	  "container": "e449da452d6ca92122d32e2a1b4097496ac8c310044e2eed837fea4801903838",
+11	  "initial_pytest": {
+12	    "passed": true,
+13	    "rc": 0,
+14	    "output_tail": "...                                                                      [100%]\n3 passed in 0.01s\n"
+15	  },
+16	  "agent": {
+17	    "steps": 80,
+18	    "finished": "budget_exceeded",
+19	    "error": null,
+20	    "exit_reason": "budget_exceeded",
+21	    "backend": "harnessx"
+22	  },
+23	  "final_pytest": {
+24	    "passed": false,
+25	    "rc": 1,
+26	    "output_tail": "\"/home/user/deployment_monitor.py\"\n        deploy_path = \"/home/user/run_deployment.sh\"\n        logs_dir = \"/home/user/logs\"\n    \n        assert os.path.isfile(monitor_path), f\"Monitor script not found at {monitor_path}\"\n        assert os.path.isfile(deploy_path), f\"Deployment script not found at {deploy_path}\"\n    \n        os.makedirs(logs_dir, exist_ok=True)\n        for f in os.listdir(logs_dir):\n            os.remove(os.path.join(logs_dir, f))\n    \n        # Start agent's monitor\n        monitor = subprocess.Popen([\"python3\", monitor_path])\n        time.sleep(0.5)\n    \n        # Start deployment\n        deploy = subprocess.Popen([\"bash\", deploy_path])\n    \n        max_size = 0\n        while deploy.poll() is None:\n            time.sleep(0.05)\n            try:\n                size = sum(os.path.getsize(os.path.join(logs_dir, f))\n                           for f in os.listdir(logs_dir)\n                           if os.path.isfile(os.path.join(logs_dir, f)))\n                if size > max_size:\n                    max_size = size\n            except FileNotFoundError:\n                pass\n    \n        monitor.terminate()\n        try:\n            monitor.wait(timeout=5)\n        except subprocess.TimeoutExpired:\n            monitor.kill()\n    \n        deploy_exit = deploy.returncode\n    \n        assert deploy_exit == 0, f\"Deployment script failed with exit code {deploy_exit}\"\n        assert max_size > 0, \"Log directory size never exceeded 0 bytes. Did the workers run?\"\n>       assert max_size <= 45000000, f\"Peak log directory size was {max_size} bytes, which exceeds the threshold of 45000000 bytes.\"\nE       AssertionError: Peak log directory size was 209715200 bytes, which exceeds the threshold of 45000000 bytes.\nE       assert 209715200 <= 45000000\n\n/tmp/test_final_state.py:48: AssertionError\n=========================== short test summary info ============================\nFAILED ../../tmp/test_final_state.py::test_deployment_monitor - AssertionErro...\n1 failed in 2.61s\n"
+27	  }
+28	}

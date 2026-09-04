@@ -1,0 +1,131 @@
+1	# SPDX-License-Identifier: MIT
+2	"""HttpVerifierDepProcessor — ensure the grading HTTP client lib is present.
+3	
+4	Structural fact about this benchmark (see tb2-playbook): HTTP-service tasks
+5	are graded by an *external* verifier that queries the agent's service with the
+6	standard Python ``requests`` client. The verifier's test files are injected
+7	*after* the agent session ends, so the agent cannot see that the test does
+8	``import requests``. Several service containers ship without ``requests``
+9	installed, which makes the verifier's ``test_final_state.py`` fail at
+10	*collection* time (``ModuleNotFoundError: No module named 'requests'``) even
+11	when the agent's service is fully correct and running.
+12	
+13	This processor closes that gap with a Control hook, not a prompt rule:
+14	
+15	* It watches the agent's ``Bash`` commands and flips a per-task flag when it
+16	  observes a command that starts an HTTP service / binds a local port
+17	  (Flask / FastAPI / uvicorn / gunicorn / ``http.server`` / an explicit
+18	  ``127.0.0.1:<port>`` or ``0.0.0.0:<port>`` bind, etc.).
+19	* On the *next* model turn after that flag is set, it injects exactly one
+20	  user message reminding the agent that the external integration test drives
+21	  the service with the ``requests`` client, so the agent must make ``requests``
+22	  importable by the system Python before finishing.
+23	
+24	Firing on the turn *after* the server starts (rather than at exit-intent) is
+25	deliberate: it decouples this hook from ``CustomSelfVerifyProcessor``'s
+26	exit-intent keepalive rewrite, and gives the agent the rest of the session to
+27	install the dependency and keep working.
+28	
+29	It fires at most once per task and only on tasks where a server was actually
+30	started, so non-service tasks (the majority) are never touched. It only
+31	*appends* a single message — it never blocks a tool call, never mutates the
+32	system prompt, and never rewrites existing messages — mirroring the append
+33	pattern of ``CustomSelfVerifyProcessor`` / ``TaskTimeReminderProcessor``.
+34	"""
+35	
+36	from __future__ import annotations
+37	
+38	import dataclasses
+39	import re
+40	
+41	from harnessx.core.events import (
+42	    BeforeModelEvent,
+43	    Message,
+44	    TaskEndEvent,
+45	    TaskStartEvent,
+46	    ToolCallEvent,
+47	)
+48	from harnessx.core.processor import MultiHookProcessor
+49	
+50	# Signals that the agent has started (or is starting) an HTTP service that the
+51	# external verifier will query. Kept deliberately generic so it matches any
+52	# language/framework serving over HTTP, not one task's stack.
+53	_SERVICE_SIGNALS = re.compile(
+54	    r"""(?ix)
+55	    (?:
+56	        \bflask\b
+57	      | \bfastapi\b
+58	      | \buvicorn\b
+59	      | \bgunicorn\b
+60	      | \bhttp\.server\b
+61	      | \bhttpd\b
+62	      | \bapp\.run\s*\(
+63	      | \.listen\s*\(
+64	      | \blisten\s+\d{2,5}\b
+65	      | (?:127\.0\.0\.1|0\.0\.0\.0|localhost)\s*[:]\s*\d{2,5}
+66	      | \b--port\b
+67	      | \bhost\s*=\s*['"]?(?:127\.0\.0\.1|0\.0\.0\.0)['"]?
+68	    )
+69	    """
+70	)
+71	
+72	_HTTP_VERIFIER_DEP_MSG = (
+73	    "[HttpVerifierReminder] You have started an HTTP service. The automated "
+74	    "integration test that grades this task runs in a separate phase and "
+75	    "drives your service using the standard Python `requests` HTTP client "
+76	    "(its test module does `import requests`). If `requests` is not importable "
+77	    "by the system Python, the test fails at collection time before it ever "
+78	    "reaches your service — a fully correct, running service still scores 0.\n\n"
+79	    "Before you finish, make `requests` importable by the same interpreter the "
+80	    "grader uses, e.g.:\n"
+81	    "```bash\n"
+82	    "python3 -c 'import requests' 2>/dev/null || python3 -m pip install requests\n"
+83	    "python3 -c 'import requests; print(\"requests OK\", requests.__version__)'\n"
+84	    "```\n"
+85	    "Do this regardless of which client you used for your own testing "
+86	    "(urllib, sockets, etc.). Keep your service running afterwards."
+87	)
+88	
+89	
+90	class HttpVerifierDepProcessor(MultiHookProcessor):
+91	    """Nudge service tasks to install the `requests` grading client once."""
+92	
+93	    _singleton_group = "http_verifier_dep"
+94	    _order = 91  # after CustomSelfVerifyProcessor (90), so its ack lands first
+95	
+96	    def __init__(self) -> None:
+97	        self._service_started = False
+98	        self._fired = False
+99	
+100	    async def on_task_start(self, event: TaskStartEvent):
+101	        self._service_started = False
+102	        self._fired = False
+103	        yield event
+104	
+105	    async def on_before_tool(self, event: ToolCallEvent):
+106	        if not self._service_started and event.tool_name == "Bash":
+107	            cmd = ""
+108	            try:
+109	                cmd = event.tool_input.get("command", "") or ""
+110	            except Exception:
+111	                cmd = ""
+112	            if cmd and _SERVICE_SIGNALS.search(cmd):
+113	                self._service_started = True
+114	        yield event
+115	
+116	    async def on_before_model(self, event: BeforeModelEvent):
+117	        # Fire once, on the first model turn after a service was detected.
+118	        if not self._service_started or self._fired:
+119	            yield event
+120	            return
+121	        self._fired = True
+122	        yield dataclasses.replace(
+123	            event,
+124	            messages=event.messages
+125	            + (Message(role="user", content=_HTTP_VERIFIER_DEP_MSG),),
+126	        )
+127	
+128	    async def on_task_end(self, event: TaskEndEvent):
+129	        self._service_started = False
+130	        self._fired = False
+131	        yield event

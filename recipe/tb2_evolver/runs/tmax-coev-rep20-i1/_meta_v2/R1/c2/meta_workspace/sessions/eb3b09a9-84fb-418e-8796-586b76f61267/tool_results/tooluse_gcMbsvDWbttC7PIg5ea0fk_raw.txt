@@ -1,0 +1,132 @@
+/fsx/home/jixuan.chen/harnessx-backup/recipe/tmax_eval/processors/__init__.py
+/fsx/home/jixuan.chen/harnessx-backup/recipe/tmax_eval/processors/__pycache__/__init__.cpython-310.pyc
+/fsx/home/jixuan.chen/harnessx-backup/recipe/tmax_eval/processors/__pycache__/length_recovery.cpython-312.pyc
+/fsx/home/jixuan.chen/harnessx-backup/recipe/tmax_eval/processors/__pycache__/__init__.cpython-312.pyc
+/fsx/home/jixuan.chen/harnessx-backup/recipe/tmax_eval/processors/__pycache__/length_recovery.cpython-310.pyc
+/fsx/home/jixuan.chen/harnessx-backup/recipe/tmax_eval/processors/length_recovery.py
+===
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""LengthTruncationRecoveryProcessor for Tmax (and TB2-style) agents.
+
+Closes a systemic failure mode: the model enters a *degenerate repetition
+loop* — it keeps emitting the same narration with no tool call until the
+response hits ``max_tokens`` (``finish_reason == "length"``). The run loop
+then appends a passive "please continue" nudge, which re-primes the same
+runaway generation. The cycle can burn an entire evolve round on one task.
+
+This processor:
+* collapses runaway assistant content (head+tail) after a length truncation
+* replaces the passive continue nudge with a corrective "issue one Bash call"
+  instruction (escalating on consecutive truncations)
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+from harnessx.core.events import (
+    BeforeModelEvent,
+    Message,
+    ModelResponseEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+)
+from harnessx.core.processor import MultiHookProcessor
+
+_HEAD_CHARS = 1200
+_TAIL_CHARS = 600
+_TRUNC_MARKER = (
+    "\n\n[response truncated by harness: the model hit the output token limit "
+    "without issuing a tool call; the omitted middle was discarded to prevent a "
+    "repetition loop]\n\n"
+)
+
+_NUDGE_FIRST = (
+    "Your last turn ran into the output token limit without running any command. "
+    "Do NOT re-explain or continue the previous narration. In your next turn write "
+    "at most two sentences of reasoning, then issue exactly ONE concrete Bash "
+    "command that makes progress (inspect a file, run a script, or write output). "
+    "Keep the response short."
+)
+
+_NUDGE_REPEAT = (
+    "STOP. You have now hit the output token limit multiple turns in a row, which "
+    "means you are repeating yourself instead of acting. Abandon the current line "
+    "of narration entirely. Do not write any prose analysis. Respond with a SINGLE "
+    "short Bash tool call that either (a) writes the required output file(s) to the "
+    "path named in the task, or (b) runs a quick command to check the current state "
+    "so you can decide the next concrete step. One command only."
+)
+
+
+class LengthTruncationRecoveryProcessor(MultiHookProcessor):
+    """Break the max_tokens repetition loop and redirect the model to act."""
+
+    _singleton_group = "tmax_length_recovery"
+    _order = 5
+
+    def __init__(
+        self,
+        repeat_threshold: int = 2,
+        head_chars: int = _HEAD_CHARS,
+        tail_chars: int = _TAIL_CHARS,
+    ) -> None:
+        self.repeat_threshold = max(1, int(repeat_threshold))
+        self.head_chars = max(0, int(head_chars))
+        self.tail_chars = max(0, int(tail_chars))
+        self._consecutive: int = 0
+        self._pending_nudge: str = ""
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._consecutive = 0
+        self._pending_nudge = ""
+        yield event
+
+    async def on_after_model(self, event: ModelResponseEvent):
+        length_truncated = event.finish_reason == "length" and not event.tool_calls
+        if not length_truncated:
+            self._consecutive = 0
+            self._pending_nudge = ""
+            yield event
+            return
+
+        self._consecutive += 1
+        self._pending_nudge = (
+            _NUDGE_REPEAT if self._consecutive >= self.repeat_threshold else _NUDGE_FIRST
+        )
+
+        content = event.content or ""
+        if len(content) > (self.head_chars + self.tail_chars + len(_TRUNC_MARKER)):
+            collapsed = (
+                content[: self.head_chars]
+                + _TRUNC_MARKER
+                + (content[-self.tail_chars :] if self.tail_chars else "")
+            )
+            yield dataclasses.replace(event, content=collapsed)
+        else:
+            yield event
+
+    async def on_before_model(self, event: BeforeModelEvent):
+        if not self._pending_nudge:
+            yield event
+            return
+        nudge = self._pending_nudge
+        self._pending_nudge = ""
+        msgs = list(event.messages)
+        # Run-loop may already have appended a passive "continue" user message
+        # for finish_reason=length. Replacing it avoids the before_model
+        # contract warning (must not insert when last role is already user).
+        if msgs and getattr(msgs[-1], "role", None) == "user":
+            msgs[-1] = Message(role="user", content=nudge)
+            yield dataclasses.replace(event, messages=tuple(msgs))
+        else:
+            yield dataclasses.replace(
+                event,
+                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+            )
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._consecutive = 0
+        self._pending_nudge = ""
+        yield event

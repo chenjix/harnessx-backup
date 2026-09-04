@@ -1,0 +1,71 @@
+29:    compute_history_hash,
+39:def _enforce_boundary_invariant(
+45:    """Invariant 7: processor must not emit SegmentBoundaryEvent when history_hash is unchanged.
+53:        "but history_hash is unchanged — spurious boundary"
+313:            # Snapshot history_hash before processors run so we can detect structural changes.
+316:            _history_hash_before = compute_history_hash(_hist_before)
+333:            # Compute history_hash after step_start processors ran (needed for both
+337:            _history_hash_after = compute_history_hash(_hist_after)
+340:            _enforce_boundary_invariant(boundary_events, _history_hash_before, _history_hash_after, step_id)
+345:            if not boundary_events and _history_hash_before != _history_hash_after:
+===
+def _enforce_boundary_invariant(
+    boundary_events: list,
+    hash_before: str,
+    hash_after: str,
+    step_id: int,
+) -> None:
+    """Invariant 7: processor must not emit SegmentBoundaryEvent when history_hash is unchanged.
+
+    Raises ContractViolationError in strict mode; logs a warning otherwise.
+    """
+    if not (boundary_events and hash_before == hash_after):
+        return
+    msg = (
+        f"step_start step={step_id}: processor emitted SegmentBoundaryEvent "
+        "but history_hash is unchanged — spurious boundary"
+    )
+    if os.environ.get("HARNESSX_CONTRACT_MODE", "warn").lower() == "strict":
+        raise ContractViolationError(
+            msg,
+            hook="step_start",
+            violation_type="spurious_boundary",
+            step_id=step_id,
+        )
+    _contract_logger.warning("CONTRACT [spurious_boundary] hook=step_start step=%d: %s", step_id, msg)
+
+
+from .state import State
+from .trajectory import (
+    FullStateSnapshot,
+    StatefulTrajectory,
+    StateSlotSnapshot,
+    TrajectoryStep,
+)
+
+if TYPE_CHECKING:
+    from typing import Callable
+    from ..providers.base import BaseModelProvider
+    from ..tools.base import BaseToolRegistry
+    from ..tracing.base import BaseTracer
+    from ..workspace.workspace import Workspace
+
+_logger = logging.getLogger(__name__)
+
+
+class HarnessError(Exception):
+    pass
+
+
+class BudgetExceededError(HarnessError):
+    pass
+
+
+class LoopDetectedError(HarnessError):
+    pass
+
+
+class ModelParseError(HarnessError):
+    pass
+
+

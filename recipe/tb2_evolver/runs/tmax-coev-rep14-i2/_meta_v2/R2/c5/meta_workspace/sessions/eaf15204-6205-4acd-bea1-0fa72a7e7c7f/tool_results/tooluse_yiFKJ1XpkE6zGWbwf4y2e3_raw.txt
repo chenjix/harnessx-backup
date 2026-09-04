@@ -1,0 +1,172 @@
+1	---
+2	name: validate
+3	description: Self-validation CLIs for the artifacts you write, plus the post-flight workflow the orchestrator runs after `end_turn`. Three categories — validity (canonicalize / dry_fire / contract / synthetic replay) blocks; policy (novelty / evidence) blocks on non-noop rounds; advisory (literals) never blocks. Read when you've just written or edited `config.yaml`, `tools/*.py`, `processors/*.py`, or `templates/*.j2`.
+4	---
+5	
+6	# Self-validation — run it before you stop
+7	
+8	## What runs when, and why
+9	
+10	After your `end_turn`, the orchestrator executes the
+11	`EvolveValidator` workflow in three phases:
+12	
+13	| Phase | Checks | Blocks round? |
+14	|---|---|---|
+15	| **validity** | `canonicalize` → `dry_fire` (implicit via canonicalize + replay) → `contract` (for processors that mutate messages) → `synthetic_task` replay | yes — first failure fails the round |
+16	| **policy** | `novelty` + `evidence` (candidates.md + cited_candidates cross-ref) — only when the structural changeset is non-empty | yes on non-noop rounds |
+17	| **advisory** | `literals` — scan authored tools / processors for task-id-shaped literals | **no** — writes `_meta_scratch/LITERALS_WARNING.md` with findings; next round's agent can see it |
+18	
+19	There is **no retry loop** at the orchestrator stage — a validity
+20	or policy failure hard-fails the round. Running the validators
+21	yourself before `end_turn` is the only way to fix a broken
+22	artifact inside the same session, while your context still has
+23	the reasoning that produced it.
+24	
+25	Every validator prints a **JSON report** to stdout and exits with:
+26	- `0` → `{"ok": true, ...}` — clean
+27	- non-zero → `{"ok": false, "error": "..."}` — findings; read the
+28	  artifact file the validator wrote under `_meta_scratch/`.
+29	
+30	Run them via `Bash`. All paths below are absolute.
+31	
+32	## Canonicalize (validity)
+33	
+34	**What it catches**: YAML shape errors, unresolvable `_target_`
+35	entries, missing / empty / broken-Jinja `template_path` files.
+36	
+37	```bash
+38	python -m harnessx.meta_harness.validate_workflow canonicalize \
+39	    <output_dir>/config.yaml
+40	```
+41	
+42	Success: `{"ok": true, "checked_templates": N}` — the config loads
+43	AND every `TemplateSystemPromptBuilder` eagerly renders.
+44	
+45	Failure: read the `error_type` + `error` fields in the JSON. Common
+46	shapes:
+47	- `TemplateSyntaxError` → fix the Jinja in the `.j2` file named.
+48	- `FileNotFoundError` on `template_path` → you referenced a template
+49	  you forgot to write. Write it, or repoint to the existing one.
+50	- `ModuleNotFoundError: No module named 'tools.foo'` → a `file://`
+51	  import in the config points at a Python file that doesn't exist
+52	  at the path given, or has a typo in the `::fn_name` suffix.
+53	
+54	## Dry-fire — processors + tools (validity)
+55	
+56	**What it catches**: field-name typos on event dataclasses, stale
+57	kwargs in message / event constructors, ImportErrors / NameErrors /
+58	SyntaxErrors inside authored tool fn bodies.
+59	
+60	```bash
+61	python -m harnessx.meta_harness.validate_workflow dry_fire \
+62	    <output_dir>/config.yaml <output_dir>/_meta_scratch
+63	```
+64	
+65	Success: `{"ok": true, "processors": {"likely_bugs": 0, ...}, "tools": {"likely_bugs": 0, ...}}`.
+66	
+67	Failure: the JSON tells you which side (processors or tools) has
+68	`likely_bugs > 0` and writes the detail to:
+69	- `_meta_scratch/DRY_FIRE_WARNINGS.md` — processors
+70	- `_meta_scratch/DRY_FIRE_TOOL_WARNINGS.md` — tools
+71	
+72	Read the file, fix the body, re-run.
+73	
+74	**"Notes" are not bugs.** Dry-fire uses minimal dummy inputs, so any
+75	real tool that hits the network on a dummy query will return an error
+76	— the validator downgrades these to notes. Only `likely_bugs` block.
+77	
+78	## Contract check (validity — processors only)
+79	
+80	**What it catches**: custom processors that mutate `event.messages`
+81	in ways that violate the HarnessX hook contract (empty messages,
+82	+2 insertions per chain, mutating the system prompt from
+83	`on_step_start`, etc.).
+84	
+85	```bash
+86	python -m harnessx.meta_harness.validate_workflow contract \
+87	    <output_dir>/config.yaml <output_dir>/_meta_scratch
+88	```
+89	
+90	Success: `{"ok": true, "violations": 0}`.
+91	
+92	Failure: `_meta_scratch/CONTRACT_VIOLATIONS.md` lists each violation
+93	with `hook`, `violation_type`, `fixture`, and an English message.
+94	Rules live in
+95	`harnessx/core/processor.py::_validate_messages_contract` — open it
+96	when you need to understand what a specific `violation_type` means.
+97	
+98	## Synthetic replay (validity — orchestrator only)
+99	
+100	Runs one tiny synthetic task through the real run loop after your
+101	`end_turn`. Verifies the config binds, the run loop boots, and no
+102	`exit_reason=error` is produced. Catches bugs the static validators
+103	miss — provider-level issues (empty end_turn, tool schema
+104	mismatch), templates that parse but produce malformed tool calls,
+105	processors that dry-fire fine but crash on real events.
+106	
+107	Not exposed as a CLI (needs a model binding only the recipe layer
+108	provides). If you need to sanity-check locally before `end_turn`,
+109	trust `canonicalize` + `dry_fire` + `contract` — they catch 95% of
+110	what replay would catch, for zero model cost.
+111	
+112	On failure: `_meta_scratch/REPLAY_FAIL.md` contains the exit
+113	reason, first failing step, and traceback. The `analyze` skill's
+114	"When a prior round failed the replay gate" section tells you how
+115	to interpret different failure shapes next round.
+116	
+117	## Literals scan (advisory — never blocks)
+118	
+119	**What it catches**: UUIDs and other task-id-shaped literals baked
+120	into authored `tools/*.py` or `processors/*.py` — the "works only on
+121	the one task the author memorised, silently degrades every other"
+122	anti-pattern.
+123	
+124	```bash
+125	python -m harnessx.meta_harness.validate_workflow literals \
+126	    <output_dir> <output_dir>/_meta_scratch
+127	```
+128	
+129	Output: `{"ok": true, "findings": N}`. Always exits 0. Findings
+130	are written to `_meta_scratch/TASK_SPECIFIC_LITERALS.md` regardless.
+131	The post-flight workflow also emits `LITERALS_WARNING.md` when
+132	`findings > 0` so the next round's agent surfaces the warning.
+133	
+134	This used to be a blocking validator; it has been demoted because
+135	hardcoded task-id patterns are best caught by "the next round
+136	fails to generalise on the broader task set", not by a syntactic
+137	heuristic. Fix what it finds anyway — such code almost never
+138	survives.
+139	
+140	## Suggested self-validation loop
+141	
+142	Before `end_turn`, after you've written everything:
+143	
+144	```bash
+145	# 1. config.yaml loads and all templates render
+146	python -m harnessx.meta_harness.validate_workflow canonicalize \
+147	    <output_dir>/config.yaml
+148	
+149	# 2. Custom processors + tools at least import and survive a dummy call
+150	python -m harnessx.meta_harness.validate_workflow dry_fire \
+151	    <output_dir>/config.yaml <output_dir>/_meta_scratch
+152	
+153	# 3. Processor contract (only matters if you wrote a processor that
+154	#    touches event.messages)
+155	python -m harnessx.meta_harness.validate_workflow contract \
+156	    <output_dir>/config.yaml <output_dir>/_meta_scratch
+157	
+158	# 4. Advisory: task-id literal scan (does not block, but fix what it finds)
+159	python -m harnessx.meta_harness.validate_workflow literals \
+160	    <output_dir> <output_dir>/_meta_scratch
+161	```
+162	
+163	If 1-3 print `"ok": true`, the static bugs are out. 4 is advisory
+164	regardless. Synthetic replay still runs after you stop — "static
+165	clean" is not the same as "the round passes". If 1-3 print
+166	`"ok": false`, read the artifact they name, fix, re-run.
+167	
+168	Running these is cheap (seconds). The alternative — ending your
+169	turn with a broken artifact and hard-failing the round — is
+170	expensive: there is no retry, and the reasoning that produced the
+171	broken artifact is no longer in context by the time the orchestrator
+172	sees the failure. Prefer the self-check.

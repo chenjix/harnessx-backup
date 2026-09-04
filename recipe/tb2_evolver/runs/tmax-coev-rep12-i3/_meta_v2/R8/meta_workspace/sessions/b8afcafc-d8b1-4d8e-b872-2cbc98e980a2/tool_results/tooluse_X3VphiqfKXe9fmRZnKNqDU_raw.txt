@@ -1,0 +1,82 @@
+301	            step_start_event = StepStartEvent(
+302	                run_id=state.run_id,
+303	                step_id=step_id,
+304	                raw_messages=tuple(state.raw_messages),
+305	                messages=tuple(state.messages),
+306	                task=task,
+307	                tools=_get_tools(),  # respects command-level allowed_tools restriction
+308	                context_window=context_window,
+309	                workspace=workspace,
+310	                system_prompt=task_system_prompt,  # frozen by on_task_start; never modified by on_step_start
+311	                token_count=rough_token_count(list(state.messages)),
+312	            )
+313	            # Snapshot history_hash before processors run so we can detect structural changes.
+314	            _pre_step_msgs = step_start_event.messages or tuple(state.messages)
+315	            _, _hist_before, _ = compute_windows(_pre_step_msgs)
+316	            _history_hash_before = compute_history_hash(_hist_before)
+317	
+318	            # pipe_all: collect SegmentBoundaryEvents
+319	            step_start_events = await pipe_all(
+320	                step_start_event,
+321	                get_procs("step_start"),
+322	                tracer=tracer,
+323	                hook="step_start",
+324	            )
+325	            boundary_events: list[SegmentBoundaryEvent] = [
+326	                e for e in step_start_events if isinstance(e, SegmentBoundaryEvent)
+327	            ]
+328	            step_start_event = next(
+329	                (e for e in reversed(step_start_events) if isinstance(e, StepStartEvent)),
+330	                step_start_event,
+331	            )
+332	
+333	            # Compute history_hash after step_start processors ran (needed for both
+334	            # invariant-7 check and auto-boundary generation).
+335	            _post_step_msgs = step_start_event.messages or _pre_step_msgs
+336	            _, _hist_after, _ = compute_windows(_post_step_msgs)
+337	            _history_hash_after = compute_history_hash(_hist_after)
+338	
+339	            # Invariant 7: spurious boundary detection (hash equal → no boundary allowed).
+340	            _enforce_boundary_invariant(boundary_events, _history_hash_before, _history_hash_after, step_id)
+341	
+342	            # Auto-detect structural history changes not already covered by a
+343	            # processor-emitted SegmentBoundaryEvent.  If history_window changed
+344	            # but no processor signalled a boundary, RunLoop generates one now.
+345	            if not boundary_events and _history_hash_before != _history_hash_after:
+346	                _hint = step_start_event.boundary_hint
+347	                _auto_boundary = SegmentBoundaryEvent(
+348	                    run_id=state.run_id,
+349	                    step_id=step_id,
+350	                    reason=_hint.reason if _hint else "auto_history_mutation",
+351	                    new_run_id=make_run_id(),
+352	                    state_snapshot=None,
+353	                    compacted_messages=tuple(_post_step_msgs),
+354	                    compacted_raw_messages=tuple(step_start_event.raw_messages or _post_step_msgs),
+355	                    before_msgs=_hint.before_msgs if _hint else 0,
+356	                    after_msgs=_hint.after_msgs if _hint else 0,
+357	                    before_tokens=_hint.before_tokens if _hint else 0,
+358	                    after_tokens=_hint.after_tokens if _hint else 0,
+359	                )
+360	                boundary_events = [_auto_boundary]
+361	
+362	            # Handle segment boundary: update state.run_id and notify tracer
+363	            for boundary in boundary_events:
+364	                await tracer.on_event(boundary)
+365	                state.run_id = boundary.new_run_id
+366	                if boundary.compacted_messages:
+367	                    state.raw_messages = list(boundary.compacted_messages)
+368	                    state.messages = list(boundary.compacted_messages)
+369	            await tracer.on_event(step_start_event)
+370	
+371	            # ── 2. Before model ─────────────────────────────────────────────
+372	            # RunLoop owns a safe default assembly path so step_start processors
+373	            # are optional: if no processor produced messages, start from the
+374	            # current effective context. Always ensure system prompt is present.
+375	            _assembled = step_start_event.messages or tuple(state.messages)
+376	            _assembled_list = list(_assembled)
+377	            if task_system_prompt:
+378	                # Strip any stale system message and inject the current task prompt.
+379	                # On resume, state.messages may retain a system from a prior session;
+380	                # always replace it so the model sees a fresh prompt rather than
+
+[Showing lines 301–380 of 981 total. Use offset=380 to read the next section.]

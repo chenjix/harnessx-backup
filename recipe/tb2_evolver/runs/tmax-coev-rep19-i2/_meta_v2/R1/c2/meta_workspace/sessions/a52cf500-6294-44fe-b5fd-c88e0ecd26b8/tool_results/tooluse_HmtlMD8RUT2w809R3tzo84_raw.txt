@@ -1,0 +1,43 @@
+============================== task_000028_7fe033ac len 1858
+You are an infrastructure engineer automating the provisioning of a video analysis microservice. We have a partially complete setup that is currently failing. An Nginx reverse proxy is configured to expose the service, but it is returning a 502 Bad Gateway because it is pointing to the wrong upstream UNIX socket path.
+
+Your objectives:
+1. **Fix Nginx Routing**: Inspect and fix the Nginx configuration at `/app/nginx.conf`. It currently routes requests to an incorrect UNIX socket. Update it to point to `/tmp/video_backend.sock`.
+2. **Fix and Update C++ Backend**: 
+   - We have a basic C++ HTTP socket server at `/app/server.cpp`. It is currently configured to listen on the wrong socket. Update it to listen on `/tmp/video_backend.sock`.
+   - Update the C++ code to analyze the video file located at `/app/video.mp4`. The server must dynamically calculate the exact total number of video frames in this file (you may use `ffprobe`, which is preinstalled, by shelling out from C++).
+   - The server must respond to any HTTP GET request with `HTTP/1.1 200 OK` and the body containing ONLY the integer frame count of the video.
+3. **Compile and Run**: Compile the C++ server into an executable at `/app/server`. Run it in the background. Its standard output and standard error must be appended to `/app/server.log`.
+4. **Log Configuration**: Create a logrotate configuration file at `/app/logrotate.conf` to manage `/app/server.log`. It should be configured to rotate daily, keep exactly 3 backups, and compress old logs.
+5. **Start Services**: Start Nginx using your fixed `/app/nginx.conf`. Nginx
+
+============================== task_000958_4bb2b05d len 3096
+You are a Database Reliability Engineer managing a complex backup infrastructure. The metadata for all backups (Full and Incremental) across hundreds of databases is stored in a SQLite database located at `/home/user/backup_catalog.db`. 
+
+Your task is to implement a C++ HTTP microservice that answers specific analytical queries about the backup state. You must also optimize the database schema to ensure these queries perform efficiently.
+
+The SQLite database has the following table:
+`CREATE TABLE backups (id INTEGER PRIMARY KEY, db_name TEXT, backup_type TEXT, parent_id INTEGER, size_bytes INTEGER, status TEXT, created_at DATETIME);`
+`backup_type` is either 'FULL' or 'INC'. If it's 'INC', `parent_id` points to the immediately preceding backup in the chain (which could be an 'INC' or 'FULL' backup). If 'FULL', `parent_id` is NULL.
+
+Write a C++ HTTP server listening exactly on `127.0.0.1:9090`. You may download and use the header-only `cpp-httplib` library for the HTTP server, and link against `sqlite3`. 
+
+Your service must implement the following REST endpoints. All endpoints must require an `Authorization` header containing exactly `Bearer dbre-token-xyz123`. Return HTTP 401 Unauthorized if missing or incorrect.
+
+1. **`GET /chain?id=<id>`**
+   * **Goal:** Trace the lineage of an incremental backup back to its root Full backup.
+   * **Implementation:** Use a Recursive CTE to traverse the `parent_id` relationships upwards until `parent_id` is NULL.
+   * **Output Format:** A JSON array of backup IDs representing the chain, starting with the requested `<id>` and ending with the
+
+============================== task_001857_24daeef3 len 1996
+You are acting as a senior support engineer. A critical customer is experiencing crashes in our diagnostic video stream processing service. We have collected a partial core dump, a network packet capture (`/home/user/crash.pcap`), and the diagnostic video file itself (`/app/diagnostic_feed.mp4`). 
+
+The source code for the service is located in `/home/user/src/diagnostic_server.cpp`. 
+
+Your objectives are:
+1. **Analyze the Crash and PCAP:** Use standard CLI tools to inspect the core dump (if reproducible) or the source code and pcap. The service crashes due to an off-by-one boundary condition in the packet ring-buffer processing when handling specific malformed diagnostic packets seen in the pcap. Fix the bug in `diagnostic_server.cpp` and add assertion-based intermediate validation to safely drop malformed packets instead of crashing.
+2. **Implement Video Analysis:** The service uses standard shell commands (`ffmpeg`/`ffprobe`) via system calls to analyze videos. Enhance the C++ server to correctly parse the total number of frames in `/app/diagnostic_feed.mp4` when requested.
+3. **Deploy the Multi-Protocol Service:** Compile the fixed C++ code (using `g++`) and run the service in the background. The service must bind to two interfaces:
+   - **HTTP Health Port (8080):** Must listen on `127.0.0.1:8080`. Any HTTP GET request to `/health` must return the exact HTTP 200 response body: `{"status": "healthy"}`.
+   - **TCP Diagnostic Port (9090):** Must listen on `127.0.0.1:9090`. When a client connects and sends the exact string `ANALYZE_VIDEO\n`, the service must execute the vide
+

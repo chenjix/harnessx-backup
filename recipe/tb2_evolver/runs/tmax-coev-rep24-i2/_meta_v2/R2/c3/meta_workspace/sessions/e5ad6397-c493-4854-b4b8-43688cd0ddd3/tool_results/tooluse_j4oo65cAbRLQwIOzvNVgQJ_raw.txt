@@ -1,0 +1,92 @@
+181	    async def on_before_tool(self, event: ToolCallEvent):
+182	        if event.tool_name == "Bash":
+183	            paths = _extract_written_files(event.tool_input.get("command", ""))
+184	            if paths:
+185	                self._pending[event.tool_call_id] = paths
+186	        yield event
+187	
+188	    async def on_after_tool(self, event: ToolResultEvent):
+189	        paths = self._pending.pop(event.tool_call_id, [])
+190	        injections: list[str] = []
+191	        for path in paths:
+192	            count = self._edit_counts.get(path, 0) + 1
+193	            self._edit_counts[path] = count
+194	            if count > self.threshold:
+195	                injections.append(_EDIT_LIMIT_WARN.format(path=path, threshold=self.threshold))
+196	                self._edit_counts[path] = 0
+197	        if injections:
+198	            yield dataclasses.replace(event, result=(event.result or "") + "".join(injections))
+199	        else:
+200	            yield event
+201	
+202	    async def on_task_end(self, event: TaskEndEvent):
+203	        self._edit_counts.clear()
+204	        self._pending.clear()
+205	        yield event
+206	
+207	
+208	# ---------------------------------------------------------------------------
+209	# TaskTimeReminderProcessor
+210	# ---------------------------------------------------------------------------
+211	
+212	_TASK_TIME_WARN_70 = (
+213	    "[TaskTimeReminder] You have used 70% of your time budget ({elapsed:.0f}s / {total:.0f}s). "
+214	    "Stop exploring. Focus exclusively on implementing and writing all required output files. "
+215	    "Run `ls -lh` on each expected output path to confirm they exist."
+216	)
+217	_TASK_TIME_WARN_90 = (
+218	    "[TaskTimeReminder] CRITICAL: You have used 90% of your time budget ({elapsed:.0f}s / {total:.0f}s, "
+219	    "{remaining:.0f}s left). "
+220	    "If you have NOT yet written all required output files, do so IMMEDIATELY — "
+221	    "the task will be terminated soon and any missing output files will cause an automatic score of 0. "
+222	    "Do NOT start any new implementation. Write and verify output files NOW."
+223	)
+224	
+225	
+226	class TaskTimeReminderProcessor(MultiHookProcessor):
+227	    _singleton_group = "task_time_reminder"
+228	    _order = 6
+229	
+230	    def __init__(
+231	        self,
+232	        timeout_seconds: float | None = None,
+233	        warn_at: tuple[float, ...] = (0.70, 0.90),
+234	    ) -> None:
+235	        self._timeout = timeout_seconds
+236	        self._warn_at = sorted(warn_at)
+237	        self._triggered: set[float] = set()
+238	        self._start: float = 0.0
+239	
+240	    async def on_task_start(self, event: TaskStartEvent):
+241	        self._triggered = set()
+242	        self._start = time.monotonic()
+243	        yield event
+244	
+245	    async def on_step_start(self, event: StepStartEvent):
+246	        if not self._timeout or self._timeout <= 0:
+247	            yield event
+248	            return
+249	
+250	        elapsed = time.monotonic() - self._start
+251	        pct = elapsed / self._timeout
+252	        remaining = self._timeout - elapsed
+253	
+254	        warn: str | None = None
+255	        for threshold in reversed(self._warn_at):
+256	            if pct >= threshold and threshold not in self._triggered:
+257	                self._triggered.add(threshold)
+258	                if threshold >= 0.90:
+259	                    warn = _TASK_TIME_WARN_90.format(elapsed=elapsed, total=self._timeout, remaining=remaining)
+260	                else:
+261	                    warn = _TASK_TIME_WARN_70.format(elapsed=elapsed, total=self._timeout)
+262	                break
+263	
+264	        if warn:
+265	            msg = Message(role="user", content=warn)
+266	            yield dataclasses.replace(
+267	                event,
+268	                messages=event.messages + (msg,),
+269	                raw_messages=event.raw_messages + (msg,),
+270	            )
+
+[Showing lines 181–270 of 466 total. Use offset=270 to read the next section.]

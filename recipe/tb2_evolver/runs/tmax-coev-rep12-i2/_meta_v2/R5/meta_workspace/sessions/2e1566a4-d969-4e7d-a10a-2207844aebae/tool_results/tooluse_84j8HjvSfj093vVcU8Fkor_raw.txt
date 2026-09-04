@@ -1,0 +1,57 @@
+{
+  "task_id": "task_000348_31fb8c8a",
+  "domain": "scientific_computing",
+  "reward": 0,
+  "status": "ok",
+  "elapsed_s": 1078.0,
+  "api_base": "http://127.0.0.1:8305/v1",
+  "model": "qwen35-9b-tmax-coev-r12",
+  "image": "tmax-eval:task_000348_31fb8c8a-7a4073a8ebe6",
+  "container": "42f47d4289392e43b682e1419acf60ee880f32460409a47420580e450e9d21f8",
+  "initial_pytest": {
+    "passed": true,
+    "rc": 0,
+    "output_tail": ".                                                                        [100%]\n1 passed in 0.00s\n"
+  },
+  "agent": {
+    "steps": 80,
+    "finished": "budget_exceeded",
+    "error": null,
+    "exit_reason": "budget_exceeded",
+    "backend": "harnessx"
+  },
+  "final_pytest": {
+    "passed": false,
+    "rc": 1,
+    "output_tail": "s,\n            \"molecular_graph\": {\n                \"num_nodes\": 6,\n                \"edges\": [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 2], [2, 5]]\n            },\n            \"max_iterations\": 100,\n            \"tolerance\": 1e-5\n        }\n    \n        try:\n            resp = requests.post(\"http://127.0.0.1:9090/api/v1/process_spectrum\", json=payload, timeout=5)\n        except requests.exceptions.RequestException as e:\n            pytest.fail(f\"Failed to connect to the server or send request: {e}\")\n    \n        assert resp.status_code == 200, f\"Expected status code 200, got {resp.status_code}. Response: {resp.text}\"\n    \n        try:\n            data = resp.json()\n        except ValueError:\n            pytest.fail(f\"Response is not valid JSON: {resp.text}\")\n    \n        # Verify graph shortest path (0 -> 2 -> 5 = 2 edges)\n        assert \"graph_shortest_path\" in data, \"Missing 'graph_shortest_path' in response\"\n        assert data[\"graph_shortest_path\"] == 2, f\"Expected path 2, got {data['graph_shortest_path']}\"\n    \n        # Verify peak index (k=10)\n        assert \"peak_index\" in data, \"Missing 'peak_index' in response\"\n        assert data[\"peak_index\"] == 10, f\"Expected peak index 10, got {data['peak_index']}\"\n    \n        # Verify convergence logic roughly (sqrt of amplitude)\n        assert \"peak_amplitude\" in data, \"Missing 'peak_amplitude' in response\"\n        assert \"converged_gamma\" in data, \"Missing 'converged_gamma' in response\"\n    \n        amp = data[\"peak_amplitude\"]\n        expected_gamma = math.sqrt(amp)\n>       assert abs(data[\"converged_gamma\"] - expected_gamma) < 1e-3, f\"Gamma convergence incorrect. Expected ~{expected_gamma}, got {data['converged_gamma']}\"\nE       TypeError: unsupported operand type(s) for -: 'NoneType' and 'float'\n\n/tmp/test_final_state.py:49: TypeError\n=========================== short test summary info ============================\nFAILED ../../tmp/test_final_state.py::test_api_process_spectrum - TypeError: ...\n1 failed in 0.07s\n"
+  }
+}
+===SMALL===
+{
+  "task_id": "task_000718_2c9ef3a3",
+  "domain": "data_processing",
+  "reward": 0,
+  "status": "ok",
+  "elapsed_s": 92.4,
+  "api_base": "http://127.0.0.1:8300/v1",
+  "model": "qwen35-9b-tmax-coev-r12",
+  "image": "tmax-eval:task_000718_2c9ef3a3-ba0a45bcde75",
+  "container": "7bc75735e87aacbcf01ba9755c291173671c58065aa1edb1d82e8f5c69194a7e",
+  "initial_pytest": {
+    "passed": true,
+    "rc": 0,
+    "output_tail": ".                                                                        [100%]\n1 passed in 0.01s\n"
+  },
+  "agent": {
+    "steps": 11,
+    "finished": "no_tool_calls",
+    "error": null,
+    "exit_reason": "done",
+    "backend": "harnessx"
+  },
+  "final_pytest": {
+    "passed": false,
+    "rc": 1,
+    "output_tail": "    deduped[rid] = r\n    \n        # Filtering\n        valid_records = []\n        for r in deduped.values():\n            if levenshtein(r['text_snippet'], \"ERROR_STATE\") > 3:\n                valid_records.append(r)\n    \n        # Aggregation\n        user_stats = defaultdict(list)\n        for r in valid_records:\n            user_stats[r['user_id']].append(r['score'])\n    \n        expected_stats = []\n        for uid in sorted(user_stats.keys()):\n            scores = user_stats[uid]\n            avg = sum(scores) / len(scores)\n            expected_stats.append((uid, str(len(scores)), f\"{avg:.2f}\"))\n    \n        # Check log for final valid rows\n        with open(log_path, \"r\") as f:\n            log_content = f.read().splitlines()\n        assert f\"[INFO] Final valid rows: {len(valid_records)}\" in log_content, \"Final valid rows log entry is missing or incorrect.\"\n    \n        # Check output CSV\n        with open(output_csv, \"r\") as f:\n            reader = csv.reader(f)\n            header = next(reader, None)\n            assert header == [\"user_id\", \"record_count\", \"avg_score\"], \"Output CSV header is incorrect.\"\n    \n            actual_stats = []\n            for row in reader:\n                actual_stats.append(tuple(row))\n    \n>       assert actual_stats == expected_stats, f\"Output CSV data is incorrect. Expected {expected_stats}, got {actual_stats}.\"\nE       AssertionError: Output CSV data is incorrect. Expected [('U1', '2', '82.75'), ('U2', '2', '85.00'), ('U4', '1', '55.00')], got [('U1', '2', '82.75'), ('U2', '2', '85.0'), ('U4', '1', '55.0')].\nE       assert [('U1', '2', ... '1', '55.0')] == [('U1', '2', ...'1', '55.00')]\nE         \nE         At index 1 diff: ('U2', '2', '85.0') != ('U2', '2', '85.00')\nE         Use -v to get more diff\n\n/tmp/test_final_state.py:109: AssertionError\n=========================== short test summary info ============================\nFAILED ../../tmp/test_final_state.py::test_data_processing_logic - AssertionE...\n1 failed, 2 passed in 0.02s\n"
+  }
+}

@@ -1,0 +1,92 @@
+211	
+212	    async def on_task_start(self, event: TaskStartEvent):
+213	        self._reset()
+214	        self._current_run_id = event.run_id
+215	        yield event
+216	
+217	    async def on_step_start(self, event: StepStartEvent):
+218	        if event.run_id != self._current_run_id:
+219	            self._reset()
+220	            self._current_run_id = event.run_id
+221	        current = len(event.messages)
+222	        if (
+223	            self._prev_message_count > 0
+224	            and self._prev_message_count - current >= self.compaction_drop_threshold
+225	        ):
+226	            self._fps.clear()
+227	            self._call_fps.clear()
+228	        self._prev_message_count = current
+229	        yield event
+230	
+231	    async def on_before_tool(self, event: ToolCallEvent):
+232	        # Only intervene when a full-triple cycle is already established AND the
+233	        # incoming call is the same call that repeats inside that cycle.
+234	        call_fp = self._call_fp(event.tool_name, event.tool_input)
+235	        self._pending[event.tool_call_id] = f"{event.tool_name}\x00{call_fp}"
+236	
+237	        best_cycles, best_period = self._best_cycle(list(self._fps))
+238	        if best_cycles >= self.break_cycles and len(self._call_fps) >= best_period:
+239	            # The repeating call-block is the tail `best_period` call fps.
+240	            recent_block = list(self._call_fps)[-best_period:]
+241	            if call_fp in recent_block:
+242	                self._total_blocks += 1
+243	                if self._total_blocks > self.max_total_blocks:
+244	                    raise LoopDetectedError(
+245	                        f"Cyclic loop unbroken: a {best_period}-step identical "
+246	                        f"tool cycle kept re-forming and was blocked "
+247	                        f"{self.max_total_blocks} times without the agent making "
+248	                        f"progress"
+249	                    )
+250	                # Block the call, inject a redirect, keep the run alive.
+251	                # Do NOT record this call in the windows (it never executed);
+252	                # the pending entry is dropped and the id is tagged blocked so
+253	                # on_after_tool can tell a block apart from real progress.
+254	                self._pending.pop(event.tool_call_id, None)
+255	                self._blocked_ids.add(event.tool_call_id)
+256	                yield dataclasses.replace(
+257	                    event,
+258	                    approved=False,
+259	                    synthetic_result=_BREAK_TEMPLATE.format(runs=best_cycles),
+260	                )
+261	                return
+262	
+263	        yield event
+264	
+265	    async def on_after_tool(self, event: ToolResultEvent):
+266	        entry = self._pending.pop(event.tool_call_id, None)
+267	        if entry is None:
+268	            # A call we blocked: it never executed. Record a break so it can't
+269	            # join a cycle. The run-wide _total_blocks counter is intentionally
+270	            # NOT reset here — it is the safety-net budget.
+271	            if event.tool_call_id in self._blocked_ids:
+272	                self._blocked_ids.discard(event.tool_call_id)
+273	                self._fps.append("")
+274	                self._call_fps.append("")
+275	                yield event
+276	                return
+277	            # An unmatched result (no before_tool seen). Genuine progress:
+278	            # break any cycle.
+279	            self._fps.append("")
+280	            self._call_fps.append("")
+281	            yield event
+282	            return
+283	
+284	        tool_name, call_fp = entry.split("\x00", 1)
+285	        result_part = event.result or ""
+286	        if event.error:
+287	            result_part += f"\x01ERR\x01{event.error}"
+288	        full_fp = self._hash(f"{call_fp}\x00{result_part}")
+289	        self._fps.append(full_fp)
+290	        self._call_fps.append(call_fp)
+291	
+292	        best_cycles, best_period = self._best_cycle(list(self._fps))
+293	        if best_cycles >= self.warn_cycles:
+294	            warning = _WARN_TEMPLATE.format(period=best_period, cycles=best_cycles)
+295	            yield dataclasses.replace(event, result=(event.result or "") + warning)
+296	            return
+297	
+298	        yield event
+299	
+300	    async def on_task_end(self, event: TaskEndEvent):
+301	        self._reset()
+302	        yield event

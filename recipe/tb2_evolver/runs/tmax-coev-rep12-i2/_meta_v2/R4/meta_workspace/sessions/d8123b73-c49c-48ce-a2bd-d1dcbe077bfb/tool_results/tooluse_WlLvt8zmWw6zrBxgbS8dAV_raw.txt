@@ -1,0 +1,82 @@
+===== task_002146_0bc2994c : first user message (task description) =====
+You are tasked with fixing and completing a binary artifact manager for a software repository. 
+
+Our system uses two services located in `/app/`:
+1. An HTTP upload API running on `127.0.0.1:5000` which receives uploaded `.tar` archives and saves them to `/app/inbox/`.
+2. An Nginx server running on `127.0.0.1:8080` which serves the processed artifacts from `/app/outbox/`.
+
+Both services are already started, but the glue tying them together is missing. 
+
+You must write a Bash script at `/home/user/manager.sh` that acts as a background daemon. The daemon must do the following continuously:
+1. **Watch** the directory `/app/inbox/` for newly uploaded `.tar` files.
+2. **Security Check**: When a `.tar` file is fully written, inspect its contents to prevent "zip slip" attacks. If any file path within the tar archive contains directory traversal sequences (e.g., `../`) or absolute paths (starting with `/`), **do not extract it**. Instead, write the word `REJECTED` into a file named `/app/outbox/<original_filename_without_extension>.status`.
+3. **Extraction & Chunking**: If the archive is safe, extract it to a temporary directory. For every file extracted:
+   - If the file is larger than 100
+===== task_000885_d1c1007b : first user message (task description) =====
+You are a data scientist tasked with cleaning a text dataset, building a reproducible pipeline, and deploying a model evaluation service. 
+
+I have a dataset of customer reviews located at `/home/user/reviews.csv`. The file has two columns: `text` and `sentiment` (0 or 1). The dataset contains noise (HTML tags, extra spaces) that needs to be cleaned.
+
+Your task is to build a complete Python pipeline that does the following:
+1. **Tokenization and Dataset Preparation**: Clean the text (remove HTML tags, lowercase, strip extra spaces) and tokenize it. Apply TF-IDF vectorization.
+2. **Dimensionality Reduction**: Apply TruncatedSVD to reduce the TF-IDF features to 50 components.
+3. **Cross-validation and Hyperparameter Tuning**: Train a Logistic Regression model and a Random Forest model. Use 5-fold cross-validation to evaluate both models based on accuracy.
+4. **Hypothesis Testing**: Perform a paired t-test on the 5-fold CV accuracy scores of the two models to determine if there is a statistically significant difference (alpha=0.05).
+5. **Reproducible Pipeline**: Ensure your script uses a random seed of 42 for all operations (SVD, model initialization, CV splits).
+
+Finally, you must dep
+===== task_000348_31fb8c8a : first user message (task description) =====
+I need you to build a C++-based API service for our spectroscopy data pipeline. I am a data scientist fitting models to molecular signal data, and I need a backend service that processes time-domain observational data, extracts spectral features, correlates them with a molecular graph model, and evaluates the convergence of a Lorentzian peak fit.
+
+Please create a C++ program that runs an HTTP server on `127.0.0.1:9090`. You should use the single-header `cpp-httplib` library (you can download it via `wget https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h`). 
+
+The server must expose a single endpoint:
+`POST /api/v1/process_spectrum`
+
+The endpoint will receive a JSON payload (you can use any single-header JSON library like `nlohmann/json.hpp`, which you should download). 
+The JSON payload will have the following structure:
+```json
+{
+  "time_series": [0.1, -0.5, 0.8, ...], 
+  "molecular_graph": {
+    "num_nodes": 5,
+    "edges": [[0, 1], [1, 2], [2, 3], [3, 4], [0, 4]]
+  },
+  "max_iterations": 100,
+  "tolerance": 1e-4
+}
+```
+
+The server must perform the following pipeline:
+1. **Observational Data Reshaping & Spectroscopy**: Apply a Hann window to the `time_series` a
+===== task_001074_90fdfe60 : first user message (task description) =====
+We are migrating our web security session backend from Python 2 to Python 3. Our system processes serialized Protobuf messages that contain session data. For security reasons, the sensitive payload within these messages is obfuscated using a proprietary C shared library (`libobfuscate.so`).
+
+In Python 2, our script casually mixed strings and bytes, which caused major memory leaks and crashes, but it "worked" well enough. Now, under Python 3, the script is broken due to strict string/bytes separation and changes in `sys.stdin` behavior. 
+
+Your task is to write a modern, memory-safe Python 3 script that performs the exact same operation as our legacy script.
+
+**Environment details:**
+- Working directory: `/home/user/workspace`
+- Shared library: `/home/user/workspace/libobfuscate.so`
+- Protobuf schema: `/home/user/workspace/session.proto`
+
+**The Protobuf Schema (`session.proto`):**
+```protobuf
+syntax = "proto3";
+message SessionToken {
+    string username = 1;
+    int64 timestamp = 2;
+    bytes payload = 3;
+    uint32 flags = 4;
+}
+```
+
+**The Legacy Python 2 Script (for reference):**
+```python
+# legacy_processor.py (Python 2)
+import ctypes
+import sys
+import session_pb2
+
+lib = ctypes.CDL

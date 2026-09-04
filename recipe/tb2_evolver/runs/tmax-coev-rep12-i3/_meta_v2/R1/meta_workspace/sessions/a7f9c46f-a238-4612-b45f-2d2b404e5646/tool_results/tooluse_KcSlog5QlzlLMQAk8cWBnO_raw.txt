@@ -1,0 +1,68 @@
+    async def on_step_start(self, event: StepStartEvent):
+        # Detect force_compact from task (StepStartEvent carries the task object)
+        if getattr(event.task, "force_compact", False):
+            self._force_compact_mode = True
+            self._task_anchor = None  # management op — don't prepend description to compacted history
+
+        messages_to_compact = event.messages if event.messages else event.raw_messages
+        before_msgs = len(messages_to_compact)
+        before_tokens = rough_token_count(list(messages_to_compact))
+
+        if (
+            not self._force_compact_mode
+            and before_tokens <= self.token_threshold
+            and before_msgs <= self.message_threshold
+        ):
+            yield event
+            return
+
+        new_messages = await self._compact(messages_to_compact, run_id=event.run_id)
+        new_count = rough_token_count(list(new_messages))
+
+        self._compact_stats = (before_msgs, len(new_messages), before_tokens, new_count)
+
+        logger.info(
+            "Context compacted: %d → %d messages (~%d → ~%d tokens)",
+            before_msgs,
+            len(new_messages),
+            before_tokens,
+            new_count,
+        )
+
+        # Always set the hint so RunLoop labels the auto-boundary as "compaction".
+        # If the content didn't actually change, hash comparison won't fire a boundary
+        # and this hint is never read.
+        hint = BoundaryHint(
+            reason="compaction",
+            before_msgs=before_msgs,
+            after_msgs=len(new_messages),
+            before_tokens=before_tokens,
+            after_tokens=new_count,
+        )
+
+        yield dataclasses.replace(
+            event,
+            messages=new_messages,
+            raw_messages=new_messages,
+            token_count=new_count,
+            boundary_hint=hint,
+        )
+
+    async def on_before_model(self, event: BeforeModelEvent):
+        if not self._force_compact_mode:
+            yield event
+            return
+
+        stats = self._compact_stats
+        if stats:
+            before_msgs, after_msgs, before_tok, after_tok = stats
+            if before_msgs != after_msgs:
+                msg = f"✅ 已压缩：{before_msgs} → {after_msgs} 条消息（~{before_tok:,} → ~{after_tok:,} tokens）"
+            else:
+                msg = f"无需压缩（当前 {before_msgs} 条消息，~{before_tok:,} tokens）"
+        else:
+            msg = "✅ 压缩完成"
+
+        yield dataclasses.replace(event, skip_model=True, synthetic_output=msg)
+=== rough_token_count def ===
+544:def rough_token_count(messages: "list[Message] | tuple[Message, ...]") -> int:

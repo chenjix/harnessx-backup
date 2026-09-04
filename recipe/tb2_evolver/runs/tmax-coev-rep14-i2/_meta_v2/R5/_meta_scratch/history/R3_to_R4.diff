@@ -1,0 +1,42 @@
+--- R3
++++ R4
+@@ -49,2 +49,39 @@
+   _hook_: '*'
++# Break ACTION-level repetition loops (identical Bash calls repeated with no
++# state progress). This is a COMPACTION-SAFE drop-in replacement for the stock
++# LoopDetectionProcessor (same _singleton_group="loop_detection", _order=20).
++#
++# Why the replacement: the stock processor fully clears its fingerprint window
++# on every compaction-driven message drop (>= compaction_drop_threshold). When
++# the agent is stuck emitting the SAME Bash call repeatedly, each repeated turn
++# re-narrates and re-grows the context, which itself trips CompactionProcessor
++# — so the reset wipes the in-progress identical run before the consecutive
++# counter can reach `threshold`, silently defeating the detector. Verified on
++# this benchmark: tasks issued 9-33 byte-identical consecutive calls yet NO task
++# ever produced a clean `loop_detected` exit; they burned the whole step budget
++# (budget_exceeded/error) instead, and the warn-nudge never reached the agent.
++#
++# The fix preserves ONLY the trailing consecutive run across a compaction reset
++# (dropping older heterogeneous fingerprints, which was the real stale-false-
++# positive risk the reset targeted), so a genuine loop still accumulates toward
++# threshold and the warn escalation still reaches the model.
++#
++# Knobs are recalibrated for this Bash-only agent:
++#   - warn_threshold=8: injects "you are stuck, try something different" starting
++#     at 8 consecutive identical calls — now reaches loop tasks that compaction
++#     previously silenced, while tolerating short legit repeats.
++#   - threshold=30 raises LoopDetectedError -> graceful `loop_detected` exit; set
++#     ABOVE the observed recover-after-loop ceiling (task_000936 PASSED after 26
++#     identical calls then recovered) so a recovering loop is never cut short,
++#     while the pathological 30+ non-recovering loops get their budget reclaimed.
++#   - window_size=40 > threshold so the consecutive-run tail can reach 30.
++#   - name_warn_threshold=999 disables Strategy 2 (a Bash-only agent issues many
++#     legit consecutive Bash calls with varying args).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep14-i2/_meta_v2/R4/c6/processors/loop_detection_compaction_safe.py::CompactionSafeLoopDetectionProcessor
++  window_size: 40
++  warn_threshold: 8
++  threshold: 30
++  name_warn_threshold: 999
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

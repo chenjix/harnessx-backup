@@ -1,0 +1,72 @@
+96	        self._project_dir = os.getcwd() if show_project_dir else None
+97	        self._timeout = timeout_seconds
+98	        self._constraints = dict(constraints or {})
+99	        self._header = header
+100	        self._inject_tree = inject_workspace_tree
+101	        self._max_tree_lines = max_tree_lines
+102	        self._non_interactive = non_interactive
+103	        self._inject_integrity_rules = inject_integrity_rules
+104	        self._start_time: float | None = None
+105	        self._warned_75 = False
+106	        self._warned_90 = False
+107	        self._tree_cache: str | None = None  # fetched once in on_task_start
+108	
+109	    async def _fetch_tree(self) -> str | None:
+110	        """Return a depth-1 directory listing of the working directory, or None on failure."""
+111	        from ...sandbox.base import get_current_sandbox
+112	
+113	        sandbox = get_current_sandbox()
+114	
+115	        if sandbox is not None:
+116	            cmd = f"find {self._working_dir} -maxdepth 1 ! -path '*/.*' | sort | head -{self._max_tree_lines}"
+117	            try:
+118	                raw = await sandbox.exec(cmd, timeout=10)
+119	            except Exception:
+120	                return None
+121	        else:
+122	            root = Path(self._working_dir)
+123	            if not root.exists():
+124	                return None
+125	            entries: list[str] = []
+126	            try:
+127	                for p in sorted(root.iterdir()):
+128	                    if p.name.startswith("."):
+129	                        continue
+130	                    entries.append(p.name)
+131	                    if len(entries) >= self._max_tree_lines:
+132	                        break
+133	            except Exception:
+134	                return None
+135	            raw = "\n".join(entries)
+136	
+137	        if not raw or not raw.strip():
+138	            return None
+139	
+140	        # Strip the working_dir prefix so paths are relative to it.
+141	        prefix = self._working_dir.rstrip("/") + "/"
+142	        lines = []
+143	        for line in raw.strip().splitlines():
+144	            line = line.strip()
+145	            if not line or line == self._working_dir.rstrip("/"):
+146	                continue
+147	            lines.append(line[len(prefix) :] if line.startswith(prefix) else line)
+148	
+149	        return "\n".join(lines) if lines else None
+150	
+151	    def _time_warning(self) -> str | None:
+152	        """Return a time budget warning string if a threshold has been crossed, else None."""
+153	        if not self._timeout or self._start_time is None:
+154	            return None
+155	        elapsed = time.monotonic() - self._start_time
+156	        pct = elapsed / self._timeout
+157	        if pct >= 0.90 and not self._warned_90:
+158	            self._warned_90 = True
+159	            return _TIME_WARNING_90
+160	        if pct >= 0.75 and not self._warned_75:
+161	            self._warned_75 = True
+162	            return _TIME_WARNING_75
+163	        return None
+164	
+165	    def _build_block(self, tree: str | None) -> str:
+
+[Showing lines 96–165 of 213 total. Use offset=165 to read the next section.]

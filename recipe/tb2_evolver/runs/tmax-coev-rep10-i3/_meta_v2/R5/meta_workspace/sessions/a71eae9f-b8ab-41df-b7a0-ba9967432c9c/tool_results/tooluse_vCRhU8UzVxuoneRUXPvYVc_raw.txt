@@ -1,0 +1,102 @@
+541	                except ImportError:
+542	                    _spawn_ctx_token = None
+543	
+544	                _mcp_ctx_token = _mcp_results_ctx.set(_step_mcp_dir)
+545	                try:
+546	                    if tc_event.approved:
+547	                        t0 = time.monotonic()
+548	                        try:
+549	                            result = await tool_registry.execute(tc_event.tool_name, tc_event.tool_input)
+550	                            tr_event = ToolResultEvent(
+551	                                run_id=state.run_id,
+552	                                step_id=step_id,
+553	                                tool_name=tc_event.tool_name,
+554	                                tool_call_id=tc_event.tool_call_id,
+555	                                result=result.output,
+556	                                error=result.error,
+557	                                duration_ms=(time.monotonic() - t0) * 1000,
+558	                                content_blocks=tuple(result.content_blocks) if result.content_blocks else (),
+559	                            )
+560	                        except Exception as e:
+561	                            tr_event = ToolResultEvent(
+562	                                run_id=state.run_id,
+563	                                step_id=step_id,
+564	                                tool_name=tc_event.tool_name,
+565	                                tool_call_id=tc_event.tool_call_id,
+566	                                result="",
+567	                                error=str(e),
+568	                                duration_ms=(time.monotonic() - t0) * 1000,
+569	                            )
+570	                        _at_events = await pipe_all(
+571	                            tr_event,
+572	                            get_procs("after_tool"),
+573	                            tracer=tracer,
+574	                            hook="after_tool",
+575	                        )
+576	                        tr_event = next(
+577	                            (e for e in reversed(_at_events) if isinstance(e, ToolResultEvent)),
+578	                            tr_event,
+579	                        )
+580	                        await tracer.on_event(tr_event)
+581	                        state.add_tool_result(tr_event)
+582	                        step_tool_results.append(tr_event)
+583	
+584	                        result_text = tr_event.result if not tr_event.error else f"Error: {tr_event.error}"
+585	                        if tr_event.content_blocks:
+586	                            result_content: str | list = [
+587	                                {"type": "text", "text": result_text},
+588	                                *tr_event.content_blocks,
+589	                            ]
+590	                        else:
+591	                            result_content = result_text
+592	                        state.add_raw_message(
+593	                            Message(
+594	                                role="tool",
+595	                                content=result_content,
+596	                                tool_call_id=tc_event.tool_call_id,
+597	                                name=tc_event.tool_name,
+598	                            )
+599	                        )
+600	                    elif tc_event.synthetic_result is not None:
+601	                        tr_event = ToolResultEvent(
+602	                            run_id=state.run_id,
+603	                            step_id=step_id,
+604	                            tool_name=tc_event.tool_name,
+605	                            tool_call_id=tc_event.tool_call_id,
+606	                            result=tc_event.synthetic_result,
+607	                            duration_ms=0.0,
+608	                        )
+609	                        _at_syn_events = await pipe_all(
+610	                            tr_event,
+611	                            get_procs("after_tool"),
+612	                            tracer=tracer,
+613	                            hook="after_tool",
+614	                        )
+615	                        tr_event = next(
+616	                            (e for e in reversed(_at_syn_events) if isinstance(e, ToolResultEvent)),
+617	                            tr_event,
+618	                        )
+619	                        await tracer.on_event(tr_event)
+620	                        state.add_tool_result(tr_event)
+621	                        step_tool_results.append(tr_event)
+622	                        state.add_raw_message(
+623	                            Message(
+624	                                role="tool",
+625	                                content=tr_event.result if not tr_event.error else f"Error: {tr_event.error}",
+626	                                tool_call_id=tc_event.tool_call_id,
+627	                                name=tc_event.tool_name,
+628	                            )
+629	                        )
+630	                    else:
+631	                        state.add_raw_message(
+632	                            Message(
+633	                                role="tool",
+634	                                content="Tool call not approved.",
+635	                                tool_call_id=tc_event.tool_call_id,
+636	                                name=tc_event.tool_name,
+637	                            )
+638	                        )
+639	                finally:
+640	                    # Always reset per-tool-call context vars, even if a processor raises.
+
+[Showing lines 541–640 of 981 total. Use offset=640 to read the next section.]

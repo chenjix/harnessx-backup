@@ -1,0 +1,70 @@
+class BeforeModelEvent(Event):
+    type: str = field(default="before_model", init=False)
+    messages: tuple[Message, ...] = ()
+    tools: tuple[ToolSchema, ...] = ()
+    cumulative_cost_usd: float = 0.0  # needed by CostGuardProcessor
+    skip_model: bool = field(default=False, hash=False, compare=False)
+    synthetic_output: str = field(default="", hash=False, compare=False)
+
+
+@dataclass(frozen=True)
+class ModelResponseEvent(Event):
+    type: str = field(default="model_response", init=False)
+    content: str = ""
+    thinking: str = ""  # extended thinking / reasoning content from the model
+    thinking_blocks: tuple = ()  # raw provider blocks (with signatures) for multi-turn replay
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str = "end_turn"
+    usage: Usage = field(default_factory=Usage)
+    model: str = ""
+    attempted_models: tuple[str, ...] = ()  # models tried before this one (ProviderGroup fallback)
+
+
+@dataclass(frozen=True)
+class ToolCallEvent(Event):
+    type: str = field(default="tool_call", init=False)
+    tool_name: str = ""
+    tool_input: dict = field(default_factory=dict)
+    tool_call_id: str = ""
+    approved: bool = True
+    synthetic_result: str | None = None
+    """When set alongside approved=False, the RunLoop injects this as the
+    ToolResultEvent result instead of sending "Tool call not approved."
+    Processors can use this to intercept tool calls and inject custom results.
+    """
+
+
+@dataclass(frozen=True)
+class ToolResultEvent(Event):
+    type: str = field(default="tool_result", init=False)
+    tool_name: str = ""
+    tool_call_id: str = ""
+    result: str = ""
+    error: str | None = None
+    duration_ms: float = 0.0
+    content_blocks: tuple = field(default=(), hash=False, compare=False)
+    # Native multimodal blocks (Anthropic content format) from MCP tools.
+    # Empty tuple = text-only result; processor chain passes this through unchanged.
+
+
+@dataclass(frozen=True)
+class StepEndEvent(Event):
+    type: str = field(default="step_end", init=False)
+    step_summary: str = ""
+    tool_call_summary: str = ""  # "tool1(args)|tool2(args)" — used by LoopDetectionProcessor
+    cumulative_tokens: int = 0
+    cumulative_cost_usd: float = 0.0
+    memory_written: bool = False
+    state_snapshot: "dict | None" = field(
+        default=None, hash=False, compare=False
+    )  # needed by CheckpointProcessor; None by default to keep events lightweight
+    # Timing + token breakdown (populated by run_loop, forwarded via SSETracer)
+    duration_ms: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class TaskEndEvent(Event):
+    type: str = field(default="task_end", init=False)
+    final_output: str = ""

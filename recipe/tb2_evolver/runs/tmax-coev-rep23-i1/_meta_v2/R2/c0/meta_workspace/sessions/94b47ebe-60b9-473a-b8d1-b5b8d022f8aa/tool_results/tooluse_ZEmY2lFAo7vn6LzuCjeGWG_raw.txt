@@ -1,0 +1,186 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatCommandBreakerProcessor for Tmax (and TB2-style) agents.
+4	
+5	Closes a systemic no-progress failure mode observed across many Tmax
+6	trajectories: the agent issues the **same** shell command, gets the
+7	**same** result, and then re-issues that identical command again and
+8	again — 15 to 28 consecutive times in the worst cases — making zero
+9	progress until it either exhausts its step budget
+10	(``exit_reason=budget_exceeded``) or gets its context compacted and
+11	loses the plot. Common triggers:
+12	
+13	* trying to ``kill`` / ``pkill`` a process that is a **zombie**
+14	  (``<defunct>``) — a zombie cannot be killed; it is already dead and
+15	  waiting to be reaped by its parent, so the kill is a permanent no-op;
+16	* re-running a build/test command that keeps failing identically and
+17	  expecting a different outcome;
+18	* polling a state that never changes.
+19	
+20	The single tool (``Bash``) makes this purely a control-loop problem:
+21	the model has no self-monitor for "I have run this exact command with
+22	this exact output N times and nothing has changed." This processor is
+23	that monitor. It is benchmark-agnostic: it keys only on the observable
+24	command/result fingerprint, never on task content.
+25	
+26	Mechanism:
+27	* ``on_after_tool`` fingerprints each ``Bash`` call as
+28	  (normalized command, normalized result) and counts consecutive
+29	  identical fingerprints.
+30	* When the run reaches ``repeat_threshold`` identical (command, result)
+31	  pairs in a row, it arms a one-shot corrective nudge.
+32	* ``on_before_model`` injects that nudge as a single user message,
+33	  telling the agent the command is not making progress and to change
+34	  strategy. It fires at most once per
+35	  distinct loop, then re-arms only if the count climbs another
+36	  ``repeat_threshold`` above where it last fired — so a persistent loop
+37	  gets a second, firmer escalation rather than a nudge every step.
+38	"""
+39	
+40	from __future__ import annotations
+41	
+42	import dataclasses
+43	
+44	from harnessx.core.events import (
+45	    BeforeModelEvent,
+46	    Message,
+47	    TaskEndEvent,
+48	    TaskStartEvent,
+49	    ToolCallEvent,
+50	    ToolResultEvent,
+51	)
+52	from harnessx.core.processor import MultiHookProcessor
+53	
+54	_MAX_FINGERPRINT_CHARS = 4000
+55	
+56	_NUDGE_FIRST = (
+57	    "PROGRESS CHECK: your last {n} tool calls were the *identical* command "
+58	    "producing the *identical* output. Repeating the same command will keep "
+59	    "returning the same result — it is not making progress. STOP repeating it. "
+60	    "In your next turn, do NOT re-run that command. Instead, change approach: "
+61	    "form a hypothesis about *why* the state is not changing, then run a "
+62	    "DIFFERENT command that either diagnoses the root cause or advances the "
+63	    "task. If a mutating command has no effect, first inspect the actual "
+64	    "current state before repeating it, then either address the underlying "
+65	    "cause or move on."
+66	)
+67	
+68	_NUDGE_REPEAT = (
+69	    "STOP. You are still repeating the exact same command with the exact same "
+70	    "output ({n} times now) and getting nowhere. Abandon this command "
+71	    "completely — do not issue it again under any circumstances. Re-read the "
+72	    "task requirements, pick a genuinely different next action, and if this "
+73	    "sub-step truly cannot be completed, move on to the other parts of the "
+74	    "task rather than looping. One short, DIFFERENT command only."
+75	)
+76	
+77	
+78	def _normalize(text: str | None) -> str:
+79	    if not text:
+80	        return ""
+81	    t = text.strip()
+82	    if len(t) > _MAX_FINGERPRINT_CHARS:
+83	        t = t[:_MAX_FINGERPRINT_CHARS]
+84	    return t
+85	
+86	
+87	class RepeatCommandBreakerProcessor(MultiHookProcessor):
+88	    """Interrupt degenerate identical-command / identical-output loops."""
+89	
+90	    _singleton_group = "tmax_repeat_command_breaker"
+91	    _order = 6
+92	
+93	    def __init__(
+94	        self,
+95	        repeat_threshold: int = 4,
+96	        tool_name: str = "Bash",
+97	    ) -> None:
+98	        self.repeat_threshold = max(2, int(repeat_threshold))
+99	        self.tool_name = str(tool_name)
+100	        self._last_cmd: str = ""
+101	        self._last_fp: str | None = None
+102	        self._count: int = 0
+103	        self._last_fired_at: int = 0
+104	        self._pending_nudge: str = ""
+105	        self._pending_n: int = 0
+106	
+107	    def _reset(self) -> None:
+108	        self._last_cmd = ""
+109	        self._last_fp = None
+110	        self._count = 0
+111	        self._last_fired_at = 0
+112	        self._pending_nudge = ""
+113	        self._pending_n = 0
+114	
+115	    async def on_task_start(self, event: TaskStartEvent):
+116	        self._reset()
+117	        yield event
+118	
+119	    async def on_before_tool(self, event: ToolCallEvent):
+120	        # Capture the command text so the fingerprint keys on
+121	        # (command, result), not result alone — two genuinely different
+122	        # commands that happen to print the same output must not be treated
+123	        # as a loop.
+124	        if event.tool_name == self.tool_name:
+125	            inp = event.tool_input or {}
+126	            cmd = inp.get("command", "") if isinstance(inp, dict) else str(inp)
+127	            self._last_cmd = _normalize(cmd)
+128	        yield event
+129	
+130	    async def on_after_tool(self, event: ToolResultEvent):
+131	        # Only monitor the shell tool; ignore synthetic/other tools.
+132	        if event.tool_name != self.tool_name:
+133	            yield event
+134	            return
+135	
+136	        # ToolResultEvent does not carry the command input, so combine the
+137	        # command captured in on_before_tool with the result. A degenerate
+138	        # loop (same command -> same output) produces an identical
+139	        # (command, result) fingerprint every iteration.
+140	        result = event.result if event.error is None else f"ERR:{event.error}"
+141	        fp = f"{self._last_cmd}\x00{_normalize(result)}"
+142	
+143	        if fp and fp == self._last_fp:
+144	            self._count += 1
+145	        else:
+146	            self._last_fp = fp
+147	            self._count = 1
+148	            self._last_fired_at = 0
+149	
+150	        # Arm a nudge the first time we cross the threshold, and re-arm only
+151	        # after another full threshold's worth of repeats past the last firing.
+152	        if (
+153	            self._count >= self.repeat_threshold
+154	            and (self._count - self._last_fired_at) >= self.repeat_threshold
+155	        ):
+156	            escalate = self._last_fired_at > 0
+157	            template = _NUDGE_REPEAT if escalate else _NUDGE_FIRST
+158	            self._pending_nudge = template.format(n=self._count)
+159	            self._pending_n = self._count
+160	            self._last_fired_at = self._count
+161	
+162	        yield event
+163	
+164	    async def on_before_model(self, event: BeforeModelEvent):
+165	        if not self._pending_nudge:
+166	            yield event
+167	            return
+168	        nudge = self._pending_nudge
+169	        self._pending_nudge = ""
+170	        self._pending_n = 0
+171	        msgs = list(event.messages)
+172	        # Contract: never produce two consecutive user messages via a +1
+173	        # insertion when the last role is already user. If a passive nudge is
+174	        # already there, replace it; otherwise append.
+175	        if msgs and getattr(msgs[-1], "role", None) == "user":
+176	            msgs[-1] = Message(role="user", content=nudge)
+177	            yield dataclasses.replace(event, messages=tuple(msgs))
+178	        else:
+179	            yield dataclasses.replace(
+180	                event,
+181	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+182	            )
+183	
+184	    async def on_task_end(self, event: TaskEndEvent):
+185	        self._reset()
+186	        yield event

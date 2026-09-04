@@ -1,0 +1,94 @@
+=== msg 45 ===
+#!/usr/bin/env python3
+"""
+Deployment Monitor Daemon
+
+Monitors disk usage in /home/user/logs/ and controls worker processes
+to prevent disk quota exhaustion during deployment.
+"""
+
+import os
+import time
+import signal
+import subprocess
+import glob
+
+LOGS_DIR = "/home/user/logs"
+LOG_PATTERN = os.path.join(LOGS_DIR, "*.log")
+THRESHOLD_BYTES = 40 * 1024 * 1024  # 40 MB
+SLEEP_INTERVAL = 0.1
+
+
+def get_total_logs_size():
+    """Calculate total size of all .log files in the logs directory."""
+    total_size = 0
+    try:
+        for filepath in glob.glob(LOG_PATTERN):
+            if os.path.isfile(filepath):
+                total_size += os.path.getsize(filepath)
+    except (OSError, IOError):
+        pass
+    return total_size
+
+
+def get_worker_pids():
+    """Get PIDs of all running worker_sim.py processes."""
+    pids = []
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "worker_sim.py"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    pids.append(int(line.strip()))
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return pids
+
+
+def send_signal_to_workers(signum):
+    """Send a signal to all worker processes."""
+    pids = get_worker_pids()
+    for pid in pids:
+        try:
+            os.kill(pid, signum)
+        except (OSError, ProcessLookupError):
+            # Process may have exited between listing and sending signal
+            pass
+
+
+def truncate_log_files():
+    """Truncate all .log files in the logs directory to 0 bytes."""
+    for filepath in glob.glob(LOG_PATTERN):
+        try:
+            with open(filepath, 'w') as f:
+                pass  # Truncate to 0 bytes
+        except (OSError, IOError):
+            pass
+
+
+def main():
+    """Main monitoring loop."""
+    while True:
+        # Check if any worker processes are still running
+        worker_pids = get_worker_pids()
+        
+        if not worker_pids:
+            # No more workers running, exit cleanly
+            break
+        
+        # Check disk usage
+        total_size = get_total_logs_size()
+        
+        if total_size > THRESHOLD_BYTES:
+            # Disk usage exceeds threshold, take action
+            
+            # 1. Send SIGSTOP to pause all workers
+            send_signal_to_workers(signal.SIGSTOP)
+            
+            # 2. Truncate all log files
+

@@ -1,0 +1,38 @@
+=== env vars referencing timeout in benchmark ===
+benchmarks/terminal_bench_2/agent.py:173:        task_timeout = getattr(context, "timeout_sec", None)
+benchmarks/terminal_bench_2/agent.py:177:                m = re.search(r"timeout_sec\s*=\s*([0-9.]+)", task_toml.read_text())
+benchmarks/terminal_bench_2/agent.py:192:            base_config = make_tb2_harness_config(timeout_seconds=task_timeout)
+benchmarks/terminal_bench_2/agent.py:214:        # Harbor enforces the wall-clock timeout (task.toml agent.timeout_sec)
+benchmarks/terminal_bench_2/dind_environment.py:387:            # timeout_sec: docker compose exec overhead ~1-3s, 15s is generous.
+benchmarks/terminal_bench_2/dind_environment.py:390:                timeout_sec=15,
+benchmarks/terminal_bench_2/dind_environment.py:399:                    timeout_sec=60,
+benchmarks/terminal_bench_2/dind_environment.py:404:                    timeout_sec=60,
+benchmarks/terminal_bench_2/dind_environment.py:413:            # timeout_sec: pure grep on a small file, 10s is ample.
+benchmarks/terminal_bench_2/dind_environment.py:417:                timeout_sec=10,
+benchmarks/terminal_bench_2/dind_environment.py:447:        timeout_sec: int | None = None,
+benchmarks/terminal_bench_2/dind_environment.py:457:            return await super().exec(command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user)
+benchmarks/terminal_bench_2/dind_environment.py:465:            # timeout_sec: file-existence check, should be < 1s; 10s guards
+benchmarks/terminal_bench_2/dind_environment.py:469:                timeout_sec=10,
+benchmarks/terminal_bench_2/harbor_sandbox.py:65:                timeout_sec=10,
+benchmarks/terminal_bench_2/harbor_sandbox.py:94:                timeout_sec=int(timeout),
+benchmarks/terminal_bench_2/harness.py:7:``make_tb2_harness_config(*, timeout_seconds=None) -> HarnessConfig``
+benchmarks/terminal_bench_2/harness.py:232:        timeout_seconds: float | None = None,
+benchmarks/terminal_bench_2/harness.py:235:        self._timeout = timeout_seconds
+benchmarks/terminal_bench_2/harness.py:416:    timeout_seconds: int | None = None,
+
+=== task.toml timeout in the benchmark tasks? ===
+benchmarks/terminal_bench_2/agent.py:177:                m = re.search(r"timeout_sec\s*=\s*([0-9.]+)", task_toml.read_text())
+benchmarks/terminal_bench_2/agent.py:214:        # Harbor enforces the wall-clock timeout (task.toml agent.timeout_sec)
+
+=== how is task_timeout computed in agent.py ===
+63:        request_timeout_sec: int = REQUEST_TIMEOUT_SEC,
+76:        self._request_timeout_sec = int(request_timeout_sec)
+125:            provider_kwargs: dict = {"timeout": float(self._request_timeout_sec)}
+172:        # ── Resolve task timeout ──────────────────────────────────────────────
+173:        task_timeout = getattr(context, "timeout_sec", None)
+174:        if not task_timeout:
+177:                m = re.search(r"timeout_sec\s*=\s*([0-9.]+)", task_toml.read_text())
+179:                    task_timeout = float(m.group(1))
+182:        task_timeout = task_timeout or 3600
+192:            base_config = make_tb2_harness_config(timeout_seconds=task_timeout)
+214:        # Harbor enforces the wall-clock timeout (task.toml agent.timeout_sec)

@@ -1,0 +1,75 @@
+1	# HarnessX HarnessConfig (behaviour pipeline — no model)
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	
+4	tool_registry:
+5	  builtin:
+6	  - Bash
+7	  custom: []
+8	tracer: null
+9	processors:
+10	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+11	  _code_hash: sha256:a5213096e1e5ed10
+12	  system_builder:
+13	    _target_: benchmarks.terminal_bench_2.harness._StaticSystemPromptBuilder
+14	    _code_hash: sha256:ac9cec8620b800d8
+15	  _hook_: '*'
+16	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+17	  _code_hash: sha256:c3a0003e0cdeb057
+18	  working_dir: /app
+19	  constraints: {}
+20	  header: Environment
+21	  max_tree_lines: 20
+22	  non_interactive: true
+23	  inject_integrity_rules: true
+24	  _hook_: '*'
+25	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+26	  _code_hash: sha256:5c8e3bb312fb6dd8
+27	  tool_schemas: {}
+28	  _hook_: '*'
+29	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+30	  _code_hash: sha256:ca839b8df0220f5c
+31	  warn_at:
+32	  - 0.7
+33	  - 0.9
+34	  _hook_: '*'
+35	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+36	  _code_hash: sha256:479ce2ae4d00a8ee
+37	  token_threshold: 140000
+38	  message_threshold: 100
+39	  retention_window: 6
+40	  eviction_fraction: 0.5
+41	  summarize_key: summarize
+42	  preserve_first_message: true
+43	  _hook_: '*'
+44	- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+45	  window_size: 12
+46	  warn_threshold: 3
+47	  threshold: 6
+48	  name_warn_threshold: 999
+49	  compaction_drop_threshold: 5
+50	  _hook_: '*'
+51	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+52	  _code_hash: sha256:d81a9178188f2908
+53	  max_consecutive_errors: 1
+54	  _hook_: '*'
+55	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+56	  _code_hash: sha256:8e71b409502e853f
+57	  drop_threshold: 5
+58	  _hook_: '*'
+59	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+60	  _code_hash: sha256:739db4a0bda02dfc
+61	  _hook_: '*'
+62	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+63	  _code_hash: sha256:6ef4a4be0a8acf7c
+64	  threshold: 7
+65	  _hook_: '*'
+66	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+67	  _code_hash: sha256:b5a515a071eb0f5e
+68	  _hook_: '*'
+69	workspace: null
+70	workspace_template: default
+71	init_workspace: true
+72	step_snapshots: true
+73	sandbox_provider: null
+74	sandbox_hint_id: null
+75	plugins: []

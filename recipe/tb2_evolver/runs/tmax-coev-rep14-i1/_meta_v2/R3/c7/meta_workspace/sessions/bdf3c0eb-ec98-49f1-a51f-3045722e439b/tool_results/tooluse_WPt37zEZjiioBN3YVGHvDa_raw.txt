@@ -1,0 +1,102 @@
+2	"""SelfFabricatedTestGuardProcessor — a TB2 Control processor.
+3	
+4	Closes a recurring false-confidence failure shape: the agent builds a
+5	deliverable (a detector / classifier / parser / transformer script), then
+6	"validates" it *only* against test inputs it created itself by echoing a
+7	value it just derived. Because the fabricated input contains the same
+8	derived value the deliverable searches for, the test is a tautology — it
+9	passes even when the derived value is wrong (e.g. a garbled OCR string) and
+10	the ground-truth artifacts already present on disk go unexamined. The
+11	verifier then runs the deliverable against the *real* inputs and it fails.
+12	
+13	This is content-agnostic and detects the *shape*, not any task:
+14	
+15	  1. Track every filesystem path the agent WRITES to during the run
+16	     (heredocs, redirects, tee, sed -i) — these are "agent-fabricated".
+17	  2. When a later Bash command RUNS the deliverable (invokes an executable
+18	     script / `python3 foo.py` / `bash foo.sh` / `./foo`) and every
+19	     file-path argument it references is an agent-fabricated path — i.e. it
+20	     is being exercised exclusively against inputs the agent manufactured,
+21	     never against a pre-existing task artifact — append a one-shot
+22	     corrective note to the tool result.
+23	
+24	The note is append-only on the tool result (mirrors CustomEditToolProcessor),
+25	never terminates, never mutates the system prompt, and fires at most
+26	``max_fires`` times per run so a genuine loop is nudged without spamming.
+27	"""
+28	
+29	from __future__ import annotations
+30	
+31	import dataclasses
+32	import re
+33	import shlex
+34	
+35	from harnessx.core.events import (
+36	    TaskEndEvent,
+37	    TaskStartEvent,
+38	    ToolCallEvent,
+39	    ToolResultEvent,
+40	)
+41	from harnessx.core.processor import MultiHookProcessor
+42	
+43	# Reuse the same write-detection semantics the edit guard uses.
+44	_REDIRECT_WRITE_RE = re.compile(r"(?<![<>2&\d])>{1,2}\s*([^\s;&|><\n'\"]+)")
+45	_SED_INPLACE_RE = re.compile(r"\bsed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|-i\S*)\s+\S+\s+([^\s;&|><\n'\"]+)")
+46	_TEE_WRITE_RE = re.compile(r"\btee\s+(?:-\S+\s+)*([^\s;&|><\n'\"]+)")
+47	_SKIP_PATH_RE = re.compile(r"^(/dev/|/proc/|/sys/|-|\d+$)")
+48	
+49	# Heredoc target: `cat > path << EOF` / `cat >> path <<EOF`
+50	_HEREDOC_RE = re.compile(r">{1,2}\s*([^\s;&|><\n'\"]+)\s*<<-?\s*['\"]?\w")
+51	
+52	# A run/execute invocation of a built deliverable.
+53	_INTERP_RE = re.compile(
+54	    r"\b(?:python3?|bash|sh|perl|ruby|node|awk)\b", re.IGNORECASE
+55	)
+56	_EXEC_LOCAL_RE = re.compile(r"(?:^|[\s;&|(])(\./[^\s;&|)]+)")
+57	
+58	
+59	_NUDGE = (
+60	    "\n\n[SelfFabricatedTestGuard] You just exercised your deliverable using "
+61	    "ONLY input file(s) you created yourself earlier in this run "
+62	    "({paths}). A test built from a value you derived cannot tell you whether "
+63	    "that derived value is correct — it will pass even if the value is wrong "
+64	    "(e.g. a mis-read OCR/scan string, an off-by-one, a wrong delimiter). "
+65	    "Before trusting this result, run the deliverable against the ORIGINAL "
+66	    "input artifacts the task points at — the files that already existed on "
+67	    "disk before you started (evidence images, corpora, sample directories, "
+68	    "databases). If a value came from a lossy source, cross-check it against "
+69	    "those real artifacts (e.g. `strings`/`grep`/`head` the actual target) "
+70	    "rather than against a copy you typed."
+71	)
+72	
+73	
+74	def _looks_written(cmd: str) -> set[str]:
+75	    """Paths this command writes to (agent-fabricated candidates)."""
+76	    if ">" not in cmd and "sed" not in cmd and "tee" not in cmd:
+77	        return set()
+78	    paths: set[str] = set()
+79	    for pattern in (_HEREDOC_RE, _REDIRECT_WRITE_RE, _SED_INPLACE_RE, _TEE_WRITE_RE):
+80	        for m in pattern.finditer(cmd):
+81	            p = m.group(1).strip("'\"")
+82	            if p and not _SKIP_PATH_RE.match(p):
+83	                paths.add(p)
+84	    return paths
+85	
+86	
+87	def _basename(p: str) -> str:
+88	    return p.rstrip("/").rsplit("/", 1)[-1]
+89	
+90	
+91	class SelfFabricatedTestGuardProcessor(MultiHookProcessor):
+92	    """Nudge when a deliverable is validated only against self-created inputs."""
+93	
+94	    _singleton_group = "self_fabricated_test_guard"
+95	    _order = 34  # after CustomEditToolProcessor(30), before CustomSelfVerifyProcessor(90)
+96	
+97	    def __init__(self, max_fires: int = 2, min_writes: int = 1) -> None:
+98	        self.max_fires = max_fires
+99	        self.min_writes = min_writes
+100	        self._written: set[str] = set()
+101	        self._written_base: set[str] = set()
+
+[Showing lines 2–101 of 230 total. Use offset=101 to read the next section.]

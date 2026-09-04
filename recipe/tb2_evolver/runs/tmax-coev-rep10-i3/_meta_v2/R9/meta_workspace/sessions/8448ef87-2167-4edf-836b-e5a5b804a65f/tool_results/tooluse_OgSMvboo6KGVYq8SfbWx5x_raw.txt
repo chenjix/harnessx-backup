@@ -1,0 +1,424 @@
+1	# Tmax coev rep10 i3 — evolve journal
+2	
+3	## Round 1 — repeated-command loop guard
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-01-01T00:00:00Z
+8	hypothesis_id: h_repeated_command_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_000408_0c17d946, task_001716_c1f2ac56, task_000010_644ab1c2, task_000015_89886d8d, task_000118_3043e92d, task_002160_7b255cce, task_000020_eb7b8782]
+11	cited_candidates: [C-001]
+12	gating_outcome: reverted
+13	gating_attribution: score=12/50; +1/-4 gained=task_001716_c1f2ac56 lost=task_000123_aa456f4d,task_000358_4ab35712,task_001035_5a64a9e8,task_001776_abf6bf58; score 0.2400 < incumbent(mean) 0.3000 - tol 0.0400 -> revert to R0
+14	expected_global_gain: "Recover step budget from exact-command thrash loops (6 budget_exceeded + long done-fails); redirect the model mid-loop toward a different approach"
+15	regression_risk: "Passing runs with high exact-repeat counts (task_000123 echo x16, task_000358 x4, task_001035 x5) receive an extra nudge line; nudge-only + append-only so cannot un-do already-correct work"
+16	cost_shift: "Slightly negative overall — ~90 tokens per fire, but breaks 10-22 step loops early, reducing total steps/tokens on pathological runs"
+17	rollback_trigger: "R1 pass-rate < 15 (R0 baseline) OR any of task_000123/task_000358/task_001035 flips T->F"
+18	-->
+19	
+20	### Why
+21	
+22	R0 = 15/50 (30%). Failure taxonomy: **29/35 failures exit
+23	`no_tool_calls`=`done`** (agent voluntarily stops) and only 6 hit
+24	`budget_exceeded`. The `CustomSelfVerifyProcessor` already fires on
+25	28/29 of the `done`-fails AND on every passing run, so the one-shot
+26	verify nudge is already present — most `done`-fails are semantically
+27	wrong output that passes an existence check, i.e. **model capability
+28	gaps, not harness deficiencies** (no harness fix — skip). The one
+29	genuinely harness-addressable, cross-task cluster is **exact-command
+30	thrash**: runs that re-issue the *literally identical* Bash command
+31	many times without any state change, burning the whole 80-step budget.
+32	The existing `CustomEditToolProcessor` only counts file-WRITE commands
+33	(redirect/sed -i/tee) and is blind to read/poll/debug loops.
+34	
+35	### Changes
+36	
+37	- `processors/repeated_command_guard.py` — new `RepeatedCommandGuard`
+38	  `MultiHookProcessor`: counts exact-identical Bash command executions
+39	  per task; at threshold (5) appends a one-shot "you are looping, take
+40	  a fundamentally different action" nudge to that tool's result, then
+41	  resets the counter. Append-only, contract-clean, never blocks.
+42	- `config.yaml` — register the processor after `CustomEditToolProcessor`
+43	  (`_order=31`), `threshold: 5`.
+44	
+45	### Evidence
+46	
+47	- `task_000408_0c17d946`: `exit_reason=budget_exceeded`; command
+48	  `debugfs /home/user/drive.img 2>&1 << 'EOF'\nls -l /\nEOF` executed
+49	  **17 times** (exact Counter over full command strings). Died at
+50	  step 80 with no fix.
+51	- `task_001716_c1f2ac56`: `budget_exceeded`; the same
+52	  `python3 -c "...struct...PIL.Image..."` inline script re-run **22
+53	  times** (steps 0–21) before dying at step 80 with no `repo.pack`.
+54	- `task_000010_644ab1c2`: done-fail, 76 steps; `sleep 10\nps aux |
+55	  grep -E "mock_api|socat|python"` x10 — polling a process that never
+56	  started; deliverable `/home/user/operator.py` missing.
+57	- `task_000015_89886d8d`: done-fail, 54 steps; `cd /home/user &&
+58	  python3 -m pytest test_parser.py` x10 — re-running the same failing
+59	  test without changing the fix.
+60	- Caveat (regression scope): passing runs also show high repeats —
+61	  `task_000123` `echo "Task completed successfully!"` x16 (passed),
+62	  `task_001035` x5, `task_000358` x4 — hence exact-match + high
+63	  threshold + nudge-only design so these are not harmed.
+64	
+65	### Uncertainty
+66	
+67	The exact-repeat signal is present in both failing and passing runs,
+68	so the guard is deliberately scoped to nudge (not block) and to fire
+69	only at a high count. Risk: the nudge lands but the model still can't
+70	find the different approach (the underlying task may be a capability
+71	gap) — in that case the round is flat, not negative. If pass-rate
+72	drops or a cited passing task regresses, revert (see rollback_trigger).
+73	
+74	## Round 3 — verifier requests dep primer
+75	
+76	<!-- journal:frontmatter
+77	round: 3
+78	timestamp: 2026-08-21T02:39:19Z
+79	hypothesis_id: h_verifier_requests_dep_v1
+80	levers: [action]
+81	predicted_affected: [task_000020, task_000028, task_000661, task_000689, task_000958, task_002160, task_000010]
+82	cited_candidates: [C-001]
+83	gating_outcome: accepted
+84	gating_attribution: score=13/50; +3/-2 gained=task_000029_80a5350d,task_001035_5a64a9e8,task_001832_dd672877 lost=task_000185_46261088,task_000212_46a770d4; score 0.2600 >= incumbent(mean) 0.2700 - tol 0.0400
+85	expected_global_gain: "Flips up to 6 HTTP/service tasks whose verifier import requests hits rc=2 ModuleNotFoundError and forces reward 0 despite correct solutions"
+86	regression_risk: "Extra one-shot pip install tool-call appended to first turn of all 50 tasks; on the 12 passing tasks it is an idempotent <1s no-op but adds a 2nd tool_call/result to turn 0"
+87	cost_shift: "+1 tool call/task, negligible tokens (~<1s already-satisfied on most)"
+88	rollback_trigger: "If global pass-rate drops vs R0 (15/50), or any smoke/task errors on the injected turn-0 tool call, revert to R0"
+89	-->
+90	
+91	### Why
+92	
+93	A distinct cluster of HTTP/service tasks scored 0 in R2 not from bad
+94	solutions but because the external verifier's pytest module does
+95	`import requests`, and `requests` is absent from the task container →
+96	pytest rc=2 `ModuleNotFoundError: No module named 'requests'` at
+97	collection time → automatic reward 0. The agents built the server in
+98	C/Go/Node or Python stdlib and probed with `curl`, so they never had a
+99	reason to install the Python client. This is a verifier-side environment
+100	gap the harness can close, not a model reasoning error.
+101	
+102	### Changes
+103	
+104	- `processors/verifier_dep_primer.py` — new `VerifierDepPrimerProcessor`
+105	  (MultiHookProcessor). On the first model turn per task, appends one real
+106	  idempotent Bash `ToolCall` (`python3 -m pip install --quiet ... requests
+107	  || true`) to `event.tool_calls`; resets on task_start/task_end. Fires
+108	  exactly once/task, never replaces the model's own first action.
+109	- `config.yaml` — copied R0, registered the new processor under `processors`
+110	  with an absolute `file://` target; system_prompt.txt copied byte-for-byte
+111	  for SiblingSystemPromptBuilder resolution.
+112	
+113	### Evidence
+114	
+115	- rc=2 `ModuleNotFoundError: No module named 'requests'` in R2 trajectories
+116	  for tasks 000020, 000028, 000661, 000689, 000958, 002160 (000010 is a
+117	  circular-import variant of the same shape). All HTTP/service tasks.
+118	- pip is reachable in these containers: passing tasks show flask, certifi,
+119	  charset_normalizer installing successfully → `pip install requests` will
+120	  succeed and persist into the verifier phase.
+121	- Runloop-verified injection path: `on_after_model` output replaces
+122	  `model_event` (runloop L438), recorded as assistant message with its
+123	  tool_calls (L479), and each tool_call executed with id-matched results
+124	  (L497+) → provider-safe N calls / N results.
+125	
+126	### Uncertainty
+127	
+128	Two open risks. (1) `requests` may not be the only missing verifier dep —
+129	if a task's test imports another lib, that task stays at 0; the fix is
+130	scoped to the observed cluster. (2) The turn-0 injection touches all 50
+131	tasks; the 12 passers should see only a fast idempotent no-op, but if any
+132	turn-0 flow is disrupted or pass-rate drops vs R0, revert.
+133	
+134	## Round 4 — verifier CLI tool primer
+135	
+136	<!-- journal:frontmatter
+137	round: 4
+138	timestamp: 2026-08-21T03:26:41Z
+139	hypothesis_id: h_verifier_cli_primer_v1
+140	levers: [control]
+141	predicted_affected: [task_001046_eccbf294, task_000300_7d6b511c]
+142	cited_candidates: [C-001]
+143	gating_outcome: accepted
+144	gating_attribution: score=17/50; +6/-2 gained=task_000020_eb7b8782,task_000028_7fe033ac,task_000212_46a770d4,task_000661_f26aec97 lost=task_001035_5a64a9e8,task_001832_dd672877; score 0.3400 >= incumbent(mean) 0.2700 - tol 0.0400
+145	expected_global_gain: "Closes the verifier-shells-out-to-absent-CLI failure class (FileNotFoundError: 'curl'/'ss') — the OS-CLI sibling of the R3 requests pip primer that was accepted; flips at least task_001046 (clean single-test curl failure) and unblocks the ss test in task_000300"
+146	regression_risk: "Idempotent command-v guard makes it a no-op on the ~48 tasks where curl/ss already exist; timeout 90 + || true means it cannot stall or fail the turn; writes only to system dirs, never task output paths"
+147	cost_shift: "+1 turn-0 tool call/task; sub-second no-op on tasks that already have the tools, one bounded (<=90s) apt fetch on the two that don't; output suppressed so negligible tokens"
+148	rollback_trigger: "Revert to R3 if global pass-rate < R3 (13/50), OR synthetic replay errors on the injected turn-0 call, OR any currently-passing task flips T->F"
+149	-->
+150	
+151	### Why
+152	
+153	A recurring structural failure shape appears in R3 trajectories that is not a
+154	model reasoning error: the external verifier runs in a separate phase after the
+155	agent exits and several tests shell out to a standard networking CLI tool via
+156	`subprocess.run(["curl", ...])` / `subprocess.run(["ss", ...])`. Those binaries
+157	are absent from the base image, so the test raises `FileNotFoundError` at call
+158	time and the task scores 0 regardless of the correctness of the agent's work.
+159	The agent cannot pre-empt this: during its own phase it hits
+160	`curl: command not found`, works around it with wget/python, and correctly
+161	concludes it does not need curl for its phase — only the hidden verifier does.
+162	This is exactly the structural class of the R3 `requests` pip primer (accepted,
+163	flipped 3 tasks), one layer down: OS CLI layer instead of the Python-import
+164	layer.
+165	
+166	### Changes
+167	
+168	- `processors/verifier_cli_primer.py` — new `VerifierCliPrimerProcessor`
+169	  (MultiHookProcessor). On the first model turn per task, appends ONE Bash
+170	  `ToolCall` that (guarded by `command -v curl && command -v ss`) does a
+171	  quiet, `timeout 90`-bounded, `|| true` best-effort
+172	  `apt-get update && apt-get install -y --no-install-recommends curl iproute2`.
+173	  Fires once per task; resets on task_start/task_end; never replaces the
+174	  model's own first action.
+175	- `config.yaml` — copied R3 byte-for-byte, registered the new processor at
+176	  `_order=33` (just after the R3 pip primer at 32), `apt_packages: curl iproute2`.
+177	  `system_prompt.txt` copied byte-for-byte for SiblingSystemPromptBuilder.
+178	
+179	### Evidence
+180	
+181	- `task_001046_eccbf294` result.json `final_pytest.output_tail`: full CPython
+182	  `subprocess.py:1863` traceback ending
+183	  `FileNotFoundError: [Errno 2] No such file or directory: 'curl'` on
+184	  `test_end_to_end_pipeline`; `1 failed, 4 passed` (curl is the ONLY blocker).
+185	- `task_001046_eccbf294` messages.json: agent's Bash returned
+186	  `bash: line 1: curl: command not found (exit 127)`; assistant reasoned
+187	  "curl is not available. Let me try with wget or python." → binary genuinely
+188	  absent in-container; agent worked around it but the verifier cannot.
+189	- `task_000300_7d6b511c` result.json `final_pytest.output_tail`: identical
+190	  `subprocess.py:1863` traceback ending
+191	  `FileNotFoundError: [Errno 2] No such file or directory: 'ss'` on
+192	  `test_haproxy_running_and_listening` (`ss` = iproute2).
+193	
+194	### Uncertainty
+195	
+196	Two open risks. (1) apt may require network access that is blocked in the
+197	agent container — if so the install is a bounded no-op and the two tasks stay
+198	red (flat round, not negative). The R3 pip primer being accepted implies a
+199	usable package channel exists, but apt is a different transport than pip.
+200	(2) task_000300 has two further independent failing tests (an AssertionError
+201	and a backend-not-running check) that are likely capability gaps, so the `ss`
+202	fix is necessary-not-sufficient there; a confident flip is only claimed for
+203	task_001046. If pass-rate drops vs R3 or a passing task regresses, revert.
+204	
+205	## Round 5 — no-progress repeat breaker
+206	
+207	<!-- journal:frontmatter
+208	round: 5
+209	timestamp: 2026-05-02T00:00:00Z
+210	hypothesis_id: h_noprogress_repeat_breaker_v1
+211	levers: [control]
+212	predicted_affected: [task_000118, task_000358, task_000408, task_000686, task_001035, task_001017]
+213	cited_candidates: [C-001]
+214	gating_outcome: reverted
+215	gating_attribution: score=14/50; +1/-4 gained=task_001035_5a64a9e8 lost=task_000020_eb7b8782,task_000028_7fe033ac,task_000661_f26aec97,task_001776_abf6bf58; score 0.2800 < incumbent(mean) 0.3400 - tol 0.0400 -> revert to R4
+216	expected_global_gain: "Reclaim step/wall-clock budget on a ~6-task zero-progress death-spiral cluster and cap the worst cost outlier (001017, 3830s); redirects the model off identical-command loops so it can attempt a different action within budget."
+217	regression_risk: "A too-aggressive block could refuse a legitimately-repeated command; mitigated by thresholds set strictly above the passing ceiling (max passer = 3 consecutive identical pairs) and by disarm-on-any-different-command. R4 sim: 0 passers touched."
+218	cost_shift: "Strongly negative — fewer wasted identical re-executions; timeout-streak block (thr=3) caps repeated exit-124 brute-force that burned ~3800s in 001017."
+219	rollback_trigger: "If R5 pass_rate < R4 (17/50) OR any previously-passing task regresses to F with the breaker firing on it (check step_snapshots for [NoProgressRepeatBreaker] BLOCKED on a reward=1->0 task), revert."
+220	-->
+221	
+222	### Why
+223	
+224	A dominant, harness-addressable pathology in the R4 trajectories is the agent
+225	re-issuing the *exact same* Bash command and getting back the *exact same*
+226	result many times in a row — zero progress until the step budget is exhausted
+227	(`budget_exceeded`) or, worst case, the run crashes (`error`) after the same
+228	timed-out command is re-run a dozen+ times. This is a control gap: the harness
+229	never intercepts the loop. R3/R4 nudge-only guards (EditDetection) were ignored
+230	by the model in `task_001017`. The reverted R1 guard (`h_repeated_command_guard_v1`)
+231	over-fired because it counted *global* command occurrences and swept up benign
+232	echo-spam on passing runs; this round uses a strictly safer signal.
+233	
+234	### Changes
+235	
+236	- `processors/noprogress_repeat_breaker.py` — new `NoProgressRepeatBreaker`
+237	  (`MultiHookProcessor`): two-stage circuit breaker on consecutive identical
+238	  (normalized command, normalized result) Bash pairs. Stage 1 soft nudge at
+239	  `soft_threshold=4`; stage 2 hard block (`approved=False` + `synthetic_result`)
+240	  at `hard_threshold=6`; separate consecutive-timeout streak blocks repeated
+241	  `exit 124` of the same command at the lower `timeout_block_threshold=3`.
+242	  `_norm_result` strips sibling-processor advisory suffixes so intermittent
+243	  nudges don't break the identical-result match.
+244	- `config.yaml` — copied R4 byte-for-byte, registered the new processor at
+245	  `_order=32` (just after `CustomEditToolProcessor` at 30), before
+246	  `CustomSelfVerifyProcessor`. Kept R3/R4 primers and `apt_packages` intact.
+247	  `system_prompt.txt` copied byte-for-byte for SiblingSystemPromptBuilder.
+248	
+249	### Evidence
+250	
+251	- Simulation over all R4 trajectories: breaker fires only on reward=0 tasks —
+252	  000015, 000118, 000185, 000358, 000408, 000686, 001017, 001035, 001229.
+253	  **Zero passing tasks touched.**
+254	- No R4 passing task exceeds 3 consecutive identical (cmd,result) pairs
+255	  (max passer = task_000020 at 3). Failing budget_exceeded tasks reach
+256	  5/6/10/19/24 → thresholds (4/6) sit strictly above the passing ceiling.
+257	- `task_001017_9f6adf16`: `exit_reason=error`, ~3830s wall-clock, 15 consecutive
+258	  `(exit 124, ...)` timeouts of a brute-force compile/run; timeout-streak block
+259	  at 3 caps this at 9 refusals in sim.
+260	- Block counts in sim: 000118 (20), 000686 (24), 000358 (18), 000408 (15),
+261	  001035 (15) — the death-spiral cluster.
+262	
+263	### Uncertainty
+264	
+265	The retroactive sim shows zero passer impact, but blocking changes the live
+266	trajectory: a redirected model may or may not find a productive next action
+267	within the reclaimed budget (some of these are also genuine capability gaps —
+268	scientific_computing, namedtuple circular-import — so a budget flip is not
+269	guaranteed). The safe claim is (a) zero regression on passers and (b) a large
+270	cost/wall-clock reduction on the thrash cluster; pass-rate upside is plausible
+271	but bounded by the underlying capability gaps. If pass-rate drops or a passer
+272	regresses with the breaker firing on it, revert.
+273	
+274	## Round 7 — source-scrub refactor discipline
+275	
+276	<!-- journal:frontmatter
+277	round: 7
+278	timestamp: 2026-08-21T05:00:00Z
+279	hypothesis_id: h_source_scrub_refactor_v1
+280	levers: [instruction]
+281	predicted_affected: [task_000059_e4b842f5, task_000431_fabf4ad3]
+282	cited_candidates: [C-001]
+283	gating_outcome: accepted
+284	gating_attribution: score=15/50; +4/-6 gained=task_000020_eb7b8782,task_000431_fabf4ad3,task_001653_c4cafa73,task_001832_dd672877 lost=task_000028_7fe033ac,task_000123_aa456f4d,task_000185_46261088,task_000212_46a770d4; score 0.3000 >= incumbent(mean) 0.3200 - tol 0.0400
+285	expected_global_gain: "Flips the naive-substring-check cluster: verifier does `assert '<old_token>' not in source` and the agent's own explanatory comment echoes the removed token. Two tasks (SWE + debugging) had functionally-correct fixes and failed ONLY that test. Generalizes to any unseen refactor/migration/removal task under the same TB2 verifier idiom."
+286	regression_risk: "Adds ~4 lines to the 5-line shared system prompt across all 50 tasks. Narrowly scoped to removal/replacement refactors; could in principle nudge an agent to strip a legitimately-required comment, but the rule targets only the *removed* token. No currently-passing task relies on echoing a removed token in a comment."
+287	cost_shift: "Negligible: ~40 extra prompt tokens/task, no extra tool calls. May slightly reduce cost on the two targets by giving a clean pass instead of a wasted verify loop."
+288	rollback_trigger: "Revert to R4 if global pass-rate < 17/50, OR if either task_000059/task_000431 fails to flip AND any currently-passing task regresses T->F."
+289	-->
+290	
+291	### Why
+292	
+293	R6 (incumbent R4 config) = 17/50. Failure taxonomy: 7 budget_exceeded
+294	(one pure exact-command loop task_000408 x36; rest varied iterative
+295	debugging = capability gaps), 25 done-fails (mostly wrong algorithm =
+296	capability gaps), 1 error. The exact-loop Control shape was reverted
+297	twice (R1, R5) — not re-proposed. Within the done cluster, one small,
+298	CLEAN, harness-addressable sub-cluster stands out: the external
+299	verifier does a naive `assert "<old_token>" not in file_content`
+300	substring check, and the agent's own explanatory comment echoes the
+301	token it was asked to remove — failing an otherwise-correct fix. This
+302	is an awareness gap (Instruction), not a missing capability (Action)
+303	or a mechanical hook (Control — a processor cannot know which token a
+304	post-agent-phase verifier will grep for, and rewriting the agent's
+305	comments would destructively edit correct code).
+306	
+307	### Changes
+308	
+309	- `system_prompt.txt` (sibling of config.yaml, read by
+310	  SiblingSystemPromptBuilder) — appended a general source-hygiene rule:
+311	  when asked to remove/replace/migrate a construct, remove it from the
+312	  whole file (comments/docstrings/notes included), describe the change
+313	  in the chat reply not inside the edited file, and grep the final file
+314	  for the old token to confirm it is gone before stopping. No task
+315	  literals embedded.
+316	- `config.yaml` — copied R4 byte-for-byte (all processor `file://`
+317	  targets unchanged and still resolve); the only functional change is
+318	  the sibling prompt.
+319	
+320	### Evidence
+321	
+322	- `task_000059_e4b842f5` result.json final_pytest: `3 passed, 1 failed`;
+323	  sole failure `test_verify_mac_py_python3_compatible` traceback:
+324	  `'xrange' is contained here: (replaces xrange)` — token survives ONLY
+325	  in the agent's comment `# (replaces xrange)`; the Py2->Py3 code
+326	  migration itself was correct.
+327	- `task_000431_fabf4ad3` result.json final_pytest: `2 passed, 1 failed`;
+328	  sole failure `test_go_source_fixes` traceback: `'len(lines)-1' is
+329	  contained here: ... changed i < len(lines)-1 to i < len(lines) ...` —
+330	  token survives ONLY in the agent's fix-describing comment; the actual
+331	  loop fix, `close(results)`, and EWMA fix were all correct.
+332	- Regex sweep over all 33 failing trajectories: exactly these two tasks
+333	  carry a "NOT-IN-SOURCE" assertion — a real 2-task, 2-domain cluster.
+334	
+335	### Uncertainty
+336	
+337	The two targets each had the substring test as the ONLY failing test,
+338	so retroactive check A is `yes` — a clean comment + confirming grep
+339	flips both. Risk is that the model ignores the prompt guidance under
+340	its own habit of annotating changes; then the round is flat, not
+341	negative. Instruction lever is untried on this run (neutral posterior).
+342	If pass-rate drops or a passer regresses, revert to R4.
+343	
+344	## Round 8 — deliverable-path fidelity
+345	
+346	<!-- journal:frontmatter
+347	round: 8
+348	timestamp: 2026-08-21T14:53:26Z
+349	hypothesis_id: h_deliverable_path_fidelity_v1
+350	levers: [instruction]
+351	predicted_affected: [task_000010_644ab1c2]
+352	cited_candidates: [C-001]
+353	gating_outcome: accepted
+354	gating_attribution: score=14/50; +4/-5 gained=task_000123_aa456f4d,task_000185_46261088,task_000689_a143f1c9,task_001046_eccbf294 lost=task_000029_80a5350d,task_000431_fabf4ad3,task_001653_c4cafa73,task_001716_c1f2ac56; score 0.2800 >= incumbent(mean) 0.3120 - tol 0.0400
+355	expected_global_gain: "Flips the 'renamed/relocated deliverable -> exact-path existence gate fails' class. TB2 verifiers front-load os.path.isfile(<exact path>)/executable-at-exact-path gates; any unseen task naming an explicit output path benefits from 'path is authoritative + confirm before stop'."
+356	regression_risk: "~30 extra prompt tokens on the shared prompt across all 50 tasks; rule only tells the agent to honor the path the task itself states and to verify it. No passing task relies on renaming/relocating a deliverable — passers already honor exact paths (task_000041/000577/000911)."
+357	cost_shift: "Negligible (+~30 prompt tokens/task, no extra tool calls); may reduce cost on affected tasks by turning a wasted verify loop into a clean pass."
+358	rollback_trigger: "Revert to R7 if global pass-rate < 15/50 (R7 baseline), OR task_000010 fails to flip AND any currently-passing task regresses T->F."
+359	-->
+360	
+361	### Why
+362	
+363	R7 = 15/50 (incumbent R4 config, mean ~16). Failure taxonomy on R7
+364	trajectories: 24 done-fails (mostly wrong-algorithm capability gaps),
+365	9 budget_exceeded (varied iterative debugging; the exact-command loop
+366	Control shape was reverted twice — R1, R5 — not re-proposed), 2 error.
+367	Within the done cluster one small, CLEAN, harness-addressable case
+368	stands out that is NOT a capability gap: task_000010's agent produced a
+369	complete, working script but wrote it to the WRONG filename. The task
+370	requires `/home/user/operator.py`; the agent deliberately renamed it to
+371	`k8s_operator.py` "to avoid conflict with Python's standard library
+372	`operator` module", re-read the task, PROBED and SAW the required file
+373	was missing, and still chose to keep the renamed file. This is an
+374	awareness/judgement gap (Instruction), not a missing capability (Action)
+375	or a mechanical hook (Control — the verifier's isfile() target paths do
+376	not exist during the agent phase, so a processor cannot know which paths
+377	to check, and auto-renaming files risks clobbering correct work on the
+378	other 49 tasks). The playbook flags "correct logic, wrong path" as a top
+379	structural failure class.
+380	
+381	### Changes
+382	
+383	- `system_prompt.txt` (sibling of config.yaml, read by
+384	  SiblingSystemPromptBuilder) — prepended a general deliverable-fidelity
+385	  rule: the task's stated output path/name is authoritative; never rename
+386	  or relocate a required deliverable on your own judgement (resolve name
+387	  clashes internally instead); before stopping, `ls` each explicitly named
+388	  output path to confirm it exists at the exact location. Kept the R7
+389	  source-hygiene rule verbatim. No task literals embedded.
+390	- `config.yaml` — copied R7 byte-for-byte (all processor file:// targets
+391	  unchanged and still resolve); the only functional change is the sibling
+392	  prompt.
+393	
+394	### Evidence
+395	
+396	- `task_000010_644ab1c2` result.json final_pytest: `1 failed, 2 passed`;
+397	  sole failure `test_operator_script_exists`:
+398	  `AssertionError: Operator script /home/user/operator.py does not exist.
+399	  You must create it.` — the exact-path existence gate is the ONLY blocker.
+400	- `task_000010` messages.json: agent reasoning "The task says the script
+401	  should be at `/home/user/operator.py`, but I renamed it to
+402	  `/home/user/k8s_operator.py` to avoid the conflict with Python's standard
+403	  library `operator` module."; its probe returned `operator.py not found at
+404	  /home/user/operator.py -rwxr-xr-x ... /home/user/k8s_operator.py`; final
+405	  message "The task is complete. The script is at `/home/user/k8s_operator.py`
+406	  (renamed ...)". Functional work (backup, port-forward, manifest apply) was
+407	  done — only the filename deviated.
+408	- Regression baseline (passers already honor exact paths): task_000041
+409	  writes `/home/user/filter_billing.py` + `/home/user/billing_backup.tar.gz`;
+410	  task_000577 writes `/home/user/recovered_evidence.txt`; task_000911 writes
+411	  `/home/user/enforce_policy.py`. The rule codifies a habit passers already
+412	  have.
+413	
+414	### Uncertainty
+415	
+416	The acute flip is confidently a single task (task_000010) — the "renamed
+417	deliverable" symptom is idiosyncratically acute there, though the exact-path
+418	existence gate is a verifier-wide idiom (task_000212 also opens with an
+419	executable-at-exact-path gate, but its root cause is a reverse-engineering
+420	capability gap, so it is not claimed as a flip). Instruction lever has
+421	landed once this run (R7 accepted). Risk: the model ignores the rule under
+422	its own habit of renaming to dodge name clashes, in which case the round is
+423	flat, not negative — the rule cannot make a passer write to a wrong path.
+424	If pass-rate drops or a passer regresses, revert to R7.

@@ -1,0 +1,151 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatedCommandBreaker — break degenerate identical-command loops.
+4	
+5	Closes a systemic failure mode observed across many TB2 / Tmax failures:
+6	the agent issues the *same* Bash command (byte-identical after whitespace
+7	normalisation) turn after turn, getting the same result each time, without
+8	making progress. Two concrete shapes seen in trajectories:
+9	
+10	* the agent re-writes the identical source file 30+ times ("cat > file
+11	  << EOF" heredoc) while narrating "I've been stuck in a loop" but never
+12	  actually changing the command — burns the entire step/time budget and
+13	  exits ``budget_exceeded`` with reward 0;
+14	* the agent re-runs an extraction command (e.g. OCR on an image) that
+15	  keeps returning the same garbled/failed output ~7 times, then abandons
+16	  the authoritative source and *fabricates* a guess — producing output
+17	  that fails the verifier's exact-match check.
+18	
+19	The existing ``CustomEditToolProcessor`` counts *file edits* (parsed from
+20	redirect targets) and emits a soft advisory, but (a) it mis-parses the
+21	"file" out of heredoc commands, (b) it only fires on write commands, and
+22	(c) it does not detect that the command is *byte-identical* — a
+23	materially-changed rewrite of the same file is legitimate iteration,
+24	whereas re-issuing the identical bytes is a pure loop. This processor
+25	targets the identical-command loop directly and escalates a directive
+26	intervention appended to the tool result (a contract-safe mutation: it
+27	only augments ``event.result``, never inserts messages).
+28	
+29	Generalisation: this is command-agnostic. It keys on a normalised hash of
+30	whatever command was run, so it fires for OCR loops, compile loops, file
+31	rewrites, SQL rewrites, curl loops — any class of task where the model
+32	gets stuck repeating itself. No task-specific literals.
+33	"""
+34	
+35	from __future__ import annotations
+36	
+37	import dataclasses
+38	import hashlib
+39	import re
+40	
+41	from harnessx.core.events import (
+42	    TaskEndEvent,
+43	    TaskStartEvent,
+44	    ToolCallEvent,
+45	    ToolResultEvent,
+46	)
+47	from harnessx.core.processor import MultiHookProcessor
+48	
+49	_WS_RE = re.compile(r"\s+")
+50	
+51	
+52	def _normalise(command: str) -> str:
+53	    """Collapse whitespace so trivially-reformatted duplicates still match.
+54	
+55	    Two commands that differ only in indentation / trailing whitespace are
+56	    treated as the same command — the model has not made a material change.
+57	    """
+58	    return _WS_RE.sub(" ", command.strip())
+59	
+60	
+61	_WARN = (
+62	    "\n\n[RepeatedCommandBreaker] You have now run this EXACT command "
+63	    "{count} times and received the same result every time. Re-running an "
+64	    "identical command cannot produce a different outcome. Do NOT issue this "
+65	    "command again. Step back and change your approach materially: inspect "
+66	    "the actual inputs/outputs to understand *why* it is not working, then "
+67	    "try a genuinely different command (different tool, library, flags, or "
+68	    "algorithm)."
+69	)
+70	
+71	_HARD = (
+72	    "\n\n[RepeatedCommandBreaker] STOP. This identical command has now run "
+73	    "{count} times with no change in result — you are stuck in a loop and "
+74	    "wasting your budget. Abandon this command entirely. Concretely:\n"
+75	    "  1. If you are trying to EXTRACT data from a source (an image, a "
+76	    "binary, a document) and the extraction keeps failing, try a "
+77	    "fundamentally different extraction method or different parameters — and "
+78	    "do NOT silently substitute a guessed value for data you were required "
+79	    "to read from the source; a fabricated value will fail verification.\n"
+80	    "  2. If you are re-writing the same file, the file content is not the "
+81	    "problem — run the program and read the ACTUAL error/output to find the "
+82	    "real cause before editing again.\n"
+83	    "  3. If you cannot make the current strategy work, pick a different "
+84	    "strategy for this subtask rather than repeating this one.\n"
+85	    "Your very next command MUST be different from the one you just ran."
+86	)
+87	
+88	
+89	class RepeatedCommandBreaker(MultiHookProcessor):
+90	    """Detect byte-identical repeated Bash commands and escalate a directive.
+91	
+92	    Parameters
+93	    ----------
+94	    tool_name:
+95	        Which tool to watch (TB2/Tmax only expose ``Bash``).
+96	    warn_threshold:
+97	        On the Nth identical run, append the soft directive.
+98	    hard_threshold:
+99	        On the Mth identical run (and every run after), append the hard
+100	        directive. Must be >= ``warn_threshold``.
+101	    """
+102	
+103	    _singleton_group = "repeated_command_breaker"
+104	    _order = 31  # after CustomEditToolProcessor (30); appends to tool result
+105	
+106	    def __init__(
+107	        self,
+108	        tool_name: str = "Bash",
+109	        warn_threshold: int = 3,
+110	        hard_threshold: int = 5,
+111	    ) -> None:
+112	        self.tool_name = tool_name
+113	        self.warn_threshold = max(2, int(warn_threshold))
+114	        self.hard_threshold = max(self.warn_threshold, int(hard_threshold))
+115	        self._counts: dict[str, int] = {}
+116	        self._pending: dict[str, str] = {}
+117	
+118	    async def on_task_start(self, event: TaskStartEvent):
+119	        self._counts.clear()
+120	        self._pending.clear()
+121	        yield event
+122	
+123	    async def on_before_tool(self, event: ToolCallEvent):
+124	        if event.tool_name == self.tool_name:
+125	            command = event.tool_input.get("command", "") if event.tool_input else ""
+126	            norm = _normalise(command)
+127	            if norm:
+128	                key = hashlib.sha1(norm.encode("utf-8")).hexdigest()
+129	                self._counts[key] = self._counts.get(key, 0) + 1
+130	                self._pending[event.tool_call_id] = key
+131	        yield event
+132	
+133	    async def on_after_tool(self, event: ToolResultEvent):
+134	        key = self._pending.pop(event.tool_call_id, None)
+135	        if key is None:
+136	            yield event
+137	            return
+138	        count = self._counts.get(key, 0)
+139	        if count >= self.hard_threshold:
+140	            warn = _HARD.format(count=count)
+141	        elif count >= self.warn_threshold:
+142	            warn = _WARN.format(count=count)
+143	        else:
+144	            yield event
+145	            return
+146	        yield dataclasses.replace(event, result=(event.result or "") + warn)
+147	
+148	    async def on_task_end(self, event: TaskEndEvent):
+149	        self._counts.clear()
+150	        self._pending.clear()
+151	        yield event

@@ -1,0 +1,31 @@
+25:    ToolCall,
+26:    ToolCallEvent,
+45:    """Invariant 7: processor must not emit SegmentBoundaryEvent when history_hash is unchanged.
+52:        f"step_start step={step_id}: processor emitted SegmentBoundaryEvent "
+131:) -> "tuple[TaskEndEvent, StatefulTrajectory, ToolCall | None]":
+141:    ToolCall as the third element. Caller can resume by passing the state back.
+150:    interrupted_at: ToolCall | None = None
+343:            # processor-emitted SegmentBoundaryEvent.  If history_window changed
+430:                    tool_calls=model_response.tool_calls,
+479:                        tool_calls=model_event.tool_calls,
+497:            for tc in model_event.tool_calls:
+505:                tc_event = ToolCallEvent(
+520:                    (e for e in reversed(_bt_events) if isinstance(e, ToolCallEvent)),
+549:                            result = await tool_registry.execute(tc_event.tool_name, tc_event.tool_input)
+667:            tool_call_summary = "|".join(f"{tc.name}:{str(tc.input)}" for tc in model_event.tool_calls)
+705:            # Thinking-only response: model emitted a reasoning block but no content
+707:            # extended-thinking models that emit <think> before deciding which tool
+710:            # model another turn to emit content or a tool call.
+713:                and not model_event.tool_calls
+727:                model_event.finish_reason == "length" and not model_event.tool_calls and not _thinking_only
+749:                and not model_event.tool_calls
+862:    2. Assistant messages with tool_calls but missing tool results — removes tool_calls
+875:    all_tc_ids: set[str] = set()  # from assistant tool_calls
+878:        if m.role == "assistant" and m.tool_calls:
+879:            for tc in m.tool_calls:
+890:        if m.role == "assistant" and m.tool_calls:
+891:            # Check if ALL tool_calls have corresponding results
+892:            matched = [tc for tc in m.tool_calls if tc.id in all_tr_ids]
+893:            unmatched = [tc for tc in m.tool_calls if tc.id not in all_tr_ids]
+904:                # Partial — keep only matched tool_calls
+909:                        tool_calls=tuple(matched),

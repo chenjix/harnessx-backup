@@ -1,0 +1,64 @@
+141	scipy install may have used a cache warmed during the agent phase), the install
+142	could fail — but it's swallowed and the task is no worse off. Real risk: if
+143	these tasks fail for a *second* reason beyond the missing dep, fixing collection
+144	alone won't flip them (partial credit unknown). Rollback trigger noted above.
+145	
+146	## Round 2 — assigned focus is infra race (no-op)
+147	
+148	<!-- journal:frontmatter
+149	round: 2
+150	timestamp: 2026-08-31T14:00:00Z
+151	hypothesis_id: h_docker_name_race_noop_v1
+152	levers: []
+153	predicted_affected: []
+154	gating_outcome: noop
+155	gating_attribution: noop
+156	expected_global_gain: "None from config — the assigned failure is a pre-agent Docker container-name collision, unaddressable by the HarnessConfig surface. Documented for human infra fix (potential +9/50 recovery)."
+157	regression_risk: "None — R1 config + system_prompt.txt copied byte-for-byte."
+158	cost_shift: "Zero — no config change."
+159	rollback_trigger: "N/A (no-op)."
+160	-->
+161	
+162	### Why
+163	
+164	Assigned focus `task_000010_644ab1c2` in this trajectory set fails with
+165	`status: error`, `reward: 0`, `elapsed_s: 0.6` — the agent session NEVER
+166	STARTED. Root cause is a Docker container-name collision at `docker run`:
+167	`Conflict. The container name "/tmax-task000010644ab1c2-1788179434" is
+168	already in use`. This is NOT the budget_exceeded/loop shape the R1 journal
+169	described (that analysis was on an earlier R0); in THIS trajectory dir the
+170	failure is pure infrastructure. `recipe/tmax_eval/docker_env.py:105` builds
+171	`name = f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"` — a
+172	second-granularity timestamp plus a 20-char id truncation, so parallel/retry
+173	runs or truncation-colliding ids clash on the container name. This happens
+174	BEFORE the harness instantiates, so no processor / tool / template can
+175	intercept it. Per the tb2-playbook, config.yaml controls the processor
+176	pipeline and system prompt, NOT the benchmark infrastructure — so the focus
+177	is genuinely unsupported by any HarnessConfig intervention.
+178	
+179	### Changes
+180	
+181	- `config.yaml` — copied byte-for-byte from R1 (md5 e0cadb13…). No-op.
+182	- `system_prompt.txt` — copied byte-for-byte from R1 (md5 914fb4a8…), so the
+183	  SiblingSystemPromptBuilder still resolves next to the config.
+184	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — documents the infra race, its 9/50
+185	  scope, and a concrete uuid4-suffix + best-effort `docker rm -f` fix in the
+186	  read-only recipe code.
+187	
+188	### Evidence
+189	
+190	- `task_000010_644ab1c2.result.json`: `status: error`, `reward: 0`,
+191	  `elapsed_s: 0.6`, error = docker "Conflict. The container name ... already
+192	  in use". No `messages.json` emitted (agent never ran).
+193	- Cluster: 9/50 tasks in this round fail identically (`status: error`,
+194	  elapsed < 1s, docker-name Conflict): task_000010, task_000140, task_000264,
+195	  task_000505, task_000748, task_000933, task_000958, task_001321, task_001937.
+196	- `recipe/tmax_eval/docker_env.py:105` name formula confirms the second-
+197	  granularity + truncation race.
+198	
+199	### Uncertainty
+200	
+201	The R1 loop-detector and verifier-dep bets remain `pending` attribution; this
+202	no-op does not disturb them. If the infra race is fixed by the human, several
+203	of the 9 error-tasks should re-enter scoring and the true agent pass-rate will
+204	rise independent of any config lever. No config-side signal to watch here.

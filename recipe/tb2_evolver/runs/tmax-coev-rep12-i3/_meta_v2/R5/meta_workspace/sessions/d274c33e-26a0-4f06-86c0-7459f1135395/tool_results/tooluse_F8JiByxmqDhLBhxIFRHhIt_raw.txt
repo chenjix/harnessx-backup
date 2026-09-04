@@ -1,0 +1,122 @@
+41	    """
+42	
+43	
+44	@dataclass(frozen=True)
+45	class ToolCall:
+46	    id: str
+47	    name: str
+48	    input: dict
+49	
+50	
+51	@dataclass(frozen=True)
+52	class Usage:
+53	    input_tokens: int = 0
+54	    output_tokens: int = 0
+55	    cache_read_tokens: int = 0
+56	    cache_write_tokens: int = 0
+57	
+58	    @property
+59	    def total_tokens(self) -> int:
+60	        return self.input_tokens + self.output_tokens
+61	
+62	
+63	@dataclass(frozen=True)
+64	class EvalResult:
+65	    passed: bool
+66	    score: float  # 0.0 ~ 1.0
+67	    reason: str
+68	    reward: float = 0.0
+69	
+70	
+71	# ─── Base Event ───────────────────────────────────────────────────────────────
+72	
+73	
+74	@dataclass(frozen=True)
+75	class Event:
+76	    type: str
+77	    run_id: str
+78	    step_id: int
+79	    ts: float = field(default_factory=time.time)
+80	
+81	
+82	# ─── Concrete Events ──────────────────────────────────────────────────────────
+83	
+84	
+85	@dataclass(frozen=True)
+86	class TaskStartEvent(Event):
+87	    type: str = field(default="task_start", init=False)
+88	    task_description: str = ""
+89	    model: str = ""
+90	    parent_run_id: str | None = None
+91	    session_id: str = ""  # session identifier — for /session display and /compact state loading
+92	    state: Any | None = field(
+93	        default=None, hash=False, compare=False
+94	    )  # mutable State ref — processors may read/write slots and messages
+95	    # Fields populated/modified by on_task_start processors:
+96	    system_prompt: str = ""  # assembled system prompt (frozen for task lifetime)
+97	    workspace: Any | None = field(default=None, hash=False, compare=False)  # workspace passed to run_loop
+98	    tools: tuple["ToolSchema", ...] = ()  # initial tool schemas from tool_registry
+99	
+100	
+101	@dataclass(frozen=True)
+102	class BoundaryHint:
+103	    """Annotation a step_start processor sets on StepStartEvent to pass boundary
+104	    metadata to RunLoop without emitting SegmentBoundaryEvent directly.
+105	    RunLoop reads this when constructing the auto-generated SegmentBoundaryEvent."""
+106	
+107	    reason: str = "compaction"
+108	    before_msgs: int = 0
+109	    after_msgs: int = 0
+110	    before_tokens: int = 0
+111	    after_tokens: int = 0
+112	
+113	
+114	@dataclass(frozen=True)
+115	class StepStartEvent(Event):
+116	    type: str = field(default="step_start", init=False)
+117	    # Input fields — set by runloop, read by context processors
+118	    raw_messages: tuple["Message", ...] = ()  # state.raw_messages at this step
+119	    task: Any = field(default=None, hash=False, compare=False)
+120	    context_window: int = 64_000
+121	    workspace: Any | None = field(default=None, hash=False, compare=False)
+122	    tools: tuple["ToolSchema", ...] = ()  # initial schemas from tool_registry
+123	    # Output fields — populated/modified by step_start processors
+124	    messages: tuple["Message", ...] = ()  # assembled context
+125	    system_prompt: str = ""
+126	    token_count: int = 0
+127	    boundary_hint: "BoundaryHint | None" = field(default=None, hash=False, compare=False)
+128	
+129	
+130	@dataclass(frozen=True)
+131	class BeforeModelEvent(Event):
+132	    type: str = field(default="before_model", init=False)
+133	    messages: tuple[Message, ...] = ()
+134	    tools: tuple[ToolSchema, ...] = ()
+135	    cumulative_cost_usd: float = 0.0  # needed by CostGuardProcessor
+136	    skip_model: bool = field(default=False, hash=False, compare=False)
+137	    synthetic_output: str = field(default="", hash=False, compare=False)
+138	
+139	
+140	@dataclass(frozen=True)
+141	class ModelResponseEvent(Event):
+142	    type: str = field(default="model_response", init=False)
+143	    content: str = ""
+144	    thinking: str = ""  # extended thinking / reasoning content from the model
+145	    thinking_blocks: tuple = ()  # raw provider blocks (with signatures) for multi-turn replay
+146	    tool_calls: tuple[ToolCall, ...] = ()
+147	    finish_reason: str = "end_turn"
+148	    usage: Usage = field(default_factory=Usage)
+149	    model: str = ""
+150	    attempted_models: tuple[str, ...] = ()  # models tried before this one (ProviderGroup fallback)
+151	
+152	
+153	@dataclass(frozen=True)
+154	class ToolCallEvent(Event):
+155	    type: str = field(default="tool_call", init=False)
+156	    tool_name: str = ""
+157	    tool_input: dict = field(default_factory=dict)
+158	    tool_call_id: str = ""
+159	    approved: bool = True
+160	    synthetic_result: str | None = None
+
+[Showing lines 41–160 of 580 total. Use offset=160 to read the next section.]

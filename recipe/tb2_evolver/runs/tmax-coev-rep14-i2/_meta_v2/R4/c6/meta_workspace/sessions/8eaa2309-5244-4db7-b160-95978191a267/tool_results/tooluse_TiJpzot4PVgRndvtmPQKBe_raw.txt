@@ -1,0 +1,72 @@
+96	        hook: str | None = None,
+97	        order: int | None = None,
+98	        singleton_group: Any = _UNSET,
+99	    ) -> "HarnessBuilder":
+100	        """Register *proc* under a hook point.
+101	
+102	        If the processor class declares ``_hook``, ``_order``, and/or
+103	        ``_singleton_group`` class attributes, they are used as defaults.
+104	        Explicit keyword arguments take precedence.
+105	
+106	        Args:
+107	            proc:             Processor instance to register.
+108	            hook:             Hook key (``"step_start"``, ``"before_model"``,
+109	                              ``"after_model"``, ``"before_tool"``,
+110	                              ``"after_tool"``, ``"step_end"``, ``"task_end"``,
+111	                              or ``"*"``).  Required if the class has no ``_hook``.
+112	            order:            Position within the hook list (lower = earlier).
+113	            singleton_group:  Conflict-detection group.  Pass ``None`` explicitly
+114	                              to disable singleton checking for this entry.
+115	        """
+116	        from .processor import MultiHookProcessor
+117	
+118	        cls = type(proc)
+119	        resolved_hook = hook or getattr(cls, "_hook", None)
+120	        if not resolved_hook and isinstance(proc, MultiHookProcessor):
+121	            resolved_hook = "*"
+122	        if not resolved_hook:
+123	            raise ValueError(
+124	                f"{cls.__name__} has no _hook class attribute and is not a "
+125	                "MultiHookProcessor subclass; pass hook= explicitly to .add()"
+126	            )
+127	        resolved_order = order if order is not None else getattr(cls, "_order", 0)
+128	        resolved_sg = singleton_group if singleton_group is not _UNSET else getattr(cls, "_singleton_group", None)
+129	        resolved_after = tuple(getattr(cls, "_after", []))
+130	        new = self._copy()
+131	        new._entries.append(_ProcEntry(proc, resolved_hook, resolved_order, resolved_sg, resolved_after))
+132	        return new
+133	
+134	    def slot(self, **kwargs: Any) -> "HarnessBuilder":
+135	        """Set one or more scalar HarnessConfig slots.
+136	
+137	        Valid keys: ``tool_registry``, ``tracer``,
+138	        ``workspace``, ``workspace_template``, ``init_workspace``.
+139	        """
+140	        invalid = set(kwargs) - _SCALAR_SLOTS
+141	        if invalid:
+142	            raise ValueError(f"Unknown slot(s): {invalid}. Valid: {_SCALAR_SLOTS}")
+143	        new = self._copy()
+144	        new._slots.update(kwargs)
+145	        return new
+146	
+147	    def add_tool(self, tool: "Tool") -> "HarnessBuilder":
+148	        """Bundle a tool with this harness.
+149	
+150	        Tools are registered into the ``tool_registry`` slot at :meth:`build`
+151	        time.  If no registry was supplied via ``.slot(tool_registry=...)``, an
+152	        ``InMemoryToolRegistry`` is created automatically.
+153	
+154	        This is intended for **harness-defined convenience tools** — e.g. the
+155	        ``todo_write`` tool paired with ``TodoCheck``, or the ``task``
+156	        delegation tool for sub-agent bundles.  Workspace-bound tools (Bash,
+157	        Read, Write …) and MCP tools (via ``MCPToolRegistry``) are registered
+158	        by the caller, not through ``add_tool()``.
+159	
+160	        Merging two builders that both register a tool with the same name raises
+161	        :exc:`HarnessConflictError`.
+162	        """
+163	        new = self._copy()
+164	        new._tools.append(tool)
+165	        return new
+
+[Showing lines 96–165 of 747 total. Use offset=165 to read the next section.]

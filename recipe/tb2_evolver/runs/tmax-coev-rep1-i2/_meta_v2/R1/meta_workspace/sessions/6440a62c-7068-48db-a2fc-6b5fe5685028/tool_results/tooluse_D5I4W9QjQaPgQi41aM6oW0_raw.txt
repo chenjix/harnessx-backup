@@ -1,0 +1,109 @@
+===== task_000140_01c78b42 =====
+reward 0 exit done
+FINAL PYTEST TAIL:
+                               [100%]
+=================================== FAILURES ===================================
+_____________________ test_no_lingering_service_processes ______________________
+
+    def test_no_lingering_service_processes():
+        # Give the system a brief moment to ensure the process is fully terminated
+        time.sleep(1)
+    
+        # Check if vm_service is running
+        try:
+            output = subprocess.check_output(["pgrep", "-f", "vm_service"], text=True)
+            pids = output.strip().split()
+>           assert not pids, f"Lingering vm_service processes found: {pids}"
+E           AssertionError: Lingering vm_service processes found: ['348', '611']
+E           assert not ['348', '611']
+
+/tmp/test_final_state.py:40: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py:
+===== task_000505_50b5162d =====
+reward 0 exit done
+FINAL PYTEST TAIL:
+______________________ test_adversarial_corpus ____________________________
+
+    def test_adversarial_corpus():
+        assert os.path.isdir(EVIL_DIR), f"Evil corpus directory missing: {EVIL_DIR}"
+        assert os.path.isdir(CLEAN_DIR), f"Clean corpus directory missing: {CLEAN_DIR}"
+    
+        evil_files = [os.path.join(EVIL_DIR, f) for f in os.listdir(EVIL_DIR) if os.path.isfile(os.path.join(EVIL_DIR, f))]
+        clean_files = [os.path.join(CLEAN_DIR, f) for f in os.listdir(CLEAN_DIR) if os.path.isfile(os.path.join(CLEAN_DIR, f))]
+    
+        assert len(evil_files) > 0, "No files found in the evil corpus."
+        assert len(clean_files) > 0, "No files found in the clean corpus."
+    
+        bypassed_evil = []
+        for evil_file in evil_files:
+            result = subprocess.run([SCRIPT_PATH, evil_file], capture_output=True)
+            if result.returncode != 1:
+              
+===== task_001781_529727cf =====
+reward 0 exit done
+FINAL PYTEST TAIL:
+ock_fixed ______________________________
+
+    def test_deadlock_fixed():
+        main_rs_path = "/home/user/audio-analyzer/src/main.rs"
+        with open(main_rs_path, "r") as f:
+            content = f.read()
+    
+        # We check for consistent locking. A simple heuristic is ensuring we don't have
+        # the exact problematic deadlock pattern anymore.
+        # The original code had a branch checking `timestamp_ms % 200 == 0` for locking order.
+        # We will verify that the user altered the locking logic.
+        # A robust check is to ensure that `GLOBAL_LOG_LOCK` and `state_clone.lock()` are not locked in alternating orders.
+        # For this test, we verify that the user has at least modified the original deadlock-prone block.
+    
+        original_deadlock_pattern = r"timestamp_ms\s*%\s*200\s*==\s*0"
+>       assert not re.search(original_deadlock_pattern, content), (
+    
+===== task_001937_ac874115 =====
+reward 0 exit done
+FINAL PYTEST TAIL:
+port_values():
+        """Verify the computed values in the report."""
+        report_path = "/home/user/report.txt"
+        if not os.path.isfile(report_path):
+            pytest.fail("Report file missing.")
+    
+        with open(report_path, "r") as f:
+            content = f.read()
+    
+        grid_match = re.search(r"Optimal Grid:\s*(\d+)", content)
+        assert grid_match, "Could not parse Optimal Grid"
+        grid_val = int(grid_match.group(1))
+>       assert grid_val == 50, f"Expected Optimal Grid to be 50, but got {grid_val}"
+E       AssertionError: Expected Optimal Grid to be 50, but got 60
+E       assert 60 == 50
+
+/tmp/test_final_state.py:46: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_report_values - AssertionError: Ex...
+1 failed, 2 passed in 0.02s
+..F                          
+===== task_000933_1f27096a =====
+reward 0 exit done
+FINAL PYTEST TAIL:
+, 'graph_math_int'}
+
+/tmp/test_final_state.py:36: AssertionError
+___________________________ test_binaries_execution ____________________________
+
+    def test_binaries_execution():
+        """Extract binaries from the tarball and verify their execution outputs."""
+        tarball_path = "/home/user/release.tar.gz"
+        assert os.path.isfile(tarball_path), f"Tarball {tarball_path} is missing."
+    
+        input_data = "1 2 4.5\n2 3 5.2\n3 1 1.1\n"
+    
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with tarfile.open(tarball_path, "r:gz") as tar:
+                tar.extractall(path=tmpdir)
+    
+            double_bin = os.path.join(tmpdir, "home/user/bin/graph_math_double")
+            if not os.path.exists(double_bin):
+                # Try with leading slash preserved if extracted differently
+                double_bin = os.path.join(tmpdir, "home/user/bin/graph_m

@@ -1,0 +1,145 @@
+1	# SPDX-License-Identifier: MIT
+2	"""Exit-time self-verification with a *mechanical* process/pid ground-truth snapshot.
+3	
+4	Motivation
+5	----------
+6	The stock ``CustomSelfVerifyProcessor`` (and the R0
+7	``ProcessLifecycleSelfVerifyProcessor`` that extended it) inject a *textual*
+8	checklist asking the agent to reconcile the final process table and confirm
+9	any recorded PID names the real program. On process-management /
+10	background-service tasks the model reliably *narrates* compliance ("Service
+11	stopped", "PID 578 is the actual monitor process") without actually
+12	re-inspecting the live state — and the verifier then fails on:
+13	
+14	  * lingering service processes the agent spawned while testing
+15	    (verifier greps ``pgrep -f <svc>`` and finds survivors), and
+16	  * a ``*.pid`` / ``pid.txt`` file that contains a wrapper PID or, worse,
+17	    multiple newline-separated PIDs (``echo $! > pid.txt`` accumulated across
+18	    repeated launches), so the verifier's ``pid_str.isdigit()`` check fails.
+19	
+20	A text reminder is demonstrably insufficient: the agent reads it and
+21	self-reports success. What the model cannot hand-wave past is *raw tool
+22	output it did not author*. So instead of only injecting a checklist, this
+23	processor injects a **real ``Bash`` diagnostic tool call** on the agent's
+24	first exit-intent turn. The run loop executes it and feeds the real snapshot
+25	back into context: the current user-process table plus the contents of every
+26	``*.pid`` / ``pid.txt`` file under the working directory. The follow-up
+27	checklist message then asks the agent to reconcile *that concrete output*
+28	with the task's stated lifecycle requirements before committing to exit.
+29	
+30	Generality
+31	----------
+32	The diagnostic command contains **no task ids, paths, ports, or process
+33	names** from any training task — it enumerates whatever is actually running
+34	and whatever pid files actually exist, letting the agent fill in the concrete
+35	lifecycle requirements from the task description it re-reads. The snapshot is
+36	a general shell-lifecycle discipline (single-instance services, correct PID
+37	recording, no leftover test processes), not domain knowledge. It fires at
+38	most once per task, so it adds no per-step mechanical regression surface and
+39	costs one extra Bash round-trip only on runs that reach exit intent.
+40	
+41	Wiring
+42	------
+43	Reuses the stock singleton group ``tb2_self_verify`` so it *replaces* the
+44	stock / R0 self-verify processor rather than firing a second, conflicting
+45	keepalive.
+46	"""
+47	
+48	from __future__ import annotations
+49	
+50	import dataclasses
+51	import uuid
+52	
+53	from harnessx.core.events import (
+54	    BeforeModelEvent,
+55	    Message,
+56	    ModelResponseEvent,
+57	    TaskStartEvent,
+58	    TaskEndEvent,
+59	    ToolCall,
+60	)
+61	
+62	from benchmarks.terminal_bench_2.harness import (
+63	    CustomSelfVerifyProcessor,
+64	    _SELF_VERIFY_MSG,
+65	)
+66	
+67	
+68	# A fully general lifecycle snapshot. Enumerates non-kernel user processes and
+69	# dumps the contents of any pid files under the working dir. `2>/dev/null` and
+70	# the `|| true` guards keep it silent/successful even when nothing matches.
+71	_SNAPSHOT_CMD = (
+72	    "echo '=== LIFECYCLE SNAPSHOT (auto) ==='; "
+73	    "echo '--- running processes (user, non-kernel) ---'; "
+74	    "ps -eo pid,ppid,stat,comm,args --sort=pid 2>/dev/null "
+75	    "| awk 'NR==1 || ($2!=2 && $1!=2)' | head -n 60 || true; "
+76	    "echo '--- pid files under working dir ---'; "
+77	    "for f in $(find . /home/user -maxdepth 4 \\( -name '*.pid' -o -name 'pid.txt' \\) "
+78	    "-type f 2>/dev/null | sort -u | head -n 20); do "
+79	    "echo \"# $f:\"; cat \"$f\" 2>/dev/null; echo; done || true; "
+80	    "echo '=== END SNAPSHOT ==='"
+81	)
+82	
+83	_RECONCILE_MSG = (
+84	    "Above is a live snapshot of the actual process table and every pid file "
+85	    "on disk — this is ground truth, not your earlier narration. Reconcile it "
+86	    "with the task's lifecycle requirements before you finish:\n"
+87	    "  - Every process the task requires to keep RUNNING must appear above right now.\n"
+88	    "  - Every process that must be STOPPED / not left lingering (including any you "
+89	    "started only to test) must be ABSENT — if you see duplicates or leftovers, kill "
+90	    "them now.\n"
+91	    "  - If the task records a PID in a file, that file must contain EXACTLY ONE integer "
+92	    "naming the real target program (check `cat /proc/<pid>/comm`), not a shell wrapper "
+93	    "and not several accumulated PIDs. If the pid file above has multiple lines or names "
+94	    "a wrapper (bash/sh), rewrite it with the single correct PID.\n\n"
+95	    + _SELF_VERIFY_MSG
+96	)
+97	
+98	
+99	class LifecycleSnapshotSelfVerifyProcessor(CustomSelfVerifyProcessor):
+100	    """Self-verify that injects a real Bash lifecycle snapshot before the checklist.
+101	
+102	    On the first exit-intent turn it emits a genuine ``Bash`` tool call (the
+103	    run loop executes it) so the concrete process/pid state lands in context;
+104	    the reconciliation + stock checklist message is then injected on the
+105	    following ``on_before_model``.
+106	    """
+107	
+108	    async def on_task_start(self, event: TaskStartEvent):
+109	        self._verified = False
+110	        self._pending_message = ""
+111	        yield event
+112	
+113	    async def on_after_model(self, event: ModelResponseEvent):
+114	        exit_intent = (
+115	            event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+116	        )
+117	        if exit_intent and not self._verified:
+118	            self._verified = True
+119	            # Arm the reconciliation + checklist message for the next
+120	            # on_before_model, and inject a REAL Bash diagnostic tool call now.
+121	            self._pending_message = _RECONCILE_MSG
+122	            snapshot = ToolCall(
+123	                id=f"lc-{uuid.uuid4().hex[:8]}",
+124	                name="Bash",
+125	                input={"command": _SNAPSHOT_CMD},
+126	            )
+127	            yield dataclasses.replace(event, tool_calls=(snapshot,))
+128	        else:
+129	            yield event
+130	
+131	    async def on_before_model(self, event: BeforeModelEvent):
+132	        if not self._pending_message:
+133	            yield event
+134	            return
+135	        msg = self._pending_message
+136	        self._pending_message = ""
+137	        yield dataclasses.replace(
+138	            event,
+139	            messages=event.messages + (Message(role="user", content=msg),),
+140	        )
+141	
+142	    async def on_task_end(self, event: TaskEndEvent):
+143	        self._verified = False
+144	        self._pending_message = ""
+145	        yield event

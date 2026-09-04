@@ -1,0 +1,133 @@
+1	---
+2	name: tb2-playbook
+3	description: Terminal-Bench 2 benchmark-specific structural facts for meta-agent evolution rounds. Covers sandbox topology, tool constraints, evolvable config surface, and trajectory signal layout. Read before authoring any candidate that touches the system prompt, processor pipeline, or tool registry.
+4	---
+5	
+6	# TB2 Playbook
+7	
+8	Structural facts about Terminal-Bench 2 that are not visible in trajectories
+9	and are required to author valid evolution candidates.
+10	
+11	---
+12	
+13	## Sandbox topology
+14	
+15	The task agent and the verifier run in **separate phases** and share
+16	no live filesystem access:
+17	
+18	1. **Agent phase** — agent runs inside an isolated Docker container.
+19	   Internet access is **blocked** by default; do not author candidates
+20	   that assume outbound package fetches succeed unless the task itself
+21	   stages the package first.
+22	2. **Verifier phase** — after the agent exits, an external verifier
+23	   runs against the container's final state. The verifier's test
+24	   files are injected **after** the agent session ends and are
+25	   **not present during execution**.
+26	
+27	Implication: any instruction in the system prompt telling the agent
+28	to read verifier test files (e.g. `/tests/test_outputs.py`) will
+29	fail silently — those files do not exist during the agent phase.
+30	The agent must infer correctness criteria from the task description
+31	alone.
+32	
+33	---
+34	
+35	## Tool constraint
+36	
+37	The task agent has **exactly one tool: `Bash`**. No `Read`, `Write`,
+38	`Edit`, `Glob`, `Grep`, or browser tools exist. Every filesystem
+39	interaction, dependency install, and verification step goes through
+40	`Bash`.
+41	
+42	This is a hard limit set by the benchmark evaluator and cannot be
+43	changed via `config.yaml`. Do not add tools to `tool_registry` —
+44	the harbor environment only exposes `Bash` to the agent regardless.
+45	
+46	---
+47	
+48	## What `config.yaml` can evolve
+49	
+50	The harness config controls the **processor pipeline and system
+51	prompt**, not the benchmark infrastructure. Evolvable surface:
+52	
+53	| Lever | How |
+54	|---|---|
+55	| System prompt | Swap the static prompt builder for a `TemplateSystemPromptBuilder` pointing to a `.j2` file you author under `output_dir/templates/` |
+56	| Processor pipeline | Add, remove, reorder, or re-parameterise any `MultiHookProcessor` in the pipeline |
+57	| Custom processors | Author a new class under `output_dir/processors/<name>.py` and reference it via `file://` absolute path |
+58	| Processor knobs | Tune compaction thresholds, edit-loop guard sensitivity, time-reminder fractions — all via constructor parameters in the existing pipeline |
+59	
+60	Read the current `config.yaml` to see which processors are already
+61	in the pipeline and what parameters they expose before proposing
+62	changes.
+63	
+64	---
+65	
+66	## Trajectory signal layout
+67	
+68	Each task trial directory under `trajectories_dir/` contains:
+69	
+70	```
+71	<task_id>__<hash>/
+72	  agent/
+73	    oh_runs/
+74	      <session>.json          # top-level session summary
+75	      <session_id>/
+76	        <episode>.jsonl       # full event log (tool calls, results, messages)
+77	  verifier/
+78	    test-stdout.txt           # pytest / test runner stdout
+79	    ctrf.json                 # CTRF test results (passed/failed/skipped per test)
+80	  result.json                 # reward, elapsed_s, exit_reason, n_steps, total_cost
+81	```
+82	
+83	Priority read order for diagnosis:
+84	1. `result.json` — `reward` (1=pass, 0=fail), `exit_reason`, `n_steps`
+85	2. `verifier/ctrf.json` — which specific tests failed and why
+86	3. `verifier/test-stdout.txt` — full assertion messages
+87	4. Last ~40 lines of the episode JSONL — what the agent was doing
+88	   at its final steps
+89	
+90	`exit_reason` values: `done` (natural stop), `max_steps`, `budget_exceeded`,
+91	`loop_detected`, `error`.
+92	
+93	---
+94	
+95	## Known effective patterns
+96	
+97	Prior runs on terminal-bench style tasks have found these interventions
+98	to reliably move the score. Treat as starting hypotheses to validate
+99	against current trajectories — not fixed rules. Better evidence from
+100	your round overrides these priors.
+101	
+102	- **Upfront environment survey** — agent surveys the working
+103	  directory layout and available toolchain before writing any code;
+104	  reduces wrong-path and missing-dependency failures
+105	- **Explicit plan before implementation** — agent writes and
+106	  maintains a step-by-step plan; biggest single lever observed,
+107	  especially for multi-file or multi-service tasks
+108	- **Non-interactive discipline** — agent never pauses to ask
+109	  clarifying questions; acts on best interpretation and self-corrects
+110	- **Double-confirmation before exit** — agent re-reads the task
+111	  description and verifies each required output exists and is
+112	  non-empty before declaring done; catches path-mismatch failures
+113	- **Structured reasoning in tool schema** — adding `analysis` and
+114	  `plan` fields to the `Bash` tool definition forces the model to
+115	  articulate intent before executing; improves coherence on complex tasks
+116	- **Effort shaping** — high reasoning effort for early steps (problem
+117	  understanding, design), lower effort for mechanical steps (file
+118	  writes, installs); reduces token waste without harming solution quality
+119	
+120	---
+121	
+122	## What trajectories will NOT tell you
+123	
+124	These failure modes look like ordinary agent failures but have
+125	structural causes:
+126	
+127	- **Background process dies after agent exits** — the container
+128	  stays alive for the verifier; `nohup`/`&` processes persist, but
+129	  only if the agent's final Bash call does not kill them
+130	- **Correct logic, wrong path** — the verifier checks exact output
+131	  paths from the task description; a file written to the wrong
+132	  location or with a different extension is a hard failure regardless
+133	  of content correctness

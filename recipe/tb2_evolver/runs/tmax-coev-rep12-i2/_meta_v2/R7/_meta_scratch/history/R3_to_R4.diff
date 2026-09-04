@@ -1,0 +1,62 @@
+--- R3
++++ R4
+@@ -21,8 +21,17 @@
+ processors:
+-# R4: system-prompt sidecar (system_prompt.txt beside this YAML) revised from
+-# the 5-line default to an explicit general workflow — survey, plan, diagnose
+-# before retry, budget awareness, verify deliverables the way an external
+-# checker would (real HTTP client not raw socket; exact output path/format),
+-# keep required services alive, avoid polluting the verifier's working dir.
+-# Strategy-only; no task-specific literals. SiblingSystemPromptBuilder loads it.
++# R4 (meta): the ONLY change this round is the system-prompt sidecar
++# (system_prompt.txt beside this YAML). Prior rounds' config comments claimed a
++# general-workflow prompt existed, but the shipped sidecar was still the 5-line
++# default stub — this round actually installs the intended prompt. It is
++# strategy-only (no task-specific literals): survey the environment and confirm
++# exact input/output paths before coding; restate concrete deliverables and
++# format before implementing; diagnose before retrying instead of re-running the
++# same command; verify every required output exists at its EXACT path in the
++# correct format the way the external checker will (exercise servers with a real
++# client, compute expected values independently); keep required background
++# services alive and the checker's dirs clean; always write a best-effort partial
++# to the required path rather than leaving it empty. SiblingSystemPromptBuilder
++# loads it. The processor pipeline is carried forward byte-for-byte from R3
++# (file:// paths repointed to R3-local copies) so this round isolates the
++# instruction-lever effect.
+ - _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+@@ -59,4 +68,4 @@
+ # nudge. Mutates messages by at most +1 user turn per chain; no task-specific
+-# literals. Carried forward from R2 byte-for-byte (repointed to R3-local copy).
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R3/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
++# literals. Carried forward byte-for-byte (repointed to R4-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
+   repeat_threshold: 3
+@@ -66,16 +75,7 @@
+   _hook_: '*'
+-# R3 (meta): break the *repeated-Bash-command* loop that all three prior loop
+-# guards miss. Trajectory evidence: the entire budget_exceeded cluster re-issues
+-# the SAME shell command 10x-34x within one 80-step task (e.g. task_001028 ran
+-# one identical `echo ... | ...` 33/33 times; task_000032 ran one identical
+-# probe 34/34 times; task_000348 recompiled 10x; task_001465 curled 13x) while
+-# producing no new state and never writing the required output. LengthRecovery
+-# fires only on finish_reason=length; CustomEditToolProcessor counts only
+-# file-write commands; the R2 content fingerprint missed these because the
+-# narration was long and re-worded each turn. This processor keys on the
+-# NORMALIZED Bash command string over a rolling window — orthogonal to the
+-# content fingerprint — and after repeat_threshold occurrences injects an
+-# escalating nudge (gather new evidence / write the required output to its exact
+-# path). +1 user turn per armed streak; no task-specific literals.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R3/processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
++# R3 (meta): break the *repeated-Bash-command* loop. Keys on the normalized Bash
++# command string over a rolling window and, after repeat_threshold occurrences,
++# injects an escalating nudge. +1 user turn per armed streak; no task-specific
++# literals. Carried forward byte-for-byte (repointed to R4-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
+   repeat_threshold: 4
+@@ -110,4 +110,4 @@
+ # present; single Bash round-trip; no task-specific literals. Carried forward
+-# from R2 byte-for-byte (repointed to R3-local copy).
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R3/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
++# byte-for-byte (repointed to R4-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+   _hook_: '*'

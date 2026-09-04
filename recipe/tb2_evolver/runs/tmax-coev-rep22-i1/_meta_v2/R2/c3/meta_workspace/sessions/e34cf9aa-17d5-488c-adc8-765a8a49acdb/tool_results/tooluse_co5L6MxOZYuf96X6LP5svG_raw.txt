@@ -1,0 +1,86 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""Process-lifecycle-aware self-verification nudge for TB2 service tasks.
+4	
+5	Extends the stock ``CustomSelfVerifyProcessor`` one-shot exit checklist.
+6	
+7	Motivation
+8	----------
+9	The stock checklist's "running services" item only nudges the agent to
+10	confirm a service is *still alive*. A whole class of system-administration
+11	tasks are graded on the *final runtime process state* in ways the stock
+12	checklist never surfaces, and sometimes biases against:
+13	
+14	  * teardown tasks — the verifier asserts **no lingering** service
+15	    processes remain after a lifecycle/pipeline script runs (e.g.
+16	    ``pgrep -f <svc>`` must be empty). "Confirm it is still alive" pushes
+17	    the agent the wrong way.
+18	  * identity tasks — the verifier reads a PID file and asserts the process
+19	    named there is the compiled service binary, not a wrapper shell
+20	    (``/proc/<pid>/comm`` must equal the service name, not ``bash``).
+21	  * resource-bound tasks — background workers must stay within a size /
+22	    resource budget rather than run unbounded.
+23	
+24	These are harness-verification-nudge deficiencies, not model-knowledge
+25	gaps: the agent already has ``Bash`` and can check ``pgrep`` /
+26	``/proc/<pid>/comm`` / directory sizes; it simply is not prompted to
+27	reconcile the *final* process state against the task's stated lifecycle.
+28	
+29	The fix is a strictly additive checklist item describing the *general*
+30	strategy ("reconcile final process state with the lifecycle the task
+31	demands"), with no task-specific identifiers, constants, or paths. It
+32	fires at most once per task, exactly like the stock processor, so it does
+33	not inflate step count on tasks with no service component.
+34	"""
+35	
+36	from __future__ import annotations
+37	
+38	from benchmarks.terminal_bench_2.harness import CustomSelfVerifyProcessor
+39	
+40	# Additive block appended to the stock self-verify checklist. General
+41	# strategy only — no task-specific identifiers, ports, paths, or constants.
+42	_LIFECYCLE_ADDENDUM = """
+43	
+44	6. **Final process / service state must match the lifecycle the task asks for.**
+45	   Services are graded on their state *after you stop*, not on whether a script
+46	   once ran cleanly. Reconcile the two cases explicitly:
+47	   - If the task asks you to **start / keep** a service running: confirm the
+48	     process is alive right now (`pgrep -f <name>` or `os.kill(pid, 0)`), and
+49	     that any PID file you wrote points at the actual service process — check
+50	     its identity with `cat /proc/<pid>/comm` and make sure it names your
+51	     compiled/target program, not a wrapping `bash`/shell/`go run` launcher.
+52	   - If the task asks you to **stop / gracefully shut down / clean up** a
+53	     service (or you ran a start-then-stop pipeline): confirm **no** matching
+54	     process is left behind — `pgrep -f <name>` must return nothing. Killing by
+55	     a saved PID can miss children or a respawned process; verify the result,
+56	     and if anything lingers, terminate every match and re-check.
+57	   - If the task bounds a background workload (log size, disk, memory, run
+58	     time): confirm the observed value stays within the stated limit rather
+59	     than assuming the workers self-regulate.
+60	"""
+61	
+62	
+63	class LifecycleSelfVerifyProcessor(CustomSelfVerifyProcessor):
+64	    """Stock self-verify checklist plus a process-lifecycle final-state item.
+65	
+66	    Reuses all of the parent's one-shot machinery (fires at most once, on the
+67	    first no-tool-call exit attempt); only the injected checklist text is
+68	    extended.
+69	    """
+70	
+71	    _singleton_group = "tb2_self_verify"
+72	    _order = 90
+73	
+74	    def _lifecycle_message(self) -> str:
+75	        # Read the parent's message lazily so we stay in sync if it changes.
+76	        from benchmarks.terminal_bench_2 import harness as _h
+77	
+78	        return _h._SELF_VERIFY_MSG + _LIFECYCLE_ADDENDUM
+79	
+80	    async def on_after_model(self, event):
+81	        # Delegate to the parent to preserve exit-detection semantics, then
+82	        # upgrade the pending message to the lifecycle-aware variant.
+83	        async for out in super().on_after_model(event):
+84	            if self._pending_message:
+85	                self._pending_message = self._lifecycle_message()
+86	            yield out

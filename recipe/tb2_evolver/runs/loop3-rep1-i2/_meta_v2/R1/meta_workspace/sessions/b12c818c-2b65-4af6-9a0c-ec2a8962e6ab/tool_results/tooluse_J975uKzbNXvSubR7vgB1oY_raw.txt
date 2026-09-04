@@ -1,0 +1,151 @@
+1	# Routed evidence for this round
+2	
+3	Every failure in this round was attributed to a responsible side before you were shown it. **Only the defects listed under "Editable defects" are yours to fix.** The rest are listed as counts so you know what the score contains, but editing the harness cannot address them — do not write prompt text aimed at them.
+4	
+5	- trajectories: **28**  (8 failed, 20 passed)
+6	- attributed to the harness/tool layer (yours): **0**
+7	- attributed to the model (goes to SFT, not to you): **6**
+8	- environment / benchmark / unattributable (nobody's to fix here): **2**
+9	
+10	## Editable defects
+11	
+12	Grouped across trajectories: `count` is how many trials exhibited the same defect, so a count of 20 is one bug, not twenty.
+13	
+14	### 1. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && apt-get source pmars <n>>&<n>`  (count=1, tasks=1)
+15	- interaction edge: `Model-Tool`
+16	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+17	- affected tasks: build-pmars
+18	- evidence:
+19	  - `build-pmars` step 5: action `cd /app && apt-get source pmars 2>&1`
+20	    observation: `Reading package lists... NOTICE: 'pmars' packaging is maintained in the 'Git' version control system at: https://salsa.debian.org/games-team/pmars.git Please use: git clone https://salsa.debian.org/games-team/pmars.git t`
+21	    trial: `build-pmars__S8bFs7W`
+22	
+23	### 2. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && python3 -c " import asyncio from run import run`  (count=1, tasks=1)
+24	- interaction edge: `Model-Tool`
+25	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+26	- affected tasks: cancel-async-tasks
+27	- evidence:
+28	  - `cancel-async-tasks` step 6: action `cd /app && python3 -c "
+29	import asyncio
+30	from run import run_tasks
+31	
+32	# Simple debug test
+33	print('=== Debug test ===')
+34	log = []
+35	
+36	async def simple_task(name):
+37	    log`
+38	    observation: `<string>:18: RuntimeWarning: coroutine 'simple_task' was never awaited RuntimeWarning: Enable tracemalloc to get the object allocation traceback === Debug test === Tasks: [<function test.<locals>.<lambda> at 0x707dd14bce`
+39	    trial: `cancel-async-tasks__JSJVr2J`
+40	
+41	### 3. [CONTESTED] `visible_error_no_effective_recovery` — on ` tail -<n>`  (count=1, tasks=1)
+42	- interaction edge: `Model-Tool`
+43	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+44	- affected tasks: mcmc-sampling-stan
+45	- evidence:
+46	  - `mcmc-sampling-stan` step 7: action `R CMD INSTALL --build --no-test-load rstan 2>&1 | tail -5`
+47	    observation: `Warning: invalid package 'rstan' Error: ERROR: no packages specified `
+48	    trial: `mcmc-sampling-stan__3zDQRef`
+49	
+50	### 4. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && sqlite3 -header -csv oewn.sqlite < my-sql-query`  (count=1, tasks=1)
+51	- interaction edge: `Model-Tool`
+52	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+53	- affected tasks: query-optimize
+54	- evidence:
+55	  - `query-optimize` step 4: action `cd /app && sqlite3 -header -csv oewn.sqlite < my-sql-query.sql > /tmp/original_output.csv 2>&1`
+56	    observation: `Error: Command timed out after 120 seconds`
+57	    trial: `query-optimize__ghGewwV`
+58	
+59	## Not actionable by a harness edit
+60	
+61	- `missing_dependency_or_broken_env`: 2
+62	
+63	These are excluded from the editable list on purpose. If the score looks low, some of it is these — that is not a signal about your config.
+64	
+65	## Affordance gaps (harness-actionable, derived by contrast)
+66	
+67	Each entry pairs an error **our** model failed to recover from with recoveries a stronger model achieved on the **same error class** (mined from the Tmax success corpus — a different model on a different harness). The Tmax half is **not evidence of a defect here**; it is a demonstration that a recovery exists. Your question for each: *given the current config, is that recovery reachable?* Concretely — is the error surfaced in full rather than truncated, does any tool description or prompt line make the probe an obvious next move, is there a step budget left to attempt it?
+68	
+69	### A1. `package_install_failed` — our model failed to recover 2x
+70	- our failure modes: `visible_error_no_effective_recovery`x2
+71	- affected tasks: build-pmars, cancel-async-tasks
+72	- what our model did:
+73	  - `build-pmars`: ran `cd /app && apt-get source pmars 2>&1`
+74	    got: `Reading package lists... NOTICE: 'pmars' packaging is maintained in the 'Git' version control system at: https://salsa.debian.org/games-team/pmars.git Please use: git clone https://salsa.debian.org/games-team/pmars.git to retrieve the lates`
+75	  - `cancel-async-tasks`: ran `cd /app && python3 -c "
+76	import asyncio
+77	from run import run_tasks
+78	
+79	# Simple debug test
+80	print('=== Debug test ===')
+81	log = []
+82	
+83	async def simple_task(name):
+84	    log.append(f'{name}_start')
+85	    await async`
+86	    got: `<string>:18: RuntimeWarning: coroutine 'simple_task' was never awaited RuntimeWarning: Enable tracemalloc to get the object allocation traceback === Debug test === Tasks: [<function test.<locals>.<lambda> at 0x707dd14bcea0>, <function test.`
+87	- what a successful recovery looks like on this error class:
+88	  - after `cat /home/user/lu_solver.c` failed, recovered with **`cat /home/user/input_matrix.csv`** (7 turns to success)
+89	  - after `date && echo "---" && echo $TZ && echo "---" && python3 -c "
+90	import os, time
+91	print('os.environ TZ:', os.enviro` failed, recovered with **`sed -i 's/TZ=America\/New_York/TZ=UTC/' /home/user/app/config.env && cat /home/user/app/config.env`** (8 turns to success)
+92	  - after `timeout 5 /usr/bin/expect /home/user/start_daemon.exp; echo "Expect exit code: $?"` failed, recovered with **`rm -f /home/user/heartbeat.log /home/user/monitor.log && /home/user/monitor.sh &
+93	echo "Monitor PID: $!"
+94	sleep 3
+95	echo "--- After 3 seconds ---"
+96	echo "H`** (8 turns to success)
+97	
+98	### A2. `generic_error` — our model failed to recover 1x
+99	- our failure modes: `visible_error_no_effective_recovery`x1
+100	- affected tasks: mcmc-sampling-stan
+101	- what our model did:
+102	  - `mcmc-sampling-stan`: ran `R CMD INSTALL --build --no-test-load rstan 2>&1 | tail -5`
+103	    got: `Warning: invalid package 'rstan' Error: ERROR: no packages specified `
+104	- what a successful recovery looks like on this error class:
+105	  - after `echo "=== hardened_daemon.cpp ==="
+106	cat /home/user/hardened_daemon.cpp
+107	echo ""
+108	echo "=== start_daemon.exp ==="
+109	` failed, recovered with **`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`** (1 turns to success)
+110	  - after `cd /home/user/sim && go build -o sim main.go && ./sim` failed, recovered with **`sed -n '38,45p' /home/user/sim/main.go`** (5 turns to success)
+111	  - after `cd /home/user/sim && go build -o sim main.go && echo "Build successful"` failed, recovered with **`cd /home/user/sim && nl -ba main.go | sed -n '65,85p'`** (6 turns to success)
+112	
+113	### A3. `module_not_found` — our model failed to recover 1x
+114	- our failure modes: `ignored_visible_error_repeated_action`x1
+115	- affected tasks: pytorch-model-cli
+116	- what our model did:
+117	  - `pytorch-model-cli`: ran `cd /app && python3 -c "
+118	import torch
+119	state_dict = torch.load('model.pth', map_location='cpu')
+120	for k, v in state_dict.items():
+121	    print(f'{k}: shape={v.shape}, dtype={v.dtype}')
+122	"`
+123	    got: `Traceback (most recent call last):   File "<string>", line 2, in <module>     import torch ModuleNotFoundError: No module named 'torch'  (exit 1)`
+124	- what a successful recovery looks like on this error class:
+125	  - after `python3 -c "import matplotlib" 2>&1 || pip install matplotlib` failed, recovered with **`cd /home/user/workspace && python3 mcmc.py`** (5 turns to success)
+126	  - after `python3 << 'PYEOF'
+127	import numpy as np
+128	import cv2
+129	import os
+130	
+131	# Create a synthetic experiment video - 50 frames ` failed, recovered with **`pip install opencv-python-headless 2>&1 | tail -5`** (6 turns to success)
+132	  - after `ls -la /home/user/workspace/libcustom_math.so && python3 -c "import matplotlib; print('matplotlib available')"` failed, recovered with **`pip install matplotlib -q`** (6 turns to success)
+133	
+134	### A4. `timeout` — our model failed to recover 1x
+135	- our failure modes: `visible_error_no_effective_recovery`x1
+136	- affected tasks: query-optimize
+137	- what our model did:
+138	  - `query-optimize`: ran `cd /app && sqlite3 -header -csv oewn.sqlite < my-sql-query.sql > /tmp/original_output.csv 2>&1`
+139	    got: `Error: Command timed out after 120 seconds`
+140	- what a successful recovery looks like on this error class:
+141	  - after `find /home/user/archive_mount -type f && echo "---" && cat /home/user/archive_mount/system.jsonl && echo "---"` failed, recovered with **`cat /home/user/done.txt && echo "" && find /home/user/archive_mount -name "*.tmp" -type f`** (2 turns to success)
+142	  - after `echo "=== system.jsonl ===" && cat /home/user/archive_mount/system.jsonl && echo "=== app/db.jsonl ===" && cat` failed, recovered with **`echo "=== Original files still exist ===" && ls -la /home/user/live_logs/app/db.log /home/user/live_logs/system.log /home/user/live_logs/web_ui/fronte`** (3 turns to success)
+143	  - after `cat /home/user/live_logs/app/db.log` failed, recovered with **`cat /home/user/live_logs/system.log && echo "---" && cat /home/user/live_logs/web_ui/frontend.log`** (8 turns to success)
+144	
+145	## Model-side failures (routed to SFT, not to you)
+146	
+147	- `visible_error_no_effective_recovery`: 4
+148	- `premature_stop_or_wrong_solution`: 1
+149	- `ignored_visible_error_repeated_action`: 1
+150	
+151	The model saw the error and did not recover. A harness edit can sometimes help here (by making recovery easier to reach — see the affordance gaps above), but the primary fix is training data, which is already being collected.

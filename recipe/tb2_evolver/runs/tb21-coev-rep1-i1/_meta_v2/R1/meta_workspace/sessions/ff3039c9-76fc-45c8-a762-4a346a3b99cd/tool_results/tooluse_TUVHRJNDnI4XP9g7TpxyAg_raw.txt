@@ -1,0 +1,74 @@
+507	def _extract_text(content: "str | list") -> str:
+508	    """Extract plain text from a content value (str or multimodal block list)."""
+509	    if isinstance(content, str):
+510	        return content
+511	    return " ".join(
+512	        block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+513	    )
+514	
+515	
+516	# ─── Multimodal token estimation ─────────────────────────────────────────────
+517	
+518	# Default estimates — users can override via monkeypatch or subclass.
+519	_DEFAULT_IMAGE_TOKENS = 1000  # ~Anthropic pricing: 1 token per 750 pixels
+520	_DEFAULT_AUDIO_TOKENS_PER_SEC = 25  # placeholder for audio blocks
+521	
+522	
+523	def estimate_block_tokens(block: dict) -> int:
+524	    """Estimate token cost of a single non-text content block.
+525	
+526	    Text blocks return 0 (counted by the BPE encoder in ``rough_token_count``).
+527	    Image blocks return ``_DEFAULT_IMAGE_TOKENS``.  Audio blocks estimate from
+528	    ``duration_seconds`` metadata.  Unknown types return a conservative 200.
+529	
+530	    Override this function or the module-level constants for more accurate
+531	    estimates tailored to your model provider.
+532	    """
+533	    btype = block.get("type", "")
+534	    if btype == "text":
+535	        return 0
+536	    if btype == "image":
+537	        return _DEFAULT_IMAGE_TOKENS
+538	    if btype == "audio":
+539	        duration = block.get("duration_seconds", 30)
+540	        return int(duration * _DEFAULT_AUDIO_TOKENS_PER_SEC)
+541	    return 200  # unknown modality fallback
+542	
+543	
+544	def rough_token_count(messages: "list[Message] | tuple[Message, ...]") -> int:
+545	    """Count tokens using tiktoken (cl100k_base) when available, else 4-char fallback.
+546	
+547	    Uses the cl100k_base encoding (GPT-4/Claude-compatible BPE). Accurate enough
+548	    for history truncation and budget checks. Not for billing — use provider
+549	    usage fields (ModelResponseEvent.usage) for exact counts.
+550	
+551	    Non-text content blocks (images, audio) are estimated via
+552	    ``estimate_block_tokens``.
+553	
+554	    Single source of truth: context processors, budget guards, and memory
+555	    backends call this function so they all use the same counting method.
+556	    """
+557	    enc = _TOKEN_ENCODER
+558	    total = 0
+559	    for m in messages:
+560	        text = _extract_text(m.content)
+561	        if enc is not None:
+562	            if text:
+563	                # Token counting is an internal budgeting heuristic. Conversation
+564	                # text may legitimately include literals that look like special
+565	                # tokens (e.g. "<|endoftext|>"). For counting we treat them as
+566	                # normal text instead of failing the whole run.
+567	                try:
+568	                    total += len(enc.encode(text, disallowed_special=())) + 4  # +4 for role/separator overhead
+569	                except TypeError:
+570	                    # Backward compatibility for encoder implementations without
+571	                    # the disallowed_special kwarg.
+572	                    total += len(enc.encode(text)) + 4
+573	        else:
+574	            total += len(text) // 4
+575	        # Count non-text blocks (images, audio, etc.)
+576	        if isinstance(m.content, list):
+577	            for block in m.content:
+578	                if isinstance(block, dict) and block.get("type") != "text":
+579	                    total += estimate_block_tokens(block)
+580	    return total

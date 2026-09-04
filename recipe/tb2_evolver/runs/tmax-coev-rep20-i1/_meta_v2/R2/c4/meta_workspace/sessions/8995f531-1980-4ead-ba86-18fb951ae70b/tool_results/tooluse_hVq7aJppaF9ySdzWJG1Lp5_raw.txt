@@ -1,0 +1,56 @@
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:131:class BeforeModelEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:132:    type: str = field(default="before_model", init=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:133:    messages: tuple[Message, ...] = ()
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:134:    tools: tuple[ToolSchema, ...] = ()
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:135:    cumulative_cost_usd: float = 0.0  # needed by CostGuardProcessor
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:136:    skip_model: bool = field(default=False, hash=False, compare=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:137:    synthetic_output: str = field(default="", hash=False, compare=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:138:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:139:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:140:@dataclass(frozen=True)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:141:class ModelResponseEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:142:    type: str = field(default="model_response", init=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:143:    content: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:144:    thinking: str = ""  # extended thinking / reasoning content from the model
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:145:    thinking_blocks: tuple = ()  # raw provider blocks (with signatures) for multi-turn replay
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:146:    tool_calls: tuple[ToolCall, ...] = ()
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:147:    finish_reason: str = "end_turn"
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:148:    usage: Usage = field(default_factory=Usage)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:149:    model: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:150:    attempted_models: tuple[str, ...] = ()  # models tried before this one (ProviderGroup fallback)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:151:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:152:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:153:@dataclass(frozen=True)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:154:class ToolCallEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:155:    type: str = field(default="tool_call", init=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:156:    tool_name: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:157:    tool_input: dict = field(default_factory=dict)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:158:    tool_call_id: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:159:    approved: bool = True
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:160:    synthetic_result: str | None = None
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:161:    """When set alongside approved=False, the RunLoop injects this as the
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:162:    ToolResultEvent result instead of sending "Tool call not approved."
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:163:    Processors can use this to intercept tool calls and inject custom results.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:164:    """
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:165:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:166:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:167:@dataclass(frozen=True)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:168:class ToolResultEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:169:    type: str = field(default="tool_result", init=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:170:    tool_name: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:171:    tool_call_id: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:172:    result: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:173:    error: str | None = None
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:174:    duration_ms: float = 0.0
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:175:    content_blocks: tuple = field(default=(), hash=False, compare=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:176:    # Native multimodal blocks (Anthropic content format) from MCP tools.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:177:    # Empty tuple = text-only result; processor chain passes this through unchanged.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:178:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:179:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:180:@dataclass(frozen=True)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:181:class StepEndEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:182:    type: str = field(default="step_end", init=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:183:    step_summary: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:184:    tool_call_summary: str = ""  # "tool1(args)|tool2(args)" — used by LoopDetectionProcessor
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:185:    cumulative_tokens: int = 0
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:186:    cumulative_cost_usd: float = 0.0

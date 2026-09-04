@@ -1,0 +1,50 @@
+16:    BeforeModelEvent,
+102:def _append_user_interrupted_message(state: State) -> None:
+105:    The message is written into the factual track (`raw_messages`) so the
+109:    if state.raw_messages:
+110:        last = state.raw_messages[-1]
+113:    state.add_raw_message(Message(role="assistant", content=_USER_INTERRUPTED_MESSAGE))
+149:    trajectory = StatefulTrajectory(run_id=state.run_id)
+152:        state.parent_run_id = parent_run_id
+165:            del state._pending_command_prompt  # type: ignore[attr-defined]
+176:            del state._pending_command_allowed_tools  # type: ignore[attr-defined]
+189:        run_id=state.run_id,
+222:    # state.last_sys_prompt_hash persists in snapshots so this works after restart.
+224:    if state.last_sys_prompt_hash is not None and state.last_sys_prompt_hash != _new_sys_hash:
+226:        # closing the crash window where step_state.json would have the old hash.
+227:        state.last_sys_prompt_hash = _new_sys_hash
+229:            run_id=state.run_id,
+230:            step_id=state.step,
+233:            state_snapshot=state.snapshot(),
+234:            compacted_messages=tuple(state.messages),
+235:            compacted_raw_messages=tuple(state.raw_messages),
+238:        state.run_id = _sp_boundary.new_run_id
+239:        start_event = dataclasses.replace(start_event, run_id=state.run_id)
+241:        state.last_sys_prompt_hash = _new_sys_hash
+243:    # inherits this value; on_step_start processors must NOT modify it.
+257:            if state.budget_exceeded():
+261:            step_id = state.step
+292:                        for k, v in state.slots.items()
+294:                    cumulative_tokens=state.cumulative_tokens,
+295:                    cumulative_cost_usd=state.cumulative_cost_usd,
+302:                run_id=state.run_id,
+304:                raw_messages=tuple(state.raw_messages),
+305:                messages=tuple(state.messages),
+310:                system_prompt=task_system_prompt,  # frozen by on_task_start; never modified by on_step_start
+311:                token_count=rough_token_count(list(state.messages)),
+314:            _pre_step_msgs = step_start_event.messages or tuple(state.messages)
+348:                    run_id=state.run_id,
+354:                    compacted_raw_messages=tuple(step_start_event.raw_messages or _post_step_msgs),
+362:            # Handle segment boundary: update state.run_id and notify tracer
+365:                state.run_id = boundary.new_run_id
+367:                    state.raw_messages = list(boundary.compacted_messages)
+368:                    state.messages = list(boundary.compacted_messages)
+375:            _assembled = step_start_event.messages or tuple(state.messages)
+379:                # On resume, state.messages may retain a system from a prior session;
+384:            before_event = BeforeModelEvent(
+385:                run_id=state.run_id,
+389:                cumulative_cost_usd=state.cumulative_cost_usd,
+398:                (e for e in reversed(_bm_events) if isinstance(e, BeforeModelEvent)),
+406:                    run_id=state.run_id,
+425:                    run_id=state.run_id,
+447:            state.cumulative_tokens += model_event.usage.total_tokens

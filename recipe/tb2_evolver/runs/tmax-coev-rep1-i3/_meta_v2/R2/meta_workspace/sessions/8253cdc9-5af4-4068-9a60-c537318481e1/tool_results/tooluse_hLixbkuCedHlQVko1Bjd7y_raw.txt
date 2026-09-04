@@ -1,0 +1,66 @@
+### Uncertainty
+
+Looser cap may push the per-round bill up ~10%. If R4 pass_rate
+drops while cost climbs, revert.
+```
+=== head ===
+---
+name: journal
+description: Cross-round journal format — the multi-round memory that tells the next meta-agent what's been tried, what landed, and what got reverted. One `## Round N` section per evolve, with machine-parseable YAML frontmatter + free prose body. Read at the start of every evolve to avoid re-discovering doomed hypotheses; append one new section before stopping.
+---
+
+# Journal — cross-round memory
+
+A markdown file (the caller passes its path as `memo_path`). Each
+evolve appends one `## Round N — <label>` section. The file is the
+meta-agent's only memory across rounds — there is no persistent
+conversation, and the orchestrator fills in gating outcomes between
+rounds so the next agent can see which past bets paid off.
+
+The orchestrator pre-renders a machine index at
+`_meta_scratch/CONTEXT.md` (when the journal has prior entries):
+lever scoreboard, recent hypotheses, reverted bets. Read that
+first — it's a cheap way to see what's been tried without scanning
+the full journal prose.
+
+## On entry — read once
+
+1. `Read <memo_path>` — full cross-round history, prose included.
+2. `Read _meta_scratch/CONTEXT.md` (when present) — compact index of
+   lever usage, attribution, and reverted hypotheses.
+
+Look for:
+- Hypotheses with `gating_outcome: reverted` → do not re-propose
+  without new evidence (hard invariant #4 variant).
+- The lever scoreboard's prediction hit rate → if Action landed
+  1/12 times while Instruction landed 4/6, update your prior.
+- Outstanding `needs_from_human` items (free-prose; scan for them).
+
+## On exit — append one section
+
+Required shape:
+
+```markdown
+## Round N — <short label in 2-5 words>
+
+<!-- journal:frontmatter
+round: N
+timestamp: 2026-04-27T15:30:00Z    # ISO-8601 UTC; orchestrator can override
+hypothesis_id: h_<short slug>      # stable across related rounds
+levers: [action]                   # subset of {configuration, control, action, instruction}
+predicted_affected: [task_a, task_b]
+gating_outcome: pending             # orchestrator back-fills next round
+gating_attribution: pending         # orchestrator back-fills next round
+expected_global_gain: "<one-line cluster-level upside>"
+regression_risk: "<main risk outside predicted_affected>"
+cost_shift: "<expected token/cost delta or direction>"
+rollback_trigger: "<observable signal to revert next round>"
+-->
+
+### Why
+
+One paragraph on the pattern that motivated the round — the
+cluster of trajectories and the shape they share.
+
+### Changes
+

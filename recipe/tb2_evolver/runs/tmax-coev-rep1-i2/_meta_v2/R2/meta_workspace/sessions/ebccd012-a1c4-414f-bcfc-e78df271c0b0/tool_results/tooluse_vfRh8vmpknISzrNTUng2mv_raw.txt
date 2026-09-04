@@ -1,0 +1,68 @@
+1	## Round 1 — break small-max_tokens truncation loop
+2	
+3	<!-- journal:frontmatter
+4	round: 1
+5	timestamp: 2026-08-16T17:30:00Z
+6	hypothesis_id: h_length_recovery_v3
+7	levers: [control]
+8	predicted_affected: [task_000740_59416444, task_001032_1adaccb9, task_000396_e56917e2, task_000028_7fe033ac, task_001653_c4cafa73, task_000015_89886d8d, task_000958_4bb2b05d]
+9	cited_candidates: [C-001]
+10	gating_outcome: accepted
+11	gating_attribution: score=28/50; +2/-4 gained=task_000396_e56917e2,task_000740_59416444 lost=task_001031_a8f0eb37,task_001090_c61c71f2,task_001536_acfe6c35,task_001818_b251e5ea; score 0.5600 >= incumbent(mean) 0.6000 - tol 0.0400
+12	expected_global_gain: "Rescues the small-max_tokens truncation-repetition cluster (7-8 failing tasks, 4 pure budget_exceeded step-burns) by replacing the run loop's counter-productive passive 'continue' nudge with an actionable one."
+13	regression_risk: "Low — trigger only fires on no-tool-call finish_reason==length turns; passing r0 tasks never hit that (their turns are <1600 chars and all carry tool calls). Contract-checked clean."
+14	cost_shift: "Net reduction expected: target tasks currently grind to 80 steps / 300-1350s in the loop; breaking it earlier cuts tokens and wall-clock on the most expensive runs."
+15	rollback_trigger: "If R2 pass_rate does not improve AND the budget_exceeded cluster (740/396/028/958) is unchanged, or any previously-passing task regresses to a truncation loop, revert to v2."
+16	-->
+17	
+18	### Why
+19	
+20	r0 = 30/50. Of the 20 failures, 4 are `budget_exceeded` @ 80 steps, 1
+21	`loop_detected`, 15 `done`-but-wrong. The single largest *harness-addressable*
+22	cluster is a small-`max_tokens` truncation-repetition loop: the model emits a
+23	long narration, the provider cuts it off at ~2000 chars (`finish_reason=length`,
+24	no tool call), the run loop appends a passive "Your previous response was cut
+25	off by the token limit. Please continue from where you left off." user message,
+26	and the model regenerates the *identical* paragraph — looping for dozens of
+27	steps. Passive-nudge counts: task_000740→11, task_001032→17, task_000396→10,
+28	task_000028→5, task_001653→5, task_000015→3, task_000958→3.
+29	
+30	The existing `LengthTruncationRecoveryProcessor` (v2) was inert on this model:
+31	its `content_char_threshold` of 40000 could never match ~2000-char content, and
+32	its `on_before_model` *appended* a corrective message — which the before_model
+33	contract drops when the last role is already `user` (it is, because the run loop
+34	just appended the passive nudge). So the actionable nudge never reached the
+35	model; the passive re-priming message stayed the last thing it read.
+36	
+37	### Changes
+38	
+39	- `processors/length_recovery.py` — v3: `on_before_model` now *rewrites the
+40	  last user message's content* (the passive "continue" nudge) into an actionable
+41	  "stop narrating, run ONE command" directive when a truncation streak is armed
+42	  (contract-safe len_delta 0); falls back to a +1 append only when the last role
+43	  is not `user`. Trigger still keys on `finish_reason==length` (reliable here).
+44	- `config.yaml` — repoint the `LengthTruncationRecoveryProcessor` `_target_`
+45	  from the R0 v2 asset to the new R1 v3 file; kwargs unchanged.
+46	- `system_prompt.txt` — copied byte-for-byte from R0 (sidecar for
+47	  SiblingSystemPromptBuilder; identical to DEFAULT so no prompt drift).
+48	
+49	### Evidence
+50	
+51	- `task_000740_59416444.messages.json`: assistant turns 11,13,35,39,43,47,51,
+52	  58,62,66 are exactly 2001 chars with no tool call; each followed by a
+53	  persisted user msg "...cut off by the token limit. Please continue..."; the
+54	  next assistant turn re-emits the identical "I've been stuck in a loop..."
+55	  paragraph. `exit_reason=budget_exceeded` @ step 80, 1350s.
+56	- `task_001032_1adaccb9`: 17 passive nudges, 51 steps, 1018s, still wrong.
+57	- `task_000396_e56917e2`: 10 passive nudges, budget_exceeded @ 80 steps, 1248s.
+58	- Max assistant content across task_000740 = 2001 chars ≪ v2 threshold 40000
+59	  (v2 char branch structurally cannot fire on this model).
+60	
+61	### Uncertainty
+62	
+63	The underlying answer may still be wrong on some of these tasks even after the
+64	loop is broken (e.g. task_000740's window-function logic bug). But freeing the
+65	wasted step budget gives the model turns to self-correct instead of grinding to
+66	the cap, and 4 of the cluster are pure step-burns. If R2 shows no movement on
+67	the budget_exceeded set, the loop-break is not the binding constraint — revert
+68	and look upstream at the model's reasoning-length habit.

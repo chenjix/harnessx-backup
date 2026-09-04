@@ -1,0 +1,134 @@
+1	# Evolve Journal — tmax-coev-rep20-i1
+2	
+3	## Round 1 — cyclic loop hard-stop
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_cyclic_loop_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_000028_7fe033ac, task_000206_a943669b, task_000010_644ab1c2, task_000264_ab8c7253, task_000536_9c16e8ef]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=2/50; +0/-3 lost=task_000344_e265c898,task_000912_770802f8,task_001781_529727cf; gating disabled (tolerance < 0)
+14	expected_global_gain: "Hard-stops the dominant budget_exceeded@80-steps cluster (~35/49 R0 tasks) that stall in no-progress repeat loops; reclaims wall-clock/step budget and forces one replan before exit"
+15	regression_risk: "A legitimate task issuing the same 1-4 command block 4x consecutively with no interleaving would be terminated early; kept low via whitespace-normalized fingerprints, 24-slot window, raise_reps=4"
+16	cost_shift: "Strongly negative — stalled tasks cut from 80 steps to ~step 12-16 (roughly 4-5x cheaper on the stall cluster); no cost added to healthy tasks"
+17	rollback_trigger: "R1 pass_rate < R0, OR any R0-passing task (task_000587, task_000748, task_000912, task_000344, task_001781) flips to exit_reason=loop_detected"
+18	-->
+19	
+20	### Why
+21	
+22	The dominant R0 failure mode is `exit_reason=budget_exceeded` at exactly
+23	80 steps — ~35 of 49 tasks. Body inspection of the assigned failing task
+24	(`task_000028`) and four other representatives shows the same mechanism: a
+25	weak model gets stuck in a **no-progress repeat loop** and burns the full
+26	step/wall-clock budget (500-780s each). The loops vary in period:
+27	task_000028 is a period-3 cycle (`rm/touch sock` → `run server` → `cat
+28	log`, ~8x); task_000206 is a period-2 cycle (piped vs un-piped grep);
+29	task_000010 and task_000264 are period-1 exact loops (identical command
+30	16x). The existing `LoopDetectionProcessor` isn't even in the pipeline, and
+31	its exact-consecutive strategy cannot detect period>1 cycles at all; the
+32	soft `CustomEditToolProcessor` warning fired once on task_000028 and the
+33	model ignored it verbatim while continuing to loop. Soft nudges are
+34	ineffective for this model — a mechanical hard-stop is required.
+35	
+36	### Changes
+37	
+38	- `processors/cyclic_loop_guard.py` — new `CyclicLoopGuard`
+39	  `MultiHookProcessor`: fingerprints each Bash command
+40	  (whitespace-normalized), detects a repeating tail cycle of period 1..4,
+41	  warns once at 3 reps, raises `LoopDetectedError` at 4 reps → clean
+42	  `exit_reason=loop_detected`.
+43	- `config.yaml` — register `CyclicLoopGuard` (max_period=4, warn_reps=3,
+44	  raise_reps=4, window_size=24) after `LengthTruncationRecoveryProcessor`.
+45	
+46	### Evidence
+47	
+48	- `task_000028_7fe033ac` result.json: `exit_reason=budget_exceeded`,
+49	  steps=80, elapsed=550.7. messages show the 3-command block
+50	  (`rm -f /tmp/video_backend.sock && touch … && ls` / `/app/server >
+51	  /app/server.log 2>&1 &` / `sleep 1 && cat /app/server.log`) repeated ~8x.
+52	- `task_000206_a943669b` last 16 cmds: `grep "session_id=EVIL_ACTOR_007"
+53	  … | grep "Source-IP:"` alternating with the un-piped grep — period-2.
+54	- `task_000010_644ab1c2` last 16 cmds: identical `python3 -c "import
+55	  socket…"` 16x — period-1.
+56	- `task_000264_ab8c7253` last 16 cmds: identical `sqlite3 … EXPLAIN QUERY
+57	  PLAN …` 16x — period-1.
+58	- Offline unit test of the processor: period-3 raises at step 11, period-2
+59	  at step 7, period-1 at step 3; 12 distinct commands never raise/warn;
+60	  "3x then break" warns but does not raise (transient repetition survives).
+61	
+62	### Uncertainty
+63	
+64	The change reclaims budget and forces one replan warning; it does not fix
+65	the underlying model reasoning bugs, so a stall task only *passes* if the
+66	loop was masking an otherwise-recoverable state. The net-positive bet is on
+67	(a) reclaimed benchmark wall-clock/steps and (b) the forced-replan second
+68	chance. If R1 pass_rate does not improve and no cost benefit materializes,
+69	or a passing task regresses to `loop_detected`, revert per rollback_trigger.
+70	
+71	## Round 1 — output-stall recovery (proposal c1)
+72	
+73	<!-- journal:frontmatter
+74	round: 1
+75	timestamp: 2026-06-01T00:00:00Z
+76	hypothesis_id: h_output_stall_recovery_v1
+77	levers: [control]
+78	predicted_affected: [task_000015_89886d8d, task_000010_644ab1c2, task_000505_50b5162d, task_000684_1a33ef37, task_000958_4bb2b05d, task_001031_a8f0eb37, task_001090_c61c71f2, task_001498_df8254c9, task_001652_86e1d185, task_001673_86224c91, task_001818_b251e5ea, task_000578_cebe85a5, task_000536_9c16e8ef, task_001089_220cc46b, task_000760_76ba653c, task_000818_315382d9, task_000933_1f27096a, task_001321_658ce4a8, task_001701_95e3bbcb, task_000024_a0664029]
+79	cited_candidates: [C-001]
+80	gating_outcome: pending
+81	gating_attribution: pending
+82	expected_global_gain: "Attacks the dominant budget_exceeded cluster from the OUTPUT side: ~20/50 tasks show >=7 consecutive byte-identical tool results (task_000015 has 33). Warn@3 + hard@6 surfaces 'no new information' in-context so the model changes approach or finishes, plausibly flipping the subset whose stall was the only blocker."
+83	regression_risk: "A passing task that legitimately repeats a command with identical output >=3x gets an ignorable advisory appended to the result — no forcing, no termination. Only observed such case is passing task_000344_e265c898 (result run=7, read-only spin after reward-earning work landed); warn-only design keeps it passing."
+84	cost_shift: "Net negative (cheaper): recovered stalls terminate well below 80 steps; the appended note is tiny vs a full 80-step loop."
+85	rollback_trigger: "If R2 pass_rate is flat/down AND no budget_exceeded task in predicted_affected flips, or any previously-passing task regresses, revert."
+86	-->
+87	
+88	### Why
+89	
+90	The single dominant R0 failure is `budget_exceeded` at 80 steps (~35/50 tasks).
+91	Assigned task `task_000015_89886d8d` is the archetype: the agent re-ran the exact
+92	same `tesseract /app/routing_schema.png /raw --psm 6` command ~33 times, each
+93	returning the identical `Invalid resolution 0 dpi. Using 70 instead` warning and
+94	no usable text, while narrating "Let me try with a different approach" every turn
+95	— and never wrote the required `/home/user/migrate.py` or `test_parser.py`. The
+96	distinguishing, non-obvious signal is that the tool RESULT is byte-identical turn
+97	after turn — the agent cannot perceive that its new output equals its last output.
+98	This is broader than input-repetition: task_000024_a0664029 varies its command but
+99	the result stream is still identical (run=27), which a pure input-fingerprint loop
+100	detector would miss. A sibling proposal in this batch owns the input-side
+101	terminate-based cyclic loop guard (h_cyclic_loop_guard_v1); this proposal is the
+102	complementary, non-colliding output-side, warn-only mechanism.
+103	
+104	### Changes
+105	
+106	- `processors/output_stall_recovery.py` — new `OutputStallRecoveryProcessor`
+107	  (`MultiHookProcessor`). `on_after_tool` hashes each non-empty tool result; on
+108	  `warn_threshold` (3) consecutive identical results it appends a corrective note
+109	  to the result, escalating to a harder note at `hard_threshold` (6). Warn-only —
+110	  never raises. Compaction-aware reset in `on_step_start`.
+111	- `config.yaml` — registered the processor last in the pipeline via absolute
+112	  `file://...::OutputStallRecoveryProcessor` (warn 3, hard 6, min_result_chars 1,
+113	  compaction_drop 5). No other pipeline change.
+114	
+115	### Evidence
+116	
+117	- `task_000015_89886d8d` result.json: `exit_reason=budget_exceeded`, `steps=80`;
+118	  messages.json: identical `tesseract` result string repeated ~33x (result run=33);
+119	  final_pytest fails "Migration script not found at /home/user/migrate.py".
+120	- Cluster scan of all 50 trajectories: `max_identical_result_run >= 7` on ~20
+121	  tasks, == full visible window (33) on ~14.
+122	- `task_000024_a0664029`: input command varies (input run=27) yet result run=27
+123	  — output detection fires where input fingerprinting would not.
+124	- `task_000344_e265c898` (PASSING, reward=1, result run=7): warn-only design
+125	  appends an ignorable note and leaves the pass intact.
+126	
+127	### Uncertainty
+128	
+129	The warn note relies on the model reading and acting on an in-result advisory. If
+130	the model ignores it, the freed-budget benefit only materializes when it also
+131	self-terminates — worst case is no change vs R0 (still budget_exceeded), not a
+132	regression, since we never force or terminate. If R2 shows zero flips in the
+133	predicted cluster, the lever is under-powered and should be combined with (not
+134	replaced by) the input-side terminate guard.

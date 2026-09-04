@@ -1,0 +1,118 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	#
+16	# R2 SYNTHESIS (c4 ⊕ c1): the pivot scores (c4=0.46, c1=0.38 vs R0=0.50)
+17	# were depressed by docker container-name-conflict infra errors counted as
+18	# failures. On real (status=ok) agent outcomes, c4 is net +4 and c1 net +2.
+19	# This config keeps c4's strongest mechanism (IterativeVerifyGate) and adds
+20	# c1's genuinely-complementary EXACT-repeat loop guard, while neutralising
+21	# the noisy name-only warn that caused c1's only real regressions.
+22	
+23	tool_registry:
+24	  builtin:
+25	  - Bash
+26	  custom: []
+27	tracer: null
+28	processors:
+29	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+30	  system_builder:
+31	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+32	  _hook_: '*'
+33	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+34	  working_dir: /home/user
+35	  constraints: {}
+36	  header: Environment
+37	  max_tree_lines: 20
+38	  non_interactive: true
+39	  inject_integrity_rules: true
+40	  show_project_dir: false
+41	  _hook_: '*'
+42	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+43	  tool_schemas: {}
+44	  _hook_: '*'
+45	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+46	  warn_at:
+47	  - 0.7
+48	  - 0.9
+49	  _hook_: '*'
+50	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+51	# Without this, one stuck task can block an entire evolve round.
+52	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+53	  repeat_threshold: 2
+54	  head_chars: 1200
+55	  tail_chars: 600
+56	  _hook_: '*'
+57	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+58	  token_threshold: 140000
+59	  message_threshold: 100
+60	  retention_window: 6
+61	  eviction_fraction: 0.5
+62	  summarize_key: summarize
+63	  preserve_first_message: true
+64	  _hook_: '*'
+65	# C-001 — SYNTHESIS from the c1 lineage. Degenerate EXACT-repeat loop guard.
+66	# c1 uniquely (and genuinely, status=ok) solved task_000338 by warning the
+67	# agent out of a byte-identical Bash loop just before it committed the
+68	# correct answer; R0's dup-command-heavy FAIL cluster (190 dup-commands on
+69	# FAIL vs 96 on PASS, per the R1 journal) shares this shape. Strategy 1
+70	# (exact fingerprint) warns at 4 consecutive identical calls and hard-raises
+71	# LoopDetectedError at 12 — 12 sits above the max observed transient-recover
+72	# run (11, e.g. task_001591) AND above every c4 gain's max exact-identical
+73	# run (740=1,1264=1,1498=1,1673=7,1706=9), so it cannot cut those short.
+74	# CRITICAL DIFFERENCE FROM c1: Strategy 2 (name-only warn) is DISABLED via a
+75	# very high name_warn_threshold. This benchmark is Bash-only, so name-only
+76	# fingerprints match on EVERY consecutive Bash call regardless of arguments;
+77	# in c1 that warn fired on legitimate long-horizon work and made the agent
+78	# prematurely quit — the sole cause of c1's two real losses (task_001536,
+79	# task_001652). Disabling it repairs that regression while preserving the
+80	# high-precision exact-repeat mechanism that produced c1's unique solve.
+81	- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+82	  window_size: 16
+83	  warn_threshold: 4
+84	  threshold: 12
+85	  name_warn_threshold: 100000
+86	  compaction_drop_threshold: 5
+87	  _hook_: '*'
+88	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+89	  max_consecutive_errors: 1
+90	  _hook_: '*'
+91	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+92	  drop_threshold: 5
+93	  _hook_: '*'
+94	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+95	  _hook_: '*'
+96	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+97	  threshold: 7
+98	  _hook_: '*'
+99	# C-002 — SYNTHESIS from the c4 lineage. Replaces the stock one-shot
+100	# CustomSelfVerifyProcessor with a bounded, work-aware completion gate.
+101	# Re-nudges a no-tool-call exit up to max_nudges times, but ONLY when the
+102	# agent tried to exit without having run a real verification command since
+103	# the last nudge (bare "task complete" assertions or stuck-loop text exits).
+104	# If the agent actually ran verification commands after being nudged, the
+105	# gate steps aside. c4 flipped 5 R0 failures with this (740,1264,1498,1673,
+106	# 1706). Its one real regression (965: gate re-nudged an already-correct
+107	# solution into over-editing) is bounded by max_nudges=2 and further guarded
+108	# by the exact-repeat loop detector above.
+109	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R2/c1/processors/iterative_verify_gate.py::IterativeVerifyGate
+110	  max_nudges: 2
+111	  _hook_: '*'
+112	workspace: null
+113	workspace_template: default
+114	init_workspace: false
+115	step_snapshots: true
+116	sandbox_provider: null
+117	sandbox_hint_id: null
+118	plugins: []

@@ -1,0 +1,68 @@
+1	# Evolve journal — tmax-coev-rep25-i1
+2	
+3	## Round 1 — add file-edit builtins
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-09-04T00:56:27Z
+8	hypothesis_id: h_file_tools_v1
+9	levers: [action, instruction]
+10	predicted_affected: [task_000118_3043e92d, task_000015_89886d8d, task_001032_1adaccb9]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=23/50; +5/-7 gained=task_000740_59416444,task_001264_9f4ca84a,task_001498_df8254c9,task_001673_86224c91 lost=task_000536_9c16e8ef,task_000684_1a33ef37,task_000912_770802f8,task_000956_7e92337f; score 0.4600 >= incumbent(mean) 0.5000 - tol 0.0400
+14	expected_global_gain: "Cuts heredoc whole-file-rewrite loops across software_engineering/file_operations clusters; gives a direct, gate-friendly write/edit path so file-authoring tasks stop burning toolcalls on shell quoting."
+15	regression_risk: "New tools shift the action distribution on tasks that already pass with Bash-only; agent could pick Write/Edit where a shell op was cleaner. Low — Bash stays available and the prompt note is soft guidance."
+16	cost_shift: "Expected net token DECREASE on file-heavy tasks (no repeated multi-line heredoc bodies); small prompt-token increase (+1 sentence) on all tasks."
+17	rollback_trigger: "If R2 pass_rate is flat/down AND dup-command counts or edit-warning counts do not fall vs R0, revert the tool-surface change."
+18	-->
+19	
+20	### Why
+21	
+22	R0 (reward 0.500) failure clusters are dominated by heredoc-based
+23	whole-file rewrites and duplicate-consecutive-command repetition
+24	loops. FAIL clusters showed 190 dup-commands / 28 EditDetection
+25	warnings vs 96 / 1 on PASS. The anchor `task_000118_3043e92d`
+26	(reward 0, 31 toolcalls, 8 heredocs) and `task_000015_89886d8d`
+27	(33 identical `tee ... << PYEOF` calls, a fully stuck loop) both
+28	manifest the same shape: the only file-authoring path is Bash
+29	heredoc, which is token-heavy, quoting-fragile, and trips the
+30	EditDetection guard on body tokens. The Tmax evolve path honors
+31	`tool_registry` from YAML (unlike pure-Harbor TB2), so we can give
+32	the agent real file tools.
+33	
+34	### Changes
+35	
+36	- `config.yaml` — add builtin `Write`, `Edit`, `Read` to
+37	  `tool_registry.builtin` (alongside existing `Bash`). All route
+38	  through the active sandbox's base64 `write_file`/`read_file`.
+39	- `system_prompt.txt` (sibling of config, read by
+40	  `SiblingSystemPromptBuilder`) — one general sentence steering the
+41	  agent to prefer Write for whole files / Edit for targeted changes
+42	  / Read for inspection over shell heredocs. General strategy, no
+43	  task-specific literals.
+44	
+45	### Evidence
+46	
+47	- `task_000118_3043e92d`: reward 0, 31 toolcalls, 8 heredocs;
+48	  EditDetection fired on garbage body tokens (`=`, `SIZE_THRESHOLD:`)
+49	  instead of the real target `/home/user/deployment_monitor.py`.
+50	- `task_000015_89886d8d` (software_engineering, FAIL): all 33
+51	  toolcalls identical `tee /tmp/ocr.py << 'PYEOF'`, 32 dups, 6 edit
+52	  warnings — stuck loop.
+53	- `task_001032_1adaccb9` (file_operations, FAIL): 10 heredocs, 2
+54	  warnings.
+55	- R0 config already contains `LengthTruncationRecoveryProcessor`
+56	  (repeat recovery) yet loops persisted → the missing mechanism is
+57	  the write ergonomics, not just loop nudging.
+58	
+59	### Uncertainty
+60	
+61	The direct tools address write ergonomics but may not fully break
+62	the repetition-loop failure mode (the stronger FAIL discriminator);
+63	the existing LengthTruncationRecoveryProcessor is the only loop
+64	guard and it did not prevent R0 loops. If dup-command counts stay
+65	high in R2 despite the new tools, the next round should target loop
+66	detection directly (a stuck-command interceptor) rather than tool
+67	surface. Validated: canonicalize ok, dry_fire ok (0 likely bugs),
+68	literals ok (0 findings).

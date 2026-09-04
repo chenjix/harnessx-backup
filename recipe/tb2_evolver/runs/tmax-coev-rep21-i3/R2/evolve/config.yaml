@@ -1,0 +1,106 @@
+# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+#
+# Live surfaces MetaAgent may edit:
+#   - processors (this file)
+#   - tool_registry (this file)
+#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+#
+# Runtime-only slots (sandbox_provider, tracer) are injected by
+# recipe.tmax_eval.harness_runner — do not put them here.
+#
+# Per-call output cap is NOT in this YAML: harness_runner sets
+# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+# runaway generation cannot burn an hour of wall-clock on one task.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /home/user
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  show_project_dir: false
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at:
+  - 0.7
+  - 0.9
+  _hook_: '*'
+# Break max_tokens repetition loops (finish_reason=length, no tool call).
+# Without this, one stuck task can block an entire evolve round.
+#
+# R2 change (C-001): the stock v4 recovery only collapses the runaway turn and
+# rewrites the passive "continue" nudge with actionable TEXT. R1 trajectories
+# prove the 4B model narrates straight past that text directive: on the
+# budget_exceeded cluster (task_000015 11 truncations, task_001717 16,
+# task_001706 9, task_000936 7, task_001898 6) the v4 nudge text appears zero
+# times in the final transcript while the model spins until the whole step
+# budget is gone. v5 keeps the collapse + text ladder but, after
+# force_action_threshold consecutive truncations, mechanically injects a real
+# generic Bash workspace-snapshot tool call so FRESH tool output the model did
+# not author lands in context and breaks the narration spiral. Fires at most
+# once per streak; bounded one Bash round-trip only on runs already spiralling.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep21-i3/_meta_v2/R2/c1/processors/length_recovery_forceact.py::LengthTruncationRecoveryProcessor
+  repeat_threshold: 2
+  force_action_threshold: 3
+  head_chars: 400
+  tail_chars: 0
+  content_char_threshold: 40000
+  _hook_: '*'
+# Break IDENTICAL-tool-call repetition loops (agent re-issues the byte-for-byte
+# same Bash call every step, e.g. a stuck `pkill`/`nc` command returning
+# exit 143, until the step budget is exhausted). Strategy-1 injects an escalating
+# "you are stuck, try something different" nudge into the tool result once a call
+# repeats warn_threshold times consecutively; the hard raise (LoopDetectedError,
+# caught cleanly by the run loop as exit_reason=loop_detected) is set high so it
+# only fires on pathological runaway loops, sparing legitimate long identical
+# runs (e.g. repeated identical SQL queries in already-passing tasks).
+- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+  window_size: 12
+  warn_threshold: 3
+  threshold: 40
+  name_warn_threshold: 8
+  compaction_drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

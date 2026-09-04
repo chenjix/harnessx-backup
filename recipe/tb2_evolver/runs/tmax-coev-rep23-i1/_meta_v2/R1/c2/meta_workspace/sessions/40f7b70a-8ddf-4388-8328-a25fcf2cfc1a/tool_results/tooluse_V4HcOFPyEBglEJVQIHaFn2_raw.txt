@@ -1,0 +1,91 @@
+===CANDIDATES===
+# Candidates — Round 1 (focus: task_000028_7fe033ac)
+
+## Candidate C-001
+[lens: failure | lever: control | intent: corrective]
+
+Add a one-shot `VerifierClientReadyProcessor` that, on network-service tasks
+whose description mentions an automated verifier, reminds the agent to make the
+standard Python HTTP client (`requests`) importable before finishing.
+
+- Tasks affected: task_000028_7fe033ac, task_000958_4bb2b05d
+- Signal: both `reward=0` with `final_pytest.passed=false`; the pytest tail on
+  BOTH is identical structural failure:
+  `test_final_state.py:6: import requests` →
+  `E ModuleNotFoundError: No module named 'requests'` →
+  `Interrupted: 1 error during collection`. Grep over all 21 failing tasks:
+  exactly these two carry `No module named 'requests'`.
+- Verified (Read):
+  - task_000028 messages.json: agent fully solved the task — fixed nginx.conf
+    to `/tmp/video_backend.sock`, rewrote/compiled `server.cpp`, ran it in
+    background, created logrotate.conf, started nginx, and the final HTTP probe
+    through the proxy returned `HTTP/1.1 200 OK ... 150` (step ~841). Agent
+    exited `no_tool_calls` / `exit_reason=done`. The ONLY reason reward=0 is the
+    verifier's `import requests` crashing at collection (result.json
+    final_pytest tail). The agent never installed `requests` and had no way to
+    know the verifier needed it.
+  - task_000958 messages.json: agent built the C++ HTTP microservice on
+    `127.0.0.1:9090`, tested endpoints with `curl` and got valid responses;
+    result.json final_pytest tail shows the same `import requests` /
+    `ModuleNotFoundError` collection failure at `test_final_state.py:4`. (Agent
+    also hit `budget_exceeded`, but the verifier-import blocker is independent
+    and would sink the task regardless.)
+- Why Control not Instruction: the base system prompt (SiblingSystemPromptBuilder)
+  is static and shared by every task; embedding "install requests" there would
+  fire on all tasks (cost + noise on non-service tasks) and is an untargeted
+  prompt patch. A Control processor conditions the nudge on the task
+  description (network-service shape AND a verifier mention), firing once and
+  only where the failure class lives. It also keeps the reminder as a *strategy*
+  (ensure the client is importable) rather than task-specific code.
+- Why Control not Action: TB2 exposes only `Bash` and the benchmark evaluator
+  will not honor added tools; the agent already has the capability to install a
+  package via Bash — the gap is that it does not *know* the verifier needs it.
+  Control injects that missing runtime context; no new action space is required.
+- Retroactive check (A-corrective): yes. task_000028's service was already
+  fully working at exit; had `requests` been importable in the container, the
+  verifier would have collected and run `test_final_state.py` against a
+  200-OK service returning the correct frame count. The reminder fires on step 1
+  (both descriptions match `_SERVICE_RE` + `_VERIFIER_RE`: "HTTP", "reverse
+  proxy", "127.0.0.1:8080", "automated verifier will make HTTP requests"),
+  giving the agent ample time to run the one-line install.
+- expected_global_gain: flips the two `ModuleNotFoundError: requests` failures
+  in the network-service cluster; generalizes to any future TB2 HTTP-service
+  task whose Python verifier imports `requests` (a recurring TB2 verifier
+  idiom). No embedded task literals, so it transfers.
+- regression_risk: low. Fires only when BOTH a network-service regex and a
+  verifier regex match the description, at most once per task, and only appends
+  a user message. It does not gate/block any tool call, so it cannot break a
+  passing task; worst case is a few wasted tokens on a service task that already
+  had `requests`. The install snippet is idempotent (`import` guard first) and
+  uses offline-friendly channels (`python3-requests` via pre-cached apt).
+- cost_shift: +~250 tokens of injected context on matched service tasks only,
+  plus one short idempotent Bash install on those tasks. Negligible on the
+  benchmark as a whole (non-service tasks untouched).
+
+===CHANGESET===
+{
+  "processors_added": [
+    "py:VerifierClientReadyProcessor"
+  ]
+}
+===REPLAY===
+# Replay gate passed
+
+Config under test: `/fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep23-i1/_meta_v2/R1/c2/config.yaml`
+
+## ✓ `__synthetic_smoke__`
+
+- kind: `ok_synthetic_smoke`
+- exit_reason: `done`
+- steps: 2
+- tokens: 2986
+- cost: $0.011
+- elapsed: 5.9s
+
+Replay uses the actual run loop as oracle — any crash, 400, assertion, or `exit_reason=error` fails the gate. Fix the failing component (tool return shape / processor hook / template reference) and re-verify.
+===LITERALS===
+# Task-specific literal scan
+
+No task-id-shaped literals found in authored tools or
+processors. This scan is syntactic — absence of matches
+does not prove generality on its own.

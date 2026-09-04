@@ -1,0 +1,94 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""VerifierDepEnsureProcessor — close the "verifier crashes at import" gap.
+4	
+5	Structural observation (TB2 / tmax eval): for service-style tasks the
+6	external verifier phase runs a pytest module that makes HTTP calls with the
+7	standard Python ``requests`` library. The eval container's system Python does
+8	NOT ship ``requests``, so ``test_final_state.py`` fails at *collection* time
+9	with ``ModuleNotFoundError: No module named 'requests'`` — the agent's actual
+10	solution is never scored, even when the service works correctly.
+11	
+12	The agent cannot see or infer this: the verifier's test files are injected
+13	*after* the agent session ends and are absent during execution (see the
+14	tb2-playbook "Sandbox topology" note). This is therefore an *environment*
+15	deficiency, not a model capability gap — the right place to close it is a
+16	harness mechanism that makes the runtime robust for a whole class of tasks.
+17	
+18	Mechanism: at task start, for tasks that look like they stand up an HTTP /
+19	socket service (the class the verifier probes over HTTP), best-effort ensure
+20	the ubiquitous ``requests`` client library is importable in the system Python.
+21	``requests`` is a universal stdlib-adjacent HTTP client, not a task-specific
+22	literal — the fix generalises to any HTTP-service task the verifier reaches.
+23	
+24	Safety / Pareto properties:
+25	- Gated on a service-task heuristic so non-service tasks pay nothing.
+26	- Idempotent: if ``requests`` already imports, the install is skipped.
+27	- Fully best-effort: every failure path (no sandbox, offline index, pip
+28	  missing) is swallowed — the processor can only help or be neutral, it
+29	  never blocks the run or mutates the conversation.
+30	- Does NOT touch ``event.messages`` — contract-neutral.
+31	"""
+32	from __future__ import annotations
+33	
+34	import re
+35	
+36	from harnessx.core.events import TaskStartEvent
+37	from harnessx.core.processor import MultiHookProcessor
+38	
+39	# Signals that the task stands up something an HTTP/socket verifier will probe.
+40	_SERVICE_HINT_RE = re.compile(
+41	    r"\b("
+42	    r"http|https|https?://|curl|wget|requests|"
+43	    r"nginx|uwsgi|gunicorn|flask|fastapi|uvicorn|"
+44	    r"microservice|micro-service|api\s+service|rest\s+api|endpoint|"
+45	    r"proxy|reverse\s+proxy|upstream|"
+46	    r"listen(?:s|ing)?\s+on|port\s+\d|127\.0\.0\.1|localhost|"
+47	    r"unix\s+socket|socket\s+server|web\s+server|serve\b"
+48	    r")\b",
+49	    re.IGNORECASE,
+50	)
+51	
+52	# Best-effort, idempotent, quiet. If requests already imports, this is a no-op.
+53	# The `|| true` guarantees a zero exit even when pip has no reachable index.
+54	_ENSURE_CMD = (
+55	    "python3 -c 'import requests' 2>/dev/null "
+56	    "|| pip install --quiet requests >/dev/null 2>&1 "
+57	    "|| pip3 install --quiet requests >/dev/null 2>&1 "
+58	    "|| true"
+59	)
+60	
+61	
+62	class VerifierDepEnsureProcessor(MultiHookProcessor):
+63	    """Ensure the standard HTTP client the verifier uses is importable.
+64	
+65	    Fires once per task, only for service-shaped tasks. Best-effort and
+66	    contract-neutral — never raises, never mutates messages.
+67	    """
+68	
+69	    _singleton_group = "verifier_dep_ensure"
+70	    _order = 5
+71	
+72	    def __init__(self, timeout_seconds: float = 60.0) -> None:
+73	        self._timeout = float(timeout_seconds)
+74	
+75	    async def on_task_start(self, event: TaskStartEvent):
+76	        try:
+77	            desc = event.task_description or ""
+78	            if desc and _SERVICE_HINT_RE.search(desc):
+79	                from harnessx.sandbox.base import get_current_sandbox
+80	
+81	                sandbox = get_current_sandbox()
+82	                if sandbox is not None:
+83	                    try:
+84	                        await sandbox.exec(_ENSURE_CMD, timeout=self._timeout)
+85	                    except Exception:
+86	                        # Offline / pip missing / timeout — leave state as-is.
+87	                        pass
+88	        except Exception:
+89	            # Never let a robustness helper break a task run.
+90	            pass
+91	        yield event
+92	
+93	
+94	__all__ = ["VerifierDepEnsureProcessor"]

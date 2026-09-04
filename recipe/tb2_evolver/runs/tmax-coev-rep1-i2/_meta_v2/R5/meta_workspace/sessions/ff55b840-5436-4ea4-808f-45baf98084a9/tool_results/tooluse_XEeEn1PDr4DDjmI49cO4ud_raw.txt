@@ -1,0 +1,302 @@
+1	## Round 1 — break small-max_tokens truncation loop
+2	
+3	<!-- journal:frontmatter
+4	round: 1
+5	timestamp: 2026-08-16T17:30:00Z
+6	hypothesis_id: h_length_recovery_v3
+7	levers: [control]
+8	predicted_affected: [task_000740_59416444, task_001032_1adaccb9, task_000396_e56917e2, task_000028_7fe033ac, task_001653_c4cafa73, task_000015_89886d8d, task_000958_4bb2b05d]
+9	cited_candidates: [C-001]
+10	gating_outcome: accepted
+11	gating_attribution: score=28/50; +2/-4 gained=task_000396_e56917e2,task_000740_59416444 lost=task_001031_a8f0eb37,task_001090_c61c71f2,task_001536_acfe6c35,task_001818_b251e5ea; score 0.5600 >= incumbent(mean) 0.6000 - tol 0.0400
+12	expected_global_gain: "Rescues the small-max_tokens truncation-repetition cluster (7-8 failing tasks, 4 pure budget_exceeded step-burns) by replacing the run loop's counter-productive passive 'continue' nudge with an actionable one."
+13	regression_risk: "Low — trigger only fires on no-tool-call finish_reason==length turns; passing r0 tasks never hit that (their turns are <1600 chars and all carry tool calls). Contract-checked clean."
+14	cost_shift: "Net reduction expected: target tasks currently grind to 80 steps / 300-1350s in the loop; breaking it earlier cuts tokens and wall-clock on the most expensive runs."
+15	rollback_trigger: "If R2 pass_rate does not improve AND the budget_exceeded cluster (740/396/028/958) is unchanged, or any previously-passing task regresses to a truncation loop, revert to v2."
+16	-->
+17	
+18	### Why
+19	
+20	r0 = 30/50. Of the 20 failures, 4 are `budget_exceeded` @ 80 steps, 1
+21	`loop_detected`, 15 `done`-but-wrong. The single largest *harness-addressable*
+22	cluster is a small-`max_tokens` truncation-repetition loop: the model emits a
+23	long narration, the provider cuts it off at ~2000 chars (`finish_reason=length`,
+24	no tool call), the run loop appends a passive "Your previous response was cut
+25	off by the token limit. Please continue from where you left off." user message,
+26	and the model regenerates the *identical* paragraph — looping for dozens of
+27	steps. Passive-nudge counts: task_000740→11, task_001032→17, task_000396→10,
+28	task_000028→5, task_001653→5, task_000015→3, task_000958→3.
+29	
+30	The existing `LengthTruncationRecoveryProcessor` (v2) was inert on this model:
+31	its `content_char_threshold` of 40000 could never match ~2000-char content, and
+32	its `on_before_model` *appended* a corrective message — which the before_model
+33	contract drops when the last role is already `user` (it is, because the run loop
+34	just appended the passive nudge). So the actionable nudge never reached the
+35	model; the passive re-priming message stayed the last thing it read.
+36	
+37	### Changes
+38	
+39	- `processors/length_recovery.py` — v3: `on_before_model` now *rewrites the
+40	  last user message's content* (the passive "continue" nudge) into an actionable
+41	  "stop narrating, run ONE command" directive when a truncation streak is armed
+42	  (contract-safe len_delta 0); falls back to a +1 append only when the last role
+43	  is not `user`. Trigger still keys on `finish_reason==length` (reliable here).
+44	- `config.yaml` — repoint the `LengthTruncationRecoveryProcessor` `_target_`
+45	  from the R0 v2 asset to the new R1 v3 file; kwargs unchanged.
+46	- `system_prompt.txt` — copied byte-for-byte from R0 (sidecar for
+47	  SiblingSystemPromptBuilder; identical to DEFAULT so no prompt drift).
+48	
+49	### Evidence
+50	
+51	- `task_000740_59416444.messages.json`: assistant turns 11,13,35,39,43,47,51,
+52	  58,62,66 are exactly 2001 chars with no tool call; each followed by a
+53	  persisted user msg "...cut off by the token limit. Please continue..."; the
+54	  next assistant turn re-emits the identical "I've been stuck in a loop..."
+55	  paragraph. `exit_reason=budget_exceeded` @ step 80, 1350s.
+56	- `task_001032_1adaccb9`: 17 passive nudges, 51 steps, 1018s, still wrong.
+57	- `task_000396_e56917e2`: 10 passive nudges, budget_exceeded @ 80 steps, 1248s.
+58	- Max assistant content across task_000740 = 2001 chars ≪ v2 threshold 40000
+59	  (v2 char branch structurally cannot fire on this model).
+60	
+61	### Uncertainty
+62	
+63	The underlying answer may still be wrong on some of these tasks even after the
+64	loop is broken (e.g. task_000740's window-function logic bug). But freeing the
+65	wasted step budget gives the model turns to self-correct instead of grinding to
+66	the cap, and 4 of the cluster are pure step-burns. If R2 shows no movement on
+67	the budget_exceeded set, the loop-break is not the binding constraint — revert
+68	and look upstream at the model's reasoning-length habit.
+69	
+70	## Round 2 — verify services with a requests client
+71	
+72	<!-- journal:frontmatter
+73	round: 2
+74	timestamp: 2026-08-16T18:10:00Z
+75	hypothesis_id: h_service_requests_verify_v1
+76	levers: [instruction]
+77	predicted_affected: [task_000958_4bb2b05d, task_000028_7fe033ac]
+78	cited_candidates: [C-002]
+79	gating_outcome: accepted
+80	gating_attribution: score=29/50; +4/-3 gained=task_000536_9c16e8ef,task_000748_c9807703,task_001653_c4cafa73,task_001706_24462a09 lost=task_000587_9862bb19,task_001321_658ce4a8,task_001701_95e3bbcb; score 0.5800 >= incumbent(mean) 0.6000 - tol 0.0400
+81	expected_global_gain: "Closes the 'external verifier probes agent's network service with the requests library, but requests is absent -> whole test module errors at collection (rc=2, 0 tests run)' failure shape. Generalizes to any HTTP/socket-service task; already recurs across data_querying + system_administration."
+82	regression_risk: "Very low. Guidance only affects tasks that build/run a service; adds a benign pip install requests + a few client test calls. No processor pipeline change, so no mechanical regression surface; non-service (already-passing) clusters see an inert extra paragraph."
+83	cost_shift: "Negligible (<1%): at most one pip install + a couple of requests calls on the small service-task subset; unchanged elsewhere."
+84	rollback_trigger: "If R3 pass_rate does not improve AND task_000958 stays failing on a verifier import/collection error (or any previously-passing task regresses to a service-verification detour), revert to R1's system_prompt.txt."
+85	-->
+86	
+87	### Why
+88	
+89	R1 landed at 28/50. Sweeping all failing result.json, exactly two tasks —
+90	task_000958 (data_querying) and task_000028 (system_administration) — fail
+91	because the *verifier's* test module cannot `import requests`: the tail is
+92	`ModuleNotFoundError: No module named 'requests'` -> `Interrupted: 1 error
+93	during collection` (rc=2). The test suite never runs a single assertion, so
+94	even a correct service scores zero. Both tasks ask the agent to build a C++
+95	HTTP microservice that the external verifier probes with `requests`. Because
+96	the agent and verifier share one container filesystem, an agent that tested
+97	its own service with a `requests`-based client (installing the package first)
+98	would leave `requests` importable and let the verifier collect its tests.
+99	
+100	### Changes
+101	
+102	- `system_prompt.txt` (sibling read by SiblingSystemPromptBuilder) — kept the
+103	  R1 base byte-for-byte and appended a general strategy paragraph: when a task
+104	  runs a network/HTTP service, verify it end-to-end from a real client,
+105	  preferring Python `requests` (install it if absent; don't assume
+106	  curl/wget/nc), exercising every specified endpoint/auth/error case, and
+107	  confirming the process is still alive at finish. No task IDs, ports, or
+108	  paths from the training set are embedded — it is a class-level testing habit.
+109	- `config.yaml` — copied byte-for-byte from R1 (processor pipeline unchanged);
+110	  only the sibling prompt sidecar changed.
+111	
+112	### Evidence
+113	
+114	- `task_000958_4bb2b05d` `final_pytest.output_tail`: `import requests` ->
+115	  `ModuleNotFoundError` -> `Interrupted: 1 error during collection` (rc=2).
+116	  Final assistant turns: C++ server was running (pid 739) and answered
+117	  `GET /chain?id=1` with `[1,2,3,4]` (correct-looking) — yet 0 tests ran.
+118	- `task_000028_7fe033ac` `final_pytest.output_tail`: same `import requests`
+119	  collection crash (rc=2). Agent summary explicitly notes "curl and wget were
+120	  not available... nc was not available... urllib failed" before it finally
+121	  self-tested via a Python client (`Status: 200 Body: b'150\n'`) — never
+122	  installing `requests`. (028 also has a genuine frame-count accuracy bug, so
+123	  it is cited only as the second instance of the import-crash mechanism, not a
+124	  claimed flip.)
+125	
+126	### Uncertainty
+127	
+128	The change is Instruction-only and depends on the model acting on the guidance
+129	on service tasks. task_000958's flip requires its service endpoints to be
+130	actually correct once the verifier can collect; if they are subtly wrong it
+131	stays failing despite the import fix. task_000028 will not flip on this change
+132	alone (accuracy bug is upstream). If R3 shows no movement on 958 and no new
+133	service tasks benefit, the binding constraint is the model's service
+134	correctness, not the import crash — revert and look upstream.
+135	
+136	## Round 3 — collapse the truncation reasoning-spiral
+137	
+138	<!-- journal:frontmatter
+139	round: 3
+140	timestamp: 2026-08-16T18:40:00Z
+141	hypothesis_id: h_length_recovery_v4_collapse
+142	levers: [control]
+143	predicted_affected: [task_000010_644ab1c2, task_000028_7fe033ac, task_000118_3043e92d, task_001031_a8f0eb37, task_001032_1adaccb9, task_001089_220cc46b, task_001321_658ce4a8]
+144	cited_candidates: [C-001]
+145	gating_outcome: accepted
+146	gating_attribution: score=32/50; +5/-2 gained=task_000028_7fe033ac,task_000264_ab8c7253,task_001321_658ce4a8,task_001536_acfe6c35 lost=task_000396_e56917e2,task_000536_9c16e8ef; score 0.6400 >= incumbent(mean) 0.6000 - tol 0.0400
+147	expected_global_gain: "Rescues the max_tokens truncation-spiral cluster (7 failing tasks, all remaining budget_exceeded cases plus the round's longest 65-92-message step-burners) by killing the re-seeding reasoning tail v3 preserved and firing the collapse on every truncated turn. R1 v3 flipped 2 of the original cluster with the nudge alone; v4 adds the missing mechanical half."
+148	regression_risk: "Low - collapse fires only on no-tool-call finish_reason==length turns (or oversized content); the 29 passing R2 tasks never reach that state (turns carry tool calls, under 4096 output tokens). on_before_model path byte-identical to v3 (accepted R1/R2, contract-clean)."
+149	cost_shift: "Net reduction: collapsing each truncated turn to ~400 chars (from ~2000) and killing the accumulating tail cuts the 24k-to-40k input-token climb on the most expensive runs and breaks the spiral earlier."
+150	rollback_trigger: "If R4 pass_rate does not improve AND the cluster (010/028/118/1031/1032/1089/1321) still shows many passive nudges per task with no flips, the binding constraint is the model reasoning-length habit, not the loop - revert to R2 v3 processor."
+151	-->
+152	
+153	### Why
+154	
+155	R2 = 29/50. Of 21 failures, exactly 7 are dominated by a max_tokens truncation
+156	spiral: task_000010 (18 passive nudges / 25 collapses), task_001031 (20/36),
+157	task_001032 (20/20), task_000028 (13/15), task_001321 (12/14), task_000118
+158	(10/11), task_001089 (9/27). These are the round's longest runs (65-92 messages)
+159	and include all remaining budget_exceeded cases. The other 14 failures are short
+160	runs (under 50 messages, 0 truncation) with genuine partial-test accuracy bugs -
+161	model capability gaps, not harness-addressable this round.
+162	
+163	R1 v3 processor (repointed, still live in R2) does the right thing at the
+164	on_before_model layer: it rewrites the run loop passive "continue from where you
+165	left off" nudge into an actionable "run ONE command" directive, and the bodies
+166	confirm the model reads and acknowledges it. But it keeps spiralling. Two
+167	mechanical amplifiers, invisible until this round body read, keep the loop
+168	alive:
+169	1. Re-seeding tail: v3 collapsed oversized turns to head(1200)+marker+tail(600),
+170	   and the preserved tail is exactly the mid-reasoning continuation the next
+171	   turn latches onto and keeps developing.
+172	2. Barely-triggered collapse: most truncated turns are ~2000 chars, right at
+173	   the v3 ~2000 collapse threshold, so v3 often left the whole runaway turn in
+174	   history; 10-30 of them accumulate (input_tokens climb 24k-to-40k on
+175	   task_000010), costing budget and re-priming the same unfinished thought.
+176	
+177	The truncation is NOT degenerate token-repetition - it is genuine verbose
+178	chain-of-thought ("Wait, I think I see the issue now! Let me trace through the
+179	code...") running past the 4096 output-token cap before reaching a tool call.
+180	max_tokens is a runtime-only slot (env TMAX_MAX_TOKENS) outside the config
+181	surface, and a louder prompt cannot make a 9B model self-limit reasoning it
+182	acknowledges but cannot shorten. The only remaining lever is mechanical: stop
+183	feeding the model its own unfinished spiral.
+184	
+185	### Changes
+186	
+187	- processors/length_recovery.py - v4: on_after_model now collapses every
+188	  truncated no-tool-call turn to a short head stub (head_chars=400) with NO
+189	  tail (tail_chars=0), replacing the discarded middle+tail with a terminal
+190	  marker that tells the model the reasoning is gone and not to reconstruct it.
+191	  Collapse threshold drops to head+tail+len(marker) (~600) so it fires on every
+192	  ~2000-char truncated turn. on_before_model unchanged from v3 (contract-safe
+193	  rewrite of the last user nudge; +1 append when last role is not user); the
+194	  escalated repeat nudge now offers a concrete short-output path (single heredoc
+195	  write) instead of asking the model to self-limit reasoning.
+196	- config.yaml - repoint LengthTruncationRecoveryProcessor _target_ from the R1
+197	  v3 asset to the R3 v4 file; add head_chars: 400, tail_chars: 0 kwargs. Rest of
+198	  the pipeline unchanged.
+199	- system_prompt.txt - copied byte-for-byte from R2 (sibling for
+200	  SiblingSystemPromptBuilder; no prompt drift).
+201	
+202	### Evidence
+203	
+204	- task_000010_644ab1c2 oh_runs trace: steps 50/53/55-59/61/67-69 all
+205	  stop_reason=length, output_tokens=4096, no tool call; input_tokens climb
+206	  24625 -> 40018 across accumulating ~2000-char reasoning turns.
+207	- task_001032_1adaccb9.messages.json steps 35/37/39/41: assistant quotes the v3
+208	  nudge back ("The user is telling me to stop the repetitive analysis and just
+209	  run a single Bash command...") then narrates the full 2009-char turn and
+210	  truncates again; the collapse tail preserves the exact mid-reasoning
+211	  continuation re-seeding the next turn.
+212	- Contrast: task_000010 steps 60/62/63 emit tool_use at output 1039-1450 tokens
+213	  (under 4096) - a short-context turn fits within budget, so shrinking context
+214	  and killing the re-seed is the right lever.
+215	
+216	### Uncertainty
+217	
+218	Even with the loop broken, some tasks carry upstream logic bugs (task_001032
+219	path-safety, task_000028 frame-count accuracy) that may keep them failing after
+220	the step budget is freed. The bet is that freeing budget plus a clean short
+221	context lets the model reach and iterate on a tool call instead of grinding to
+222	the cap. If R4 shows the cluster still spiralling with no flips, the constraint
+223	is the model reasoning-length habit and the lever is exhausted - revert to v3.
+224	
+225	## Round 4 — silence structurally-meaningless loop warning
+226	
+227	<!-- journal:frontmatter
+228	round: 4
+229	timestamp: 2026-08-16T19:10:00Z
+230	hypothesis_id: h_loop_name_warn_disable_v1
+231	levers: [configuration]
+232	predicted_affected: []
+233	cited_candidates: [C-001]
+234	gating_outcome: accepted
+235	gating_attribution: score=30/50; +5/-7 gained=task_000536_9c16e8ef,task_001032_1adaccb9,task_001089_220cc46b,task_001090_c61c71f2 lost=task_000028_7fe033ac,task_000264_ab8c7253,task_000748_c9807703,task_001264_9f4ca84a; score 0.6000 >= incumbent(mean) 0.6400 - tol 0.0400
+236	expected_global_gain: "Removes 567 false 'you are going in circles' injections across 47/50 tasks; cleaner/cheaper context on every longer run and stops desensitising the model to the real (exact-match) loop detector, which is preserved."
+237	regression_risk: "Very low - only removes a warning that provably fired on passing tasks without helping them; Strategy-1 exact-repeat detection (warn_threshold/threshold) is untouched, so real identical-command loops still raise loop_detected. Single knob, no code authored."
+238	cost_shift: "Net reduction - each suppressed warning is ~350 chars appended to a persisted tool result; 567 of them, concentrated on the longest/most expensive tasks."
+239	rollback_trigger: "If R5 pass_rate < 32/50 OR any R3-passing task regresses into loop_detected/budget_exceeded that the name-only warning would plausibly have pre-empted, revert name_warn_threshold to 8."
+240	-->
+241	
+242	### Why
+243	
+244	R3 = 32/50. The truncation-spiral control lever (R1/R3) has landed and is now
+245	exhausted: this round's bodies confirm it worked - passive "continue" nudges
+246	dropped from 10-20/task (R2) to 0-4/task (R3), max assistant content dropped
+247	from ~2000 (right at the R3 collapse threshold) to 596-3320, and 0
+248	collapse-marker turns were needed. R3's own rollback trigger ("cluster still
+249	spiralling with many passive nudges per task") did NOT fire, so the processor
+250	stays as-is. The remaining 18 failures are dominated by model capability/logic
+251	gaps that are not harness-addressable: multimodal input (OCR of PNG / audio
+252	transcription) on 000015/000536/001818, and wrong computed values / algorithms
+253	on 001498 (error 231 vs 163), 001937 (grid 60 vs 50), 000587, 001090, 000958,
+254	001032, 000505, 001781. These get one line each: require model capability
+255	(image/audio parse, correct domain logic); no harness fix - skip.
+256	
+257	The one genuinely *systemic, cross-cutting, harness-addressable* signal is a
+258	false-positive control mechanism. LoopDetectionProcessor has two strategies:
+259	Strategy 1 keys on the exact fingerprint (tool name + serialised inputs) and
+260	catches real identical-command loops - it fired only 61 times total and
+261	correctly raised loop_detected on 000536 (identical failing SQL repeated 8-9x).
+262	Strategy 2 (name_warn_threshold=8) warns on tool-*name* repetition alone. In TB2
+263	the agent has exactly one tool (Bash, a hard benchmark constraint), so Strategy
+264	2 fires on essentially every non-trivial task: 567 times across 47/50 tasks,
+265	passing and failing alike. It carries zero information, inflates persisted
+266	context, and repeatedly tells the agent it is "going in circles" during
+267	legitimate multi-step work - the opposite of the sustained planning/execution
+268	the playbook names as the biggest lever.
+269	
+270	### Changes
+271	
+272	- `config.yaml` - LoopDetectionProcessor `name_warn_threshold` 8 -> 999,
+273	  effectively disabling the structurally-meaningless Strategy-2 (name-only)
+274	  warning while leaving Strategy-1 exact-match detection (warn_threshold=3,
+275	  threshold=10) fully intact. No other pipeline change.
+276	- `system_prompt.txt` - copied byte-for-byte from R3 (sibling for
+277	  SiblingSystemPromptBuilder; no prompt drift).
+278	
+279	### Evidence
+280	
+281	- `harnessx/processors/control/loop_detection.py:196-204`: Strategy 2 computes
+282	  s2_run from event.tool_name only and emits the "called `{tool}` {count} times
+283	  consecutively with different arguments ... going in circles?" template.
+284	- Counted across all 50 R3 messages.json: Strategy-2 name-only warnings = 567
+285	  across 47 tasks; Strategy-1 exact-match warnings = 61. Not a discriminator:
+286	  passing task_001673 carries 29, failing task_000010 carries 15.
+287	- task_000015 final tool message: "Task completed successfully! [LoopDetection]
+288	  ... 13 times consecutively with different arguments. This suggests you are
+289	  stuck in a repetitive pattern" - factually wrong, appended to a successful
+290	  completion, and persisted in context.
+291	- Contrast preserved: task_000536 body shows the Strategy-1 template ("exact
+292	  same tool call(s) ... issued 8 times in a row") firing on a real stuck SQL
+293	  loop - that path is unchanged by this round.
+294	
+295	### Uncertainty
+296	
+297	This is primarily a cost/context-hygiene + desensitization fix, not a claimed
+298	single-task flip (predicted_affected intentionally empty). If R5 shows a
+299	passing task newly looping because the name-only nudge is gone, Strategy 1 at
+300	threshold=10 was the real backstop and the name warning was load-bearing after
+301	all - revert to 8. Given passing tasks already tolerated 20-38 of these warnings
+302	without benefit, that outcome is unlikely.

@@ -1,0 +1,52 @@
+261	
+262	        kwargs = dict(self.kwargs)
+263	        if oai_tools:
+264	            kwargs["tools"] = oai_tools
+265	
+266	        global _last_request_time
+267	        max_retries = 4
+268	        base_delay = 3.0
+269	
+270	        if self.stream:
+271	            return await self._complete_streaming(client, oai_messages, kwargs, max_retries, base_delay)
+272	
+273	        for attempt in range(1, max_retries + 1):
+274	            try:
+275	                await _throttle()
+276	                response = await client.chat.completions.create(
+277	                    model=self.model,
+278	                    messages=oai_messages,
+279	                    max_tokens=self.max_tokens,
+280	                    **kwargs,
+281	                )
+282	                break
+283	            except Exception as e:
+284	                status = getattr(e, "status_code", None) or getattr(e, "status", None)
+285	                err_str = str(e).lower()
+286	                is_retryable = status in (429, 500, 502, 503, 529) or "rate" in err_str
+287	                # Retry on timeouts with longer backoff
+288	                if "timeout" in err_str or "timed out" in err_str:
+289	                    is_retryable = True
+290	                    base_delay = max(base_delay, 30.0)
+291	                # Content policy flags can be non-deterministic — retry once
+292	                if status == 400 and ("flagged" in err_str or "content_policy" in err_str) and attempt == 1:
+293	                    is_retryable = True
+294	                if is_retryable and attempt < max_retries:
+295	                    delay = min(base_delay * (2 ** (attempt - 1)) + (attempt * 0.5), 120.0)
+296	                    logger.warning(
+297	                        "API %s (attempt %d/%d), retrying in %.1fs", status or e, attempt, max_retries, delay
+298	                    )
+299	                    await asyncio.sleep(delay)
+300	                else:
+301	                    raise
+302	
+303	        choice = response.choices[0]
+304	        msg = choice.message
+305	        content = msg.content or ""
+306	        finish_reason = choice.finish_reason or "stop"
+307	
+308	        # Capture reasoning content from o-series models.
+309	        # OpenAI exposes this via message.reasoning (Responses API) or
+310	        # message.reasoning_content (some SDK versions). We check both.
+
+[Showing lines 261–310 of 446 total. Use offset=310 to read the next section.]

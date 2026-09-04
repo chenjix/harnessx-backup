@@ -1,0 +1,72 @@
+1	# Evolve journal — tmax-coev-rep19-i1
+2	
+3	## Round 1 — content-based loop breaker
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_repetition_loop_breaker_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_001321_658ce4a8, task_000118_3043e92d, task_000578_cebe85a5, task_001818_b251e5ea]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=27/50; +4/-6 gained=task_000578_cebe85a5,task_001090_c61c71f2,task_001652_86e1d185,task_001818_b251e5ea lost=task_000396_e56917e2,task_000684_1a33ef37,task_000760_76ba653c,task_000912_770802f8; gating disabled (tolerance < 0)
+14	expected_global_gain: "Frees the 6-task budget_exceeded@80-step cluster from degenerate self-repetition loops so each can converge instead of burning the whole budget"
+15	regression_risk: "A false-positive prune on a legitimate multi-turn retry sequence; mitigated by requiring 3 consecutive near-identical (content prefix + identical tool signature) turns, a shape healthy runs don't produce"
+16	cost_shift: "Net negative — loops that run to 80 steps get cut short; pruning also shrinks the breaking-turn context. No added cost on non-looping tasks."
+17	rollback_trigger: "If R2 pass_rate is flat/down AND any previously-passing task regresses to a truncated/interrupted exit, revert."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000010_644ab1c2` (system_administration) fails with
+23	`exit_reason=budget_exceeded` at the 80-step cap after 889s. The task requires
+24	writing `/home/user/operator.py`; running Python with cwd=`/home/user` makes the
+25	file shadow the stdlib `operator` module and breaks the interpreter. The model
+26	correctly diagnosed this but then entered a degenerate loop: ~15 near-verbatim
+27	"I've been stuck ... circular import ... only real solution is to rename the
+28	file, but the user asked for /home/user/operator.py" turns, interleaved with 16
+29	passive "cut off by the token limit" continue nudges. It never tried the actual
+30	fix (run Python from another cwd / set PYTHONPATH) because its own runaway prose
+31	kept re-priming the identical completion. Six tasks total die this way at
+32	exactly steps=80. The existing `LengthTruncationRecoveryProcessor` only fires on
+33	`finish_reason=length AND no tool_calls` and its nudge text never appears in any
+34	trajectory (`proc_nudge=0`); a soft one-line nudge cannot outweigh the wall of
+35	repeated prior turns. Critically, `task_001321_658ce4a8` re-issues a
+36	**byte-identical Bash command 33 times** — a prior-rep loop breaker that resets
+37	on any tool call would never catch it.
+38	
+39	### Changes
+40	
+41	- `processors/repetition_loop_breaker.py` — new `RepetitionLoopBreaker`
+42	  `MultiHookProcessor`. Fingerprints each assistant turn as
+43	  (normalised content prefix + tool-call name/input signature); on 3 consecutive
+44	  matching turns it prunes the duplicate looping turns (plus their paired tool
+45	  results and passive nudges) from the assembled context in `on_before_model`
+46	  and appends ONE decisive "abandon this line, take a different concrete step"
+47	  redirect. Content-agnostic — names no task, path, command, or constant.
+48	- `config.yaml` — register the processor after `LengthTruncationRecoveryProcessor`
+49	  (order 6) and before compaction.
+50	
+51	### Evidence
+52	
+53	- `task_000010_644ab1c2` frontmatter: `exit_reason=budget_exceeded`, steps=80,
+54	  elapsed=889s. Message log: 16 passive "cut off by the token limit" nudges,
+55	  each preceded by a tool-less assistant turn repeating the same "rename the
+56	  file" analysis (~15 near-identical turns).
+57	- `task_001321_658ce4a8`: 33 assistant tool-call turns, all issuing 1 distinct
+58	  (byte-identical) command; narration repeats "I've been stuck in a loop. Let me
+59	  take a completely different approach" verbatim.
+60	- Cluster shape: `task_000118_3043e92d`, `task_000578_cebe85a5`,
+61	  `task_001818_b251e5ea` all `budget_exceeded` at steps=80 with tool calls each
+62	  turn (evade the length-only recovery).
+63	
+64	### Uncertainty
+65	
+66	The breaker guarantees the loop stops and the budget is reclaimed for fresh
+67	attempts, but it does not inject the missing solution knowledge (e.g. the cwd /
+68	PYTHONPATH trick for task_000010) — that is a model capability. So a flip is
+69	plausible but not certain; the sure win is eliminating the 0-progress budget
+70	burn. If the redirect proves too aggressive and prunes a legitimate retry chain,
+71	a previously-passing task would truncate — watch for T→F regressions with
+72	truncated exits and revert if seen alongside a flat/down pass_rate.

@@ -1,0 +1,65 @@
+1	# Evolve journal — tmax-coev-rep10-i1
+2	
+3	## Round 1 — step-budget deadline nudge
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-01-01T00:00:00Z
+8	hypothesis_id: h_step_budget_deadline_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_000118_3043e92d, task_000264_ab8c7253, task_000958_4bb2b05d, task_001031_a8f0eb37, task_001321_658ce4a8]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=30/50; +3/-2 gained=task_000587_9862bb19,task_001032_1adaccb9,task_001515_eed714e6 lost=task_001536_acfe6c35,task_001701_95e3bbcb; score 0.6000 >= incumbent(mean) 0.5800 - tol 0.0400
+14	expected_global_gain: "Flip part of the 6-task budget_exceeded cluster (4 domains) that ends at step 80 with no deliverable on disk; also trims extreme-tail runtimes"
+15	regression_risk: "Low — appends up to 2 user reminders only past 65% of the 80-step budget; passing tasks finish in 8-52 steps and never see it"
+16	cost_shift: "Negligible-to-negative: two ~60-token injections only on long tasks; curbs late thrash so tail-task tokens should drop"
+17	rollback_trigger: "If pass_rate flat/down AND any previously-passing task with steps>52 regresses, revert"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 29/50 (58%). Of 21 failures, 6 hit `exit_reason=budget_exceeded`
+23	at the full 80-step budget, spanning system_administration, data_querying,
+24	scientific_computing, and data_processing. Every one failed the verifier on
+25	a "required output file missing" assertion — the agent explored/thrashed the
+26	whole budget and left **nothing on disk**. task_000264's own words: "I've
+27	been stuck in a loop trying the same query"; then three "Your previous
+28	response was cut off... continue" turns with no file write, ending at step 80
+29	with `top_managers.csv` / `query_plan.txt` missing. The pipeline ships a
+30	`TaskTimeReminderProcessor` but the recipe runner never sets its
+31	`timeout_seconds`, so its `on_step_start` returns early every step — the
+32	deadline nudge is inert. The budget actually enforced is *steps* (max_steps=80),
+33	which nothing tracks.
+34	
+35	### Changes
+36	
+37	- `processors/step_budget_deadline.py` — new `StepBudgetDeadlineProcessor`
+38	  (`MultiHookProcessor`). On `on_step_start`, computes `step_id / task.max_steps`
+39	  and injects escalating user-role reminders at 65% (early) and 85%
+40	  (critical) telling the agent to commit its best-effort deliverable to the
+41	  required paths NOW and `ls`-verify. Task-agnostic — names no paths/domains.
+42	- `config.yaml` — register the processor at `_order=7` (right after the inert
+43	  time reminder) via absolute `file://` path, `warn_at: [0.65, 0.85]`.
+44	
+45	### Evidence
+46	
+47	- task_000264_ab8c7253: `exit_reason=budget_exceeded`, steps=80, 953s;
+48	  verifier `top_managers.csv missing` + `query_plan.txt missing` + no index.
+49	  Body last msgs: "I keep getting the same result" / "stuck in a loop".
+50	- task_001031_a8f0eb37: `budget_exceeded`, 80 steps, 2336s; verifier
+51	  `Results file missing at /home/user/results.json`.
+52	- task_000010_644ab1c2: `budget_exceeded`, 80 steps; verifier `operator.py
+53	  does not exist` + `api_success.log does not exist`.
+54	- task_000118_3043e92d / task_000958_4bb2b05d / task_001321_658ce4a8: all
+55	  `budget_exceeded` at 80 steps (same shape).
+56	- Root-cause harness fact: harness.py:246 — `TaskTimeReminderProcessor`
+57	  early-returns when `timeout_seconds` is unset, which the runner never sets.
+58	
+59	### Uncertainty
+60	
+61	The reminder helps only if a runnable-but-imperfect deliverable exists in the
+62	model's head by ~step 52; on tasks where the agent is genuinely lost (no valid
+63	approach at all) it won't produce a passing file. Watch attribution: if
+64	predicted tasks stay `still_F` while a slow passing task regresses, the nudge
+65	is disrupting more than it helps — revert per trigger above.

@@ -1,0 +1,82 @@
+=== length_recovery.py head ===
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""LengthTruncationRecoveryProcessor for Tmax (and TB2-style) agents.
+
+Closes a systemic failure mode: the model enters a *degenerate repetition
+loop* — it keeps emitting the same narration with no tool call until the
+response hits ``max_tokens`` (``finish_reason == "length"``). The run loop
+then appends a passive "please continue" nudge, which re-primes the same
+runaway generation. The cycle can burn an entire evolve round on one task.
+
+This processor:
+* collapses runaway assistant content (head+tail) after a length truncation
+* replaces the passive continue nudge with a corrective "issue one Bash call"
+  instruction (escalating on consecutive truncations)
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+from harnessx.core.events import (
+    BeforeModelEvent,
+    Message,
+    ModelResponseEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+)
+from harnessx.core.processor import MultiHookProcessor
+
+_HEAD_CHARS = 1200
+_TAIL_CHARS = 600
+_TRUNC_MARKER = (
+    "\n\n[response truncated by harness: the model hit the output token limit "
+    "without issuing a tool call; the omitted middle was discarded to prevent a "
+    "repetition loop]\n\n"
+)
+
+_NUDGE_FIRST = (
+    "Your last turn ran into the output token limit without running any command. "
+    "Do NOT re-explain or continue the previous narration. In your next turn write "
+=== imports in harness.py ===
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""TB2 harness config factory and processor implementations.
+
+Public API
+----------
+``make_tb2_harness_config(*, timeout_seconds=None) -> HarnessConfig``
+    Build a fully serializable ``HarnessConfig`` with no runtime slots.
+    Persist it with ``cfg.to_yaml_file(path)`` for meta-harness evolution.
+
+    Runtime-only slots (``sandbox_provider``, ``tracer``) are **not** included
+    here — they are injected by the agent at run time via ``cfg.copy(...)``.
+
+All processor classes are kept in this module so that YAML round-trip
+deserialization (``HarnessConfig.from_yaml_file``) can resolve their
+``_target_`` dotted paths.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import re
+import time
+import uuid
+
+from harnessx.core.builder import HarnessBuilder
+from harnessx.core.harness import HarnessConfig
+from harnessx.core.events import (
+    BeforeModelEvent,
+    Message,
+    ModelResponseEvent,
+    StepStartEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+    ToolCall,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from harnessx.core.processor import MultiHookProcessor
+from harnessx.processors.context.env_context_injector import EnvironmentContextInjector

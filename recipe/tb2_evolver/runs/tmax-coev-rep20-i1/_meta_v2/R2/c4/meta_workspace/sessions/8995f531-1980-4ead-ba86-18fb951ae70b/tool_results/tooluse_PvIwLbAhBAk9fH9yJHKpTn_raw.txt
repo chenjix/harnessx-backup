@@ -1,0 +1,72 @@
+309	        if not (prev > 0 and (prev - current_count) >= self._drop_threshold):
+310	            yield event
+311	            return
+312	
+313	        from harnessx.sandbox.base import get_current_sandbox
+314	
+315	        sandbox = get_current_sandbox()
+316	        if sandbox is None:
+317	            yield event
+318	            return
+319	
+320	        try:
+321	            ls_out = await sandbox.exec("ls -la /app 2>/dev/null | head -30", timeout=8)
+322	        except Exception:
+323	            yield event
+324	            return
+325	
+326	        procs_out = ""
+327	        try:
+328	            procs_out = await sandbox.exec(
+329	                "ps aux --no-headers 2>/dev/null | grep -v '\\[' "
+330	                "| awk '{print $11}' | sort -u | grep -v '^ps$' | head -8",
+331	                timeout=5,
+332	            )
+333	        except Exception:
+334	            pass
+335	
+336	        snapshot = f"[PostCompaction] Context was compressed. Current workspace state:\n```\n{ls_out.strip()}\n```"
+337	        if procs_out and procs_out.strip():
+338	            snapshot += f"\nRunning processes: {procs_out.strip()}"
+339	
+340	        msg = Message(role="user", content=snapshot)
+341	        yield dataclasses.replace(
+342	            event,
+343	            messages=event.messages + (msg,),
+344	            raw_messages=event.raw_messages + (msg,),
+345	        )
+346	
+347	    async def on_task_end(self, event: TaskEndEvent):
+348	        self._prev_count = 0
+349	        yield event
+350	
+351	
+352	# ---------------------------------------------------------------------------
+353	# System prompt
+354	# ---------------------------------------------------------------------------
+355	
+356	_TB2_SYSTEM = """\
+357	# System
+358	You are an expert software engineer solving terminal-based programming tasks in a Linux sandbox.
+359	
+360	## Key Facts About This Environment
+361	- You are inside an isolated Docker container.
+362	- Your job is to implement the task correctly so the external verifier passes when it runs.
+363	
+364	## Workflow
+365	1. **Read the task carefully.** Before writing any code, understand:
+366	   - Required output format, file paths, field names, CLI flags
+367	   - Accuracy or size constraints
+368	   - What a correct solution looks like from the outside
+369	2. **Explore the environment first.**
+370	```bash
+371	   ls /app && find /app -name '*.md' -o -name '*.txt' -o -name '*.sh' 2>/dev/null | head -20
+372	```
+373	3. **For complex tasks, decompose before implementing.** Break the problem into concrete subtasks. Solve and verify each subtask before moving to the next — do not attempt everything at once.
+374	4. **Implement the solution.** Match the task's specified interface exactly — file paths, output format, and CLI behavior all matter to the verifier.
+375	5. **Write outputs to the exact paths the task specifies.** Re-read the task description to confirm paths before writing anything.
+376	6. **Verify outputs explicitly** — do not assume a file was written just because a script ran without errors. Check with `ls` and inspect the contents:
+377	```bash
+378	   ls -lh /path/to/required/output   # confirm file exists and is non-empty
+
+[Showing lines 309–378 of 466 total. Use offset=378 to read the next section.]

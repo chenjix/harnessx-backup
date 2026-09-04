@@ -1,0 +1,131 @@
+# HarnessX HarnessConfig (behaviour pipeline — no model)
+# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+
+tool_registry:
+  builtin:
+  - Read
+  - Write
+  - Edit
+  - Glob
+  - Grep
+  - Bash
+  - WebSearch
+  - WebFetch
+  custom:
+  - harnessx.meta_harness.workers.trajectory_digester.make_spawn_reflect_worker_tool
+tracer:
+  _target_: harnessx.tracing.journal.HarnessJournal
+  export_jsonl: true
+  silent: false
+  session_id: null
+  base_dir: /fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R7/meta_workspace/sessions
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  _code_hash: sha256:a5213096e1e5ed10
+  system_builder:
+    _target_: harnessx.processors.context.strategies.system_prompt.default.DefaultSystemPromptBuilder
+    _code_hash: sha256:ea3d4c6302cf2af1
+    max_skills_shown: 20
+    max_spawn_depth: 3
+    extra_skills_dirs:
+    - /fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/skills
+    - /fsx/home/jixuan.chen/harnessx-backup/harnessx/meta_harness/workspace/skills
+    persona_root: /fsx/home/jixuan.chen/harnessx-backup/harnessx/meta_harness/workspace
+  _hook_: '*'
+- _target_: harnessx.meta_harness.processors.write_scope_gate.WriteScopeGateProcessor
+  _code_hash: sha256:c981e79ac5cdaf31
+  allowed_roots:
+  - !!python/object/apply:pathlib.PosixPath
+    - /
+    - fsx
+    - home
+    - jixuan.chen
+    - harnessx-backup
+    - recipe
+    - tb2_evolver
+    - runs
+    - tmax-coev-rep12-i3
+    - _meta_v2
+    - R7
+  allowed_files:
+  - !!python/object/apply:pathlib.PosixPath
+    - /
+    - fsx
+    - home
+    - jixuan.chen
+    - harnessx-backup
+    - recipe
+    - tb2_evolver
+    - runs
+    - tmax-coev-rep12-i3
+    - learnings.md
+  _hook_: '*'
+- _target_: harnessx.meta_harness.processors.step_deadline_reminder.StepDeadlineReminderProcessor
+  _code_hash: sha256:3c96aec91266cf09
+  reminder_step: 120
+  output_within_steps: 30
+  early_reminder_step: 80
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  _code_hash: sha256:479ce2ae4d00a8ee
+  token_threshold: 200000
+  message_threshold: 100
+  retention_window: 4
+  eviction_fraction: 0.95
+  summarize_key: summarize
+  summarize_prompt_template: 'You are compacting older conversation context for a
+    meta-agent that reads
+
+    task trajectories and evolves a HarnessConfig (processor pipeline, prompts,
+
+    tools, verification logic).
+
+    Return concise Markdown with exactly these sections:
+
+    1) Decisions
+
+    2) Facts and Constraints
+
+    3) Errors and Unresolved Risks
+
+    4) Pending Actions
+
+
+    Preserve: failure root causes, chosen hypothesis, config changes made or planned,
+
+    file paths written, hard constraints, and open blockers.
+
+    Discard: install/download progress logs (apt/pip/npm) unless they contain errors,
+
+    repeated status lines, file listings with no decisions attached, and any filler.
+
+    Be concise but complete — do not omit any decision, blocker, or config change.
+
+
+    Conversation to summarize:
+
+    {conversation}'
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.meta_harness.processors.contract_autocheck.ContractAutoCheckProcessor
+  _code_hash: sha256:3bd898dae25d864b
+  _hook_: '*'
+- _target_: harnessx.meta_harness.processors.leakage_guard.LeakageGuardProcessor
+  _code_hash: sha256:922c68209f324848
+  output_dir:
+    _target_: pathlib.PosixPath
+    _code_hash: sha256:93e98a2e0d9ee182
+  _hook_: '*'
+workspace:
+  root: /fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R7/meta_workspace
+  agent_id: meta-agent
+  project: default
+  mode: shared
+  home: null
+  parent_id: null
+workspace_template: default
+init_workspace: false
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

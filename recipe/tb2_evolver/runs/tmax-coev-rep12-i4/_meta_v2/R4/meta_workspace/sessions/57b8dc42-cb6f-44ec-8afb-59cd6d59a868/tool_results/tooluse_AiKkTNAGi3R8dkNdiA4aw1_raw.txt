@@ -1,0 +1,102 @@
+114	@dataclass(frozen=True)
+115	class StepStartEvent(Event):
+116	    type: str = field(default="step_start", init=False)
+117	    # Input fields — set by runloop, read by context processors
+118	    raw_messages: tuple["Message", ...] = ()  # state.raw_messages at this step
+119	    task: Any = field(default=None, hash=False, compare=False)
+120	    context_window: int = 64_000
+121	    workspace: Any | None = field(default=None, hash=False, compare=False)
+122	    tools: tuple["ToolSchema", ...] = ()  # initial schemas from tool_registry
+123	    # Output fields — populated/modified by step_start processors
+124	    messages: tuple["Message", ...] = ()  # assembled context
+125	    system_prompt: str = ""
+126	    token_count: int = 0
+127	    boundary_hint: "BoundaryHint | None" = field(default=None, hash=False, compare=False)
+128	
+129	
+130	@dataclass(frozen=True)
+131	class BeforeModelEvent(Event):
+132	    type: str = field(default="before_model", init=False)
+133	    messages: tuple[Message, ...] = ()
+134	    tools: tuple[ToolSchema, ...] = ()
+135	    cumulative_cost_usd: float = 0.0  # needed by CostGuardProcessor
+136	    skip_model: bool = field(default=False, hash=False, compare=False)
+137	    synthetic_output: str = field(default="", hash=False, compare=False)
+138	
+139	
+140	@dataclass(frozen=True)
+141	class ModelResponseEvent(Event):
+142	    type: str = field(default="model_response", init=False)
+143	    content: str = ""
+144	    thinking: str = ""  # extended thinking / reasoning content from the model
+145	    thinking_blocks: tuple = ()  # raw provider blocks (with signatures) for multi-turn replay
+146	    tool_calls: tuple[ToolCall, ...] = ()
+147	    finish_reason: str = "end_turn"
+148	    usage: Usage = field(default_factory=Usage)
+149	    model: str = ""
+150	    attempted_models: tuple[str, ...] = ()  # models tried before this one (ProviderGroup fallback)
+151	
+152	
+153	@dataclass(frozen=True)
+154	class ToolCallEvent(Event):
+155	    type: str = field(default="tool_call", init=False)
+156	    tool_name: str = ""
+157	    tool_input: dict = field(default_factory=dict)
+158	    tool_call_id: str = ""
+159	    approved: bool = True
+160	    synthetic_result: str | None = None
+161	    """When set alongside approved=False, the RunLoop injects this as the
+162	    ToolResultEvent result instead of sending "Tool call not approved."
+163	    Processors can use this to intercept tool calls and inject custom results.
+164	    """
+165	
+166	
+167	@dataclass(frozen=True)
+168	class ToolResultEvent(Event):
+169	    type: str = field(default="tool_result", init=False)
+170	    tool_name: str = ""
+171	    tool_call_id: str = ""
+172	    result: str = ""
+173	    error: str | None = None
+174	    duration_ms: float = 0.0
+175	    content_blocks: tuple = field(default=(), hash=False, compare=False)
+176	    # Native multimodal blocks (Anthropic content format) from MCP tools.
+177	    # Empty tuple = text-only result; processor chain passes this through unchanged.
+178	
+179	
+180	@dataclass(frozen=True)
+181	class StepEndEvent(Event):
+182	    type: str = field(default="step_end", init=False)
+183	    step_summary: str = ""
+184	    tool_call_summary: str = ""  # "tool1(args)|tool2(args)" — used by LoopDetectionProcessor
+185	    cumulative_tokens: int = 0
+186	    cumulative_cost_usd: float = 0.0
+187	    memory_written: bool = False
+188	    state_snapshot: "dict | None" = field(
+189	        default=None, hash=False, compare=False
+190	    )  # needed by CheckpointProcessor; None by default to keep events lightweight
+191	    # Timing + token breakdown (populated by run_loop, forwarded via SSETracer)
+192	    duration_ms: float = 0.0
+193	    input_tokens: int = 0
+194	    output_tokens: int = 0
+195	
+196	
+197	@dataclass(frozen=True)
+198	class TaskEndEvent(Event):
+199	    type: str = field(default="task_end", init=False)
+200	    final_output: str = ""
+201	    exit_reason: str = "done"
+202	    total_steps: int = 0
+203	    total_tokens: int = 0
+204	    total_input_tokens: int = 0
+205	    total_output_tokens: int = 0
+206	    total_cost_usd: float = 0.0
+207	    last_step_input_tokens: int = 0  # input_tokens of the final model call (= context size)
+208	    last_step_output_tokens: int = 0  # output_tokens of the final model call
+209	    eval_result: EvalResult | None = None
+210	    success_criteria: str = ""  # from task.success_criteria — used by EvaluationProcessor
+211	    task_description: str = ""  # from task.description — used by LLMJudgeProcessor
+212	    final_messages: tuple = field(default_factory=tuple, hash=False, compare=False)
+213	    # tuple[Message, ...] — full conversation at task end; used by LLMJudgeEvaluator
+
+[Showing lines 114–213 of 580 total. Use offset=213 to read the next section.]

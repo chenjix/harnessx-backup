@@ -1,0 +1,64 @@
+74	
+75	## Round 2 — infra container-name conflict (no-op)
+76	
+77	<!-- journal:frontmatter
+78	round: 2
+79	timestamp: 2026-06-02T00:00:00Z
+80	hypothesis_id: h_docker_name_conflict_infra_noop_v1
+81	levers: []
+82	predicted_affected: []
+83	gating_outcome: noop
+84	gating_attribution: noop
+85	expected_global_gain: "None this round — assigned failure is an out-of-scope orchestration bug, not a harness gap. No config change can flip it."
+86	regression_risk: "None — byte-identical copy of R1 config."
+87	cost_shift: "Zero."
+88	rollback_trigger: "N/A (no change). If docker_env.py naming is fixed by a human, the 8 error-status tasks should re-run cleanly and rejoin the scored set."
+89	-->
+90	
+91	### Why
+92	
+93	Assigned focus `task_000028_7fe033ac` (system_administration) has
+94	`status="error"`, `reward=0`, `elapsed_s=0.1`. It is NOT a harness or model
+95	capability failure — the agent never ran. The container failed to start:
+96	`docker: Error response from daemon: Conflict. The container name
+97	"/tmax-task0000287fe033ac-1788258698" is already in use ...`, raised at
+98	`recipe/tmax_eval/docker_env.py:124` (`start_container`).
+99	
+100	Root cause is in read-only runner code, `docker_env.py:105`:
+101	`name = f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"[:63]`.
+102	The second-resolution `int(time.time())` collides on retry / same-second
+103	concurrency, so `docker run --name` hits an existing container and the
+104	RuntimeError fires before the run loop boots. All 8 `status="error"` tasks in
+105	this trajectory set share this identical signature (each elapsed_s ≈ 0.1):
+106	task_000015, task_000028, task_000140, task_000505, task_000748, task_001032,
+107	task_001090, task_001781.
+108	
+109	Per tb2-playbook + hard invariant #2, container lifecycle/naming is outside the
+110	config.yaml evolvable surface (processors / tool_registry / system prompt only)
+111	and lives in read-only recipe code. The failure precedes the first agent turn,
+112	so no MultiHookProcessor hook can ever fire on it. There is no in-scope harness
+113	fix. Shipping explicit no-op (byte-for-byte R1 copy) rather than drifting onto
+114	another proposal's territory.
+115	
+116	### Changes
+117	
+118	- `config.yaml` — byte-for-byte copy of R1 config (explicit no-op).
+119	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — documents the docker_env.py naming bug
+120	  and three candidate fixes (uuid/time_ns suffix, pre-run `docker rm -f`,
+121	  retry-on-conflict), all out of meta-agent write scope.
+122	
+123	### Evidence
+124	
+125	- `task_000028_7fe033ac.result.json`: `status="error"`, `elapsed_s=0.1`,
+126	  error = docker container-name Conflict; traceback tail at
+127	  `docker_env.py:124 in start_container`.
+128	- 8/8 error-status tasks in the set match `already in use by container` with
+129	  elapsed_s ≈ 0.1 (grep-confirmed).
+130	- `docker_env.py:105`: second-resolution `int(time.time())` name suffix — the
+131	  collision source.
+132	
+133	### Uncertainty
+134	
+135	The bug is confidently diagnosed and confidently out of scope. Only risk: if a
+136	human fix lands in docker_env.py, these 8 tasks re-enter the scored set and
+137	their *actual* agent-phase pass/fail becomes visible for future rounds to work.

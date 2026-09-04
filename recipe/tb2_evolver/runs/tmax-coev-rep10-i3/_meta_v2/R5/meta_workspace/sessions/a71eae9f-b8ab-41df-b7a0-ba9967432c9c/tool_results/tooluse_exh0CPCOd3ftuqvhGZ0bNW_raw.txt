@@ -1,0 +1,82 @@
+131	    """
+132	
+133	    _singleton_group = "noprogress_repeat_breaker"
+134	    _order = 32  # just after CustomEditToolProcessor (_order=30)
+135	
+136	    def __init__(self, soft_threshold: int = 4, hard_threshold: int = 6) -> None:
+137	        self.soft_threshold = int(soft_threshold)
+138	        self.hard_threshold = int(hard_threshold)
+139	        if self.hard_threshold < self.soft_threshold:
+140	            self.hard_threshold = self.soft_threshold
+141	        # per-task state
+142	        self._last_cmd: str = ""
+143	        self._last_result: str = ""
+144	        self._streak: int = 0  # consecutive identical (cmd, result) pairs
+145	        self._pending_cmd: dict[str, str] = {}  # tool_call_id -> normalized command
+146	        self._nudged_for_cmd: str = ""  # cmd we've already soft-nudged once
+147	
+148	    async def on_task_start(self, event: TaskStartEvent):
+149	        self._reset()
+150	        yield event
+151	
+152	    async def on_task_end(self, event: TaskEndEvent):
+153	        self._reset()
+154	        yield event
+155	
+156	    def _reset(self) -> None:
+157	        self._last_cmd = ""
+158	        self._last_result = ""
+159	        self._streak = 0
+160	        self._pending_cmd.clear()
+161	        self._nudged_for_cmd = ""
+162	
+163	    async def on_before_tool(self, event: ToolCallEvent):
+164	        if event.tool_name != "Bash":
+165	            yield event
+166	            return
+167	        cmd = _norm((event.tool_input or {}).get("command", ""))
+168	        # Block only when the SAME command has already produced hard_threshold
+169	        # consecutive identical results. A streak >= hard_threshold means the
+170	        # last `_streak` executions of `_last_cmd` all returned `_last_result`.
+171	        if cmd and cmd == self._last_cmd and self._streak >= self.hard_threshold:
+172	            msg = _HARD_BLOCK.format(count=self._streak)
+173	            yield dataclasses.replace(event, approved=False, synthetic_result=msg)
+174	            return
+175	        # Stash the command so on_after_tool can pair it with its result.
+176	        self._pending_cmd[event.tool_call_id] = cmd
+177	        yield event
+178	
+179	    async def on_after_tool(self, event: ToolResultEvent):
+180	        if event.tool_name != "Bash":
+181	            yield event
+182	            return
+183	        # Ignore synthetic block results: our _HARD_BLOCK sentinel means the
+184	        # command was refused, not executed — do not fold it into the streak.
+185	        result = event.result or ""
+186	        if "[NoProgressRepeatBreaker] BLOCKED." in result:
+187	            yield event
+188	            return
+189	
+190	        # Pair the result with the command captured in on_before_tool.
+191	        cmd = self._pending_cmd.pop(event.tool_call_id, None)
+192	        norm_result = _norm(result)
+193	
+194	        if cmd is None:
+195	            # No command captured (shouldn't happen for Bash) — reset streak.
+196	            self._last_cmd = ""
+197	            self._last_result = norm_result
+198	            self._streak = 0
+199	            yield event
+200	            return
+201	
+202	        if cmd == self._last_cmd and norm_result == self._last_result and cmd != "":
+203	            self._streak += 1
+204	        else:
+205	            self._streak = 1
+206	            self._nudged_for_cmd = ""  # new (cmd,result) context: allow a fresh nudge
+207	        self._last_cmd = cmd
+208	        self._last_result = norm_result
+209	
+210	        if (
+
+[Showing lines 131–210 of 220 total. Use offset=210 to read the next section.]

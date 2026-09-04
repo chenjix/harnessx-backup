@@ -1,0 +1,57 @@
+385	                run_id=state.run_id,
+386	                step_id=step_id,
+387	                messages=tuple(_assembled_list),
+388	                tools=step_start_event.tools,
+389	                cumulative_cost_usd=state.cumulative_cost_usd,
+390	            )
+391	            _bm_events = await pipe_all(
+392	                before_event,
+393	                get_procs("before_model"),
+394	                tracer=tracer,
+395	                hook="before_model",
+396	            )
+397	            before_event = next(
+398	                (e for e in reversed(_bm_events) if isinstance(e, BeforeModelEvent)),
+399	                before_event,
+400	            )
+401	            await tracer.on_event(before_event)
+402	
+403	            # ── 3. Call model ────────────────────────────────────────────────
+404	            if before_event.skip_model:
+405	                model_event = ModelResponseEvent(
+406	                    run_id=state.run_id,
+407	                    step_id=step_id,
+408	                    content=before_event.synthetic_output,
+409	                    finish_reason="stop",
+410	                    usage=Usage(),
+411	                )
+412	                spawn_events: list[SpawnSubAgentEvent] = []
+413	            else:
+414	                # Validate message sequence before sending to API:
+415	                # - Ensure tool_use/tool_result pairs are complete
+416	                # - Ensure messages don't end with assistant role (would be interpreted as prefill)
+417	                _before_msg_list = list(before_event.messages)
+418	                final_messages = _validate_messages(_before_msg_list)
+419	                model_response = await active_model_provider.complete(
+420	                    messages=final_messages,
+421	                    tools=list(before_event.tools),
+422	                    stream_callback=stream_callback,
+423	                )
+424	                model_event = ModelResponseEvent(
+425	                    run_id=state.run_id,
+426	                    step_id=step_id,
+427	                    content=model_response.content,
+428	                    thinking=model_response.thinking,
+429	                    thinking_blocks=model_response.thinking_blocks,
+430	                    tool_calls=model_response.tool_calls,
+431	                    finish_reason=model_response.finish_reason,
+432	                    usage=model_response.usage,
+433	                    model=model_response.model,
+434	                )
+435	                # after_model uses pipe_all: processors may yield SpawnSubAgentEvents
+436	                after_events = await pipe_all(model_event, get_procs("after_model"), tracer=tracer, hook="after_model")
+437	                spawn_events = [e for e in after_events if isinstance(e, SpawnSubAgentEvent)]
+438	                model_event = next(
+439	                    (e for e in reversed(after_events) if isinstance(e, ModelResponseEvent)),
+
+[Showing lines 385–439 of 981 total. Use offset=439 to read the next section.]

@@ -1,0 +1,39 @@
+252:    _model_empty_end_turn_seen = False
+253:    _empty_end_turn_retried = False
+259:                break
+409:                    finish_reason="stop",
+430:                    tool_calls=model_response.tool_calls,
+431:                    finish_reason=model_response.finish_reason,
+479:                        tool_calls=model_event.tool_calls,
+497:            for tc in model_event.tool_calls:
+503:                    break
+663:                break
+667:            tool_call_summary = "|".join(f"{tc.name}:{str(tc.input)}" for tc in model_event.tool_calls)
+713:                and not model_event.tool_calls
+727:                model_event.finish_reason == "length" and not model_event.tool_calls and not _thinking_only
+740:                    "run_loop: finish_reason=length with no tool calls at step=%d — "
+748:                and model_event.finish_reason in ("end_turn", "stop")
+749:                and not model_event.tool_calls
+752:                if step_id == 0 and empty_content and not _empty_end_turn_retried:
+753:                    _model_empty_end_turn_seen = True
+754:                    _empty_end_turn_retried = True
+755:                    state.set_slot("__model_empty_end_turn_seen", "diagnostic", True)
+766:                        "run_loop: recovered empty first-turn end_turn via single retry (run_id=%s)",
+770:                break
+772:                break
+775:                break
+792:                finish_reason="interrupted",
+815:    # Recover best output for non-clean exits (budget/loop hit via normal break)
+818:    if _model_empty_end_turn_seen:
+819:        state.set_slot("__model_empty_end_turn_seen", "diagnostic", True)
+821:            "__empty_end_turn_recovered",
+862:    2. Assistant messages with tool_calls but missing tool results — removes tool_calls
+875:    all_tc_ids: set[str] = set()  # from assistant tool_calls
+878:        if m.role == "assistant" and m.tool_calls:
+879:            for tc in m.tool_calls:
+890:        if m.role == "assistant" and m.tool_calls:
+891:            # Check if ALL tool_calls have corresponding results
+892:            matched = [tc for tc in m.tool_calls if tc.id in all_tr_ids]
+893:            unmatched = [tc for tc in m.tool_calls if tc.id not in all_tr_ids]
+904:                # Partial — keep only matched tool_calls
+909:                        tool_calls=tuple(matched),

@@ -1,0 +1,80 @@
+--- tool [34] ---
+{"product_id": "9921", "category": "electronics", "department": "electronics", "sort_order": "asc"}
+{"session_token": "abc123xyz", "traffic_source": "google"}
+{"account_id": "user_88", "theme": "dark", "notifications": "true"}
+
+--- tool [36] ---
+(exit 0, no output captured)
+--- tool [42] ---
+(exit 0, no output captured)
+--- tool [46] ---
+URL: /user/prefs/jqjkl2uh?theme=light&alerts=1
+Result: {'account_id': 'jqjkl2uh', 'theme': 'light', 'notifications': '1'}
+
+--- tool [48] ---
+URL: /user/prefs/jqjkl2uh?theme=light&alerts=1
+Result: {'account_id': 'jqjkl2uh', 'theme': 'light', 'notifications': '1'}
+'/user/prefs/' in url: True
+user_id: jqjkl2uh?theme=light&alerts=1
+result.get('account_id'): jqjkl2uh
+Match: False
+
+--- tool [52] ---
+(exit 0, no output captured)
+--- tool [56] ---
+---Output---
+{"product_id": "9921", "category": "electronics", "department": "electronics", "sort_order": "asc"}
+{"session_token": "abc123xyz", "traffic_source": "google"}
+{"account_id": "user_88", "theme": "dark", "notifications": "true"}
+
+--- tool [58] ---
+URL: /catalog/item/123?dept=electronics%20store&sort=asc
+Result: {'product_id': '123', 'category': 'electronics store', 'department': 'electronics store', 'sort_order': 'asc'}
+
+URL: /auth/session/abc123?referrer=google%20search
+Result: {'session_token': 'abc123', 'traffic_source': 'google search'}
+
+URL: /user/prefs/user1?theme=dark&alerts=true%2Bfalse
+Result: {'account_id': 'user1', 'theme': 'dark', 'notifications': 'true+false'}
+
+
+--- tool [60] ---
+-rwxr-xr-x 1 root root 3436 Aug 28 21:47 /home/user/migrate.py
+-rwxrwxrwx 1 root root  148 Aug 28 10:33 /home/user/sample_urls.txt
+-rw-r--r-- 1 root root 8160 Aug 28 21:49 /home/user/test_parser.py
+
+--- tool [66] ---
+#!/usr/bin/env python3
+"""
+URL Migration Utility - Parses legacy URLs and converts to new JSON schema.
+"""
+
+import sys
+import json
+import re
+from urllib.parse import urlparse, parse_qs, unquote
+
+# Routing schema extracted from the image
+# Route patterns mapped to new JSON schema keys
+ROUTES = [
+    {
+        'pattern': r'^/catalog/item/([^/]+)$',
+        'params': {
+            'item_id': r'(\d+)',
+            'dept': r'(\w+)',
+            'sort': r'(\w+)'
+        },
+        'schema': {
+            'product_id': 'item_id',
+            'category': 'dept',
+            'department': 'dept',
+            'sort_order': 'sort'
+        }
+    },
+    {
+        'pattern': r'^/auth/session/([^/]+)$',
+        'params': {
+            'session_id': r'(\w+)',
+            'referrer': r'(\w+)'
+        },
+  

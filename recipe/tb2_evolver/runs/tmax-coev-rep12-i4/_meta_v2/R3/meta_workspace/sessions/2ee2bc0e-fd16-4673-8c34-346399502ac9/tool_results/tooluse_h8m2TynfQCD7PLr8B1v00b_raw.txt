@@ -1,0 +1,140 @@
+1	# Tmax coev rep12-i4 — evolve journal
+2	
+3	## Round 1 — break identical-Bash loops
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_bash_loop_breaker_v1
+9	levers: [control]
+10	predicted_affected: [task_000032_3fb303f6, task_000910_16cc0daf, task_001044_45c70cf1, task_001465_aa3ed3f8, task_000506_c13429e7, task_001028_5bc8bc70, task_000938_6d7bdc5c, task_000796_828a72cf, task_000761_072f9e93]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=10/50; +1/-1 gained=task_000677_1de47eed lost=task_000560_7dc63881; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+14	expected_global_gain: "Recover wasted step-budget on the largest failing cluster (9/11 budget_exceeded tasks stuck in identical-Bash loops); frees ~25-70 steps per task to try a different approach."
+15	regression_risk: "A legitimate task that must poll one identical command >=6 times (waiting on a service) could be interrupted; mitigated by generous break_threshold=6 and a redirect that says verify-and-finish rather than hard-fail. Internal _tb2_self_verify calls are excluded from tracking, protecting the passing task that repeats it 22x."
+16	cost_shift: "Net decrease — intercepting dead loops truncates 20-75 wasted step-generations per affected task, including the 1600s/1900s runaways."
+17	rollback_trigger: "If R2 pass_rate is flat-or-down AND any previously-passing task regressed to F with a BashLoopBreaker BLOCKED message in its final steps, revert."
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 10/50 (0.20). The single dominant failure cluster is
+23	`exit_reason=budget_exceeded` at the step cap (`steps=80`): 11 tasks, only 1
+24	passed. On 9 of those 11, the model enters a degenerate tool-level repetition
+25	loop — it re-issues the byte-for-byte same `Bash` command 10-33 times in a row,
+26	gets the identical result each time, explicitly narrates "I'm stuck in a loop /
+27	I need to stop repeating this command," and then repeats it again until the
+28	budget is exhausted. The loops set in early (3rd-7th Bash call), so 25-75 steps
+29	are wasted on a command already proven useless. This is a harness deficiency:
+30	the model cannot self-correct a loop it recognises, and there is no mechanical
+31	guard in the pipeline for repeated-identical-tool-call loops (the existing
+32	`LengthTruncationRecoveryProcessor` only handles `finish_reason=length` / no
+33	tool call, a different shape).
+34	
+35	### Changes
+36	
+37	- `processors/bash_loop_breaker.py` — new `BashLoopBreakerProcessor`
+38	  (`MultiHookProcessor`): Bash-only fingerprinting; warns on the 3rd identical
+39	  command (appends nudge to the tool result), intercepts the 6th (does not
+40	  execute; injects a corrective redirect via `approved=False` +
+41	  `synthetic_result`). Internal tools (e.g. `_tb2_self_verify`) are never
+42	  fingerprinted, so they cannot trip the detector.
+43	- `config.yaml` — register the processor after
+44	  `LengthTruncationRecoveryProcessor` with `warn_threshold=3`,
+45	  `break_threshold=6`. Rest of the pipeline copied byte-for-byte from R0.
+46	- `system_prompt.txt` — copied byte-for-byte beside the new config (required by
+47	  `SiblingSystemPromptBuilder`).
+48	
+49	### Evidence
+50	
+51	- `task_000910_16cc0daf`: 33x identical `ffmpeg ... -f rawvideo ...`; tool output
+52	  each time is the interactive `File 'pixel_format=rgb24' already exists.
+53	  Overwrite? [y/N] Not overwriting - exiting`; assistant: "I need to stop
+54	  repeating the same command" → repeats.
+55	- `task_000032_3fb303f6`: 16x identical Bash returning `(exit 0, no output
+56	  captured)`; assistant: "Let me try a different approach" → repeats verbatim.
+57	- `task_001044_45c70cf1`: 27x identical `echo "1 10 ..." | perf_oracle` →
+58	  `Trend: m=0 b=1` each time.
+59	- `task_001465_aa3ed3f8`: 26x identical `curl -s http://localhost:5000/embed`.
+60	- Passing-set safety: all 10 R0 passing tasks had max consecutive identical-Bash
+61	  run = 1 (measured); the one passing task with heavy repetition
+62	  (`task_002138_2e85672e`, 22x) repeats `_tb2_self_verify`, which the detector
+63	  ignores by design.
+64	
+65	### Uncertainty
+66	
+67	Breaking the loop returns budget but does not guarantee each task flips — some
+68	(e.g. the video-frame + crypto + Go-server task) also need domain capability the
+69	model may still lack; those are model-capability gaps, not harness gaps, and
+70	this round does not try to patch them. The clean win is removing the specific
+71	harness-level waste (burning the whole budget on a proven-useless command). If
+72	R2 shows no pass-rate movement AND no cost reduction on the cluster, the loop
+73	was masking a deeper capability wall and the lever should move elsewhere.
+74	
+75	## Round 2 — deploy round-trip verify workflow prompt
+76	
+77	<!-- journal:frontmatter
+78	round: 2
+79	timestamp: 2026-06-02T00:00:00Z
+80	hypothesis_id: h_roundtrip_verify_prompt_v1
+81	levers: [instruction]
+82	predicted_affected: [task_000763_7713d5ae, task_000567_d082f802, task_000142_47a40a0c, task_000032_3fb303f6]
+83	cited_candidates: [C-002]
+84	gating_outcome: accepted
+85	gating_attribution: score=10/50; +2/-2 gained=task_000560_7dc63881,task_001185_636b067c lost=task_000677_1de47eed,task_002138_2e85672e; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+86	expected_global_gain: "Largest failing cluster is done-but-wrong-content (28 tasks; 16 clear value mismatches). Deploy the general survey/plan/round-trip-verify/preserve-partial-credit workflow the R1 config header claimed but never actually shipped (R1's sibling system_prompt.txt was the bare 5-line default). Even a modest hit rate flips pass_rate off the flat 0.20."
+87	regression_risk: "LOW — prompt is strategy-only and additive, cannot remove capability. Minor: extra verify steps could add budget pressure near the step cap; mitigated by the paired 'abandon doomed subgoal / bank completed deliverables' rule which REDUCES wasted steps on the budget_exceeded cluster."
+88	cost_shift: "Neutral-to-down: +a few verify steps on short tasks, -many wasted steps on the 80-step budget_exceeded runaways."
+89	rollback_trigger: "Revert to the 5-line prompt if R3 pass_rate < 0.20 OR a previously-passing task regresses with the agent visibly over-verifying into the step cap."
+90	-->
+91	
+92	### Why
+93	
+94	R1 (BashLoopBreaker, control) left pass_rate flat at 0.20 (10/50). Post-hoc:
+95	the loop-breaker fired on only 4/11 budget_exceeded tasks, and on those the
+96	model IGNORED the BLOCKED redirect and re-emitted the byte-identical command
+97	5-33 more times (task_000032: 33 consecutive BLOCKs, never once attempted the
+98	required report.txt). Mechanical redirects are being ignored — the control
+99	lever has hit a capability wall on the loop cluster. The dominant failure shape
+100	is now `exit_reason=done` with a verifier AssertionError on a computed VALUE
+101	(28 done-but-fail; 16 clear value mismatches). In these the agent confidently
+102	declares success; where it "verified" at all, it never round-tripped its answer
+103	against the constraint the task actually states (e.g. task_000763 ran the
+104	forward token algo on its guessed PIN 2778 but never checked that 2778 actually
+105	reproduces the given token 1A3B — ground truth was 2394).
+106	
+107	Critically, the R1 config's own header comment claims a full
+108	survey/plan/verify workflow prompt, but the `system_prompt.txt` shipped beside
+109	it is the bare 5-line default. The playbook's #1 lever (explicit plan +
+110	verify-deliverables discipline) was never actually deployed.
+111	
+112	### Changes
+113	
+114	- `system_prompt.txt` (sibling of config, loaded by SiblingSystemPromptBuilder):
+115	  replaced the 5-line default with a general solver workflow centered on
+116	  (a) round-trip verification — when you derive a value from a GIVEN target,
+117	  re-run the forward process on your value and confirm it reproduces the
+118	  target; (b) verbatim diff against any exact stated string/path/target;
+119	  (c) preserve-partial-credit — abandon a doomed subgoal and bank completed
+120	  deliverables rather than burn the whole budget re-issuing a failing command.
+121	  Strategy-only: no task ids, answers, constants, or per-task code.
+122	- `config.yaml`: processor pipeline copied byte-for-byte from R1 (BashLoopBreaker
+123	  retained). Only the sibling system prompt changed. file:// refs to R1/R0
+124	  processor assets are read-only and unchanged.
+125	
+126	### Evidence
+127	
+128	See `_meta_scratch/candidates.md` C-002 for body-quoted verifier assertions on
+129	task_000763 (PIN 2778 vs 2394), task_000567 (PC1_Sum 6.9499 vs 7.7709), and
+130	task_000142 (symlink -> file_A.dat vs financial_records_2021.dat).
+131	
+132	### Uncertainty
+133	
+134	Instruction cannot conjure computation the model can't do; the round-trip rule
+135	only helps where the model CAN detect its own error by re-checking against the
+136	stated constraint (strongest on task_000763 and task_000142). task_000567's
+137	seed/determinism mismatch may still need capability the model lacks. Honest
+138	expectation: flips a subset of the value-mismatch cluster, not all. If R3 shows
+139	zero movement, the done-but-wrong cluster is a pure capability wall and the
+140	lever should move off Instruction entirely for this benchmark.

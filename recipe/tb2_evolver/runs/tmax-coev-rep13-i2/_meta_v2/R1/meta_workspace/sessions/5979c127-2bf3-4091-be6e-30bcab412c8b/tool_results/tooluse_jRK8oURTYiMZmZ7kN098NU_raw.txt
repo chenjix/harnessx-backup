@@ -1,0 +1,47 @@
+num msgs 52
+--- user ---
+You are a data scientist cleaning up a multimodal dataset. You have a dashcam video and a noisy telemetry event log. You need to write a Python HTTP service that processes requests to synchronize video frames with deduplicated and cleaned telemetry data.
+
+**Files provided:**
+- `/app/dashcam.mp4`: A video file containing the dashcam footage.
+- `/app/events.txt`: A text file containing telemetry events. Each line is formatted as `offset_sec|raw_text`.
+
+**Your requirements:**
+
+1. **Tokenization and Normalization:** 
+   For each event in `/app/events.txt`, you must extract the `raw_text`, convert it to lowercase, remove all non-alphanumeric characters (keep only `a-z`, `0-9`, and spaces), and tokenize it by splitting on spaces (removing empty tokens).
+
+2. **Hash-based Deduplication:**
+   Create a normalized string by joining the tokens with a single space. Compute the SHA-256 hash of this normalized string (encoded in UTF-8). If an event's hash has been seen in any previous line, discard the current event entirely. Keep only the first occurrence of each unique event.
+
+3. **Service & Timestamp Alignment:**
+   Write and start a Python HTTP server listening on `127.0.0.1:8000`. 
+   It must expose the endpoint `GET /query?t=<seconds>` (where `<seconds>` is an integer).
+   When a request is received:
+   - Perform **timestamp alignment**: Find the largest offset from your *deduplicated* events that is less than or equal to `t`. If `t` is smaller than the first deduplicated event's offs
+--- assistant ---
+Let me break down this task:
+
+1. I need to read `/app/events.txt` which has lines formatted as `offset_sec|raw_text`
+2. For each event:
+   - Extract raw_text
+   - Convert to lowercase
+   - Remove non-alphanumeric characters (keep only a-z, 0-9, spaces)
+   - Tokenize by splitting on spaces
+   - Create normalized string by joining tokens with single space
+   - Compute SHA-256 hash of this normalized string
+   - If hash has been seen before, discard the event
+   - Keep only first occurrence of each unique event
+
+3. Create an HTTP server on 127.0.0.1:8000 with endpoint GET /query?t=<seconds>
+4. For each request:
+   - Find largest offset from deduplicated events that is <= t
+   - If t is smaller than first deduplicated event's offset, return 404
+   - Extract frame from /app/dashcam.mp4 at t seconds using ffmpeg
+   - Compute SHA-256 of raw frame data
+   - Return JSON with event_offset, tokens, frame_hash_sha256
+
+Let me start by examining the files to understand the data format.
+
+
+I'll start by examining the input files to understand their structure, then build the Python HTTP service.

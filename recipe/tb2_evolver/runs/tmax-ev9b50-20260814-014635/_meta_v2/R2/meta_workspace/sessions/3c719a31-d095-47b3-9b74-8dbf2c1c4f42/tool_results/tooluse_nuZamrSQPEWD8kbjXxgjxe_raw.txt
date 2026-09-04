@@ -1,0 +1,72 @@
+1	tool_registry:
+2	  builtin:
+3	  - Bash
+4	  custom: []
+5	tracer: null
+6	processors:
+7	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+8	  _code_hash: sha256:a5213096e1e5ed10
+9	  system_builder:
+10	    _target_: benchmarks.terminal_bench_2.harness._StaticSystemPromptBuilder
+11	    _code_hash: sha256:ac9cec8620b800d8
+12	  _hook_: '*'
+13	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+14	  _code_hash: sha256:c3a0003e0cdeb057
+15	  working_dir: /app
+16	  constraints: {}
+17	  header: Environment
+18	  max_tree_lines: 20
+19	  non_interactive: true
+20	  inject_integrity_rules: true
+21	  _hook_: '*'
+22	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+23	  _code_hash: sha256:5c8e3bb312fb6dd8
+24	  tool_schemas: {}
+25	  _hook_: '*'
+26	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+27	  _code_hash: sha256:ca839b8df0220f5c
+28	  warn_at:
+29	  - 0.7
+30	  - 0.9
+31	  _hook_: '*'
+32	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+33	  _code_hash: sha256:479ce2ae4d00a8ee
+34	  token_threshold: 140000
+35	  message_threshold: 100
+36	  retention_window: 6
+37	  eviction_fraction: 0.5
+38	  summarize_key: summarize
+39	  preserve_first_message: true
+40	  _hook_: '*'
+41	- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+42	  window_size: 12
+43	  warn_threshold: 3
+44	  threshold: 5
+45	  name_warn_threshold: 9999
+46	  compaction_drop_threshold: 5
+47	  _hook_: '*'
+48	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+49	  _code_hash: sha256:d81a9178188f2908
+50	  max_consecutive_errors: 1
+51	  _hook_: '*'
+52	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+53	  _code_hash: sha256:8e71b409502e853f
+54	  drop_threshold: 5
+55	  _hook_: '*'
+56	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+57	  _code_hash: sha256:739db4a0bda02dfc
+58	  _hook_: '*'
+59	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+60	  _code_hash: sha256:6ef4a4be0a8acf7c
+61	  threshold: 7
+62	  _hook_: '*'
+63	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+64	  _code_hash: sha256:b5a515a071eb0f5e
+65	  _hook_: '*'
+66	workspace: null
+67	workspace_template: default
+68	init_workspace: true
+69	step_snapshots: true
+70	sandbox_provider: null
+71	sandbox_hint_id: null
+72	plugins: []

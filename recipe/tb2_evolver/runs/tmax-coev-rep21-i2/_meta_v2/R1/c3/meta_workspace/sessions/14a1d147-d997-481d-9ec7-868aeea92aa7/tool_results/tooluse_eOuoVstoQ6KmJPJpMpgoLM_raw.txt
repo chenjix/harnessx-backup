@@ -1,0 +1,41 @@
+EXISTS
+Assigned focus `task_000069_41f1682c` failed because the agent used `>`
+(truncate) where the task literally said "redirect **(append)**" to
+`deployment.log`; the verifier ran the script twice and expected exactly 2
+lines, got 1. The agent's exit-time self-verify *confirmed its own
+interpretation* ("idempotent - running again produces the same result") rather
+than the literal directive. Same shape in `task_000140_01c78b42`: the spec
+forbade lingering `vm_service` processes; 5 were left running and the agent
+exited `done` without checking the forbidden residual state. The stock
+`CustomSelfVerifyProcessor` checklist is too generic to catch this class.
+
+### Changes
+
+- `processors/spec_compliance_verify.py` — new `SpecComplianceVerifyProcessor`;
+  same one-shot exit-intercept mechanism as the stock self-verify, but injects a
+  spec-compliance checklist (quote each imperative verbatim; flag
+  append/overwrite, exact-count, idempotency, forbidden-residual-state wording;
+  reproduce the exact usage pattern the spec describes; diff observed behaviour
+  against literal wording).
+- `config.yaml` — replaced `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor`
+  with the new processor via absolute `file://` path (same `_order=90`,
+  `_singleton_group=tb2_self_verify`).
+
+### Evidence
+
+- `task_000069_41f1682c` messages: tool call `/home/user/deploy_service.sh && cat
+  /home/user/deployment.log` → single line; assistant: "The deployment script is
+  idempotent - running it again produces the same result without appending
+  duplicate lines." Script used `> /home/user/deployment.log`. Verifier:
+  "deployment.log should have exactly 2 lines after running twice, but has 1."
+- `task_000140_01c78b42` `final_pytest.output_tail`: "Lingering vm_service
+  processes found: ['352','606','858','1092','1284']"; `exit_reason=done`.
+
+### Uncertainty
+
+Checklist may not change behaviour if the model ignores it (same risk as the
+stock checklist). If R2 shows these tasks still fail with the same literal
+mismatch, the gap is model instruction-following, not the checklist — log and
+move to a different lever. Not harness-fixable and skipped this round:
+`task_000264_ab8c7253` (SQL index-usage capability), `task_000111_cbada64a`
+(numeric accuracy capability).

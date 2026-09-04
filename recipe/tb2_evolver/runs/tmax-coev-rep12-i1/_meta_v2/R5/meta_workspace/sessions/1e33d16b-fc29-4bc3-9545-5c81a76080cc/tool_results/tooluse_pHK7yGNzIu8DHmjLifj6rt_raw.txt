@@ -1,0 +1,214 @@
+1	# Learnings — tmax-coev-rep12-i1
+2	
+3	## Round 1 — no-progress repeat guard
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-22T11:06:50Z
+8	hypothesis_id: h_noprogress_repeat_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_002108_a8cfbf2a, task_000470_f819ab03, task_000840_b2ac4603, task_000908_170e5e4e]
+11	cited_candidates: [C-001]
+12	gating_outcome: reverted
+13	gating_attribution: score=25/50; +2/-6 gained=task_000987_31a34277,task_001400_7ed02d97 lost=task_000175_ef5ab90b,task_000529_8bcc67c9,task_000891_aa1685c7,task_001059_05af3d65; score 0.5000 < incumbent(mean) 0.5800 - tol 0.0400 -> revert to R0
+14	expected_global_gain: "Flips/recovers the budget_exceeded+error loop cluster (>=4 tasks with hard identical-command loops) by breaking no-progress repetition and freeing step budget"
+15	regression_risk: "Very low — guard only appends advisory text to a tool result, only fires on >=3 consecutive identical (command,output) pairs (a shape absent from passing runs), never blocks a command or mutates event.messages"
+16	cost_shift: "Net neutral-to-negative: breaking 80-step loops early reduces tokens on affected cluster; only additive cost is warning text on rare legitimate 3x repeats"
+17	rollback_trigger: "If R2 pass_rate does not improve and any previously-passing task in the loop-free set regresses, or if tokens rise materially, revert the processor"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 29/50 (58%). Analysis of the 21 failing trajectories showed a
+23	dominant, mechanical failure shape: the agent issues the SAME Bash command
+24	repeatedly, receives the SAME output every time, and makes zero progress
+25	until it either exhausts the 80-step budget (`exit_reason=budget_exceeded`,
+26	5 tasks) or crashes (`exit_reason=error`, task_002108). Counting maximal
+27	runs of consecutive identical commands over `.messages.json`: task_002108
+28	= 44, task_000470 = 28, task_000840 = 10 (paired cmd+output), task_000908
+29	= 8 (paired). The existing `LengthTruncationRecoveryProcessor` only fires on
+30	`finish_reason=length`; these loops have a normal finish reason plus a real
+31	(repeated) tool call, so nothing in the pipeline intercepted them.
+32	
+33	### Changes
+34	
+35	- `processors/norepeat_guard.py` — new `NoProgressRepeatGuard`
+36	  (`MultiHookProcessor`). Captures the Bash command in `on_before_tool`
+37	  keyed by `tool_call_id`; in `on_after_tool` builds a (command, truncated
+38	  output) signature and counts consecutive identical repeats; appends a
+39	  corrective "stop repeating / inspect real state" nudge to the tool result
+40	  at `repeat_threshold=3`, escalating at `escalate_threshold=6`. Only mutates
+41	  `event.result` (contract-safe, mirrors in-tree `CustomEditToolProcessor`).
+42	- `config.yaml` — register `NoProgressRepeatGuard` after
+43	  `CustomEditToolProcessor` in the processor pipeline via absolute `file://`
+44	  path (`repeat_threshold: 3`, `escalate_threshold: 6`, `tool_name: Bash`).
+45	
+46	### Evidence
+47	
+48	- `task_000470_f819ab03`: `exit_reason=budget_exceeded`, 80/80 steps; body
+49	  shows `CMD "cat << 'EOF' | nc -w 2 127.0.0.1 8080..."` → `OUT '(exit 0, no
+50	  output captured)'` repeated ~11x back-to-back; 31/33 total commands
+51	  identical.
+52	- `task_002108_a8cfbf2a`: `exit_reason=error`, 68 steps; last 8 assistant
+53	  tool calls byte-identical `cat > /app/frame_server/src/main.rs << 'ENDOFFILE'`.
+54	- `task_000840_b2ac4603` / `task_000908_170e5e4e`: `budget_exceeded` 80/80;
+55	  max consecutive identical (command+output) pairs measured 10 and 8.
+56	
+57	### Uncertainty
+58	
+59	The nudge redirects the agent to observe state rather than solving the task
+60	for it, so a flip depends on the agent then choosing a productive next action
+61	— capability, not harness, from that point. If the underlying tasks also have
+62	a capability gap (e.g. the Go/Rust server logic was simply wrong), breaking
+63	the loop frees budget but may not flip the task. Signal to watch: does the
+64	`budget_exceeded` count drop in R2 even if pass_rate moves less? If loops
+65	persist despite the guard, the threshold or signature (command-only vs
+66	command+output) needs tuning next round.
+67	
+68	## Round 3 — verifier dep guard
+69	
+70	<!-- journal:frontmatter
+71	round: 3
+72	timestamp: 2026-08-22T12:30:00Z
+73	hypothesis_id: h_verifier_dep_guard_v1
+74	levers: [control]
+75	predicted_affected: [task_002108_a8cfbf2a, task_001857_24daeef3, task_000796_828a72cf]
+76	cited_candidates: [C-001]
+77	gating_outcome: accepted
+78	gating_attribution: score=26/50; +3/-3 gained=task_001059_05af3d65,task_001400_7ed02d97,task_002115_fda7e3d1 lost=task_000121_482e279f,task_000347_6bf1aeee,task_000470_f819ab03; score 0.5200 >= incumbent(mean) 0.5500 - tol 0.0400
+79	expected_global_gain: "Flips the 'verifier imports a common test lib absent from the image' class: at least 2 verified clean flips (002108, 001857) where the agent's HTTP service is provably working and the ONLY failure is import requests aborting pytest collection; generalizes to any TB2 HTTP-service task probed with requests"
+80	regression_risk: "Near-zero: install is import-guarded (no-op when present), every branch ends in || true so the injected Bash call can never fail the run, fires at most once per task on exit-intent, and coordinates with the order-90 self-verify processor. No currently-passing task hit this error."
+81	cost_shift: "+1 short Bash round-trip on exit-intent runs (a few hundred tokens for dep-check output plus one ack). Negligible; import short-circuits on tasks that already have the deps."
+82	rollback_trigger: "If R4 pass_rate does not improve and any previously-passing task regresses, or if the pip install visibly stalls/times out on runs, revert the processor."
+83	-->
+84	
+85	### Why
+86	
+87	R2 (=R0 config re-measured) scored 25/50. Sweeping failing tasks' `result.json`
+88	`final_pytest.output_tail` surfaced a clean, purely-mechanical cluster: three
+89	tasks (task_002108 file_operations, task_001857 debugging, task_000796 security)
+90	fail with an identical pytest COLLECTION abort — `ImportError while importing
+91	test module '/tmp/test_final_state.py'` then `ModuleNotFoundError: No module
+92	named 'requests'` then `Interrupted: 1 error during collection`. The hidden
+93	verifier probes a running HTTP server with `requests`, which is absent from
+94	these base images. The task descriptions never mention `requests` (it is a
+95	property of the post-exit verifier), so the agent has no way to infer the
+96	dependency. Meanwhile the agents' actual solutions are correct.
+97	
+98	### Changes
+99	
+100	- `processors/verifier_dep_guard.py` — new `VerifierDepGuardProcessor`
+101	  (MultiHookProcessor). On exit-intent (`on_after_model`, finish_reason in
+102	  end_turn/stop and no tool_calls) it injects one real guarded `Bash` tool
+103	  call that, for each of a tiny generic allow-list (`requests`, `pyyaml`),
+104	  imports-checks then `pip install`s only if missing; every branch ends
+105	  `|| true`. Fires once per task; `_order=95` so it defers to the order-90
+106	  self-verify processor.
+107	- `config.yaml` — register `VerifierDepGuardProcessor` after
+108	  `CustomSelfVerifyProcessor` via absolute `file://` path.
+109	
+110	### Evidence
+111	
+112	- `task_002108_a8cfbf2a`: verifier tail = `ModuleNotFoundError: No module named
+113	  'requests' ... Interrupted: 1 error during collection`. Agent messages show
+114	  its Rust frame server tested via stdlib urllib: `Status: 200`,
+115	  `Content-Type: image/jpeg`, wrong token gives `401 Unauthorized`, final `ps`
+116	  shows `./target/release/frame_server` PID 1293 live (not defunct). Solution
+117	  correct; only `import requests` failed.
+118	- `task_001857_24daeef3`: same verifier tail. Agent fixed the C++ off-by-one,
+119	  ran `./diagnostic_server` (live in ps), own checks returned `{"status":
+120	  "healthy"}` on HTTP port and `FRAMES: 450` on TCP port. Solution correct;
+121	  only `import requests` failed.
+122	- `task_000796_828a72cf`: same verifier tail (partial — server still crashing
+123	  at budget, so guard removes the collection mask but may not flip alone).
+124	- pip works in-env: `task_001968_3adc0f9b` tool output `Successfully installed
+125	  ... certifi-2026.7.22 charset_normalizer-3.5.1 idna-3.19 ...` (requests' own
+126	  dependency chain downloaded fine).
+127	
+128	### Uncertainty
+129	
+130	Distinct from R1's reverted no-progress loop guard (different lever mechanism,
+131	different cluster). Risk: if some target image genuinely cannot install
+132	requests (no pip index reachable for that image), the branch reports
+133	`unavailable` and the task stays failed — no harm, no flip. Signal to watch in
+134	R4: do 002108 and 001857 flip F->T and does the `requests` ImportError
+135	disappear from the failing-task tails?
+136	
+137	
+138	## Round 4 — workflow-discipline system prompt
+139	
+140	<!-- journal:frontmatter
+141	round: 4
+142	timestamp: 2026-08-22T13:30:00Z
+143	hypothesis_id: h_workflow_discipline_prompt_v1
+144	levers: [instruction]
+145	predicted_affected: [task_001857_24daeef3, task_000470_f819ab03, task_000716_206dc0f6, task_000506_c13429e7, task_001378_3143a60f]
+146	cited_candidates: [C-001]
+147	gating_outcome: accepted
+148	gating_attribution: score=32/50; +8/-2 gained=task_000121_482e279f,task_000347_6bf1aeee,task_000529_8bcc67c9,task_000840_b2ac4603 lost=task_000837_f8e45558,task_001722_c69123ec; score 0.6400 >= incumbent(mean) 0.5500 - tol 0.0400
+149	expected_global_gain: "Attacks two failing sub-clusters — the budget-thrash/blind-retry cluster (>=4 tasks that iterate to the step ceiling with no plan/root-cause) and the lenient-self-verification cluster (task_001857: raw-socket probe passed but verifier HTTP client hit BadStatusLine) — while re-encoding the survey/plan/verify discipline the fast passing cluster already relies on so future prompt edits cannot silently regress it"
+150	regression_risk: "Longer prompt may make the model over-invest in planning/verification on trivial tasks (a few extra steps / mild verbosity cost). All guidance is general strategy with no task-specific literals or code, so it cannot inject a wrong solution; worst case is small cost inflation on already-passing short tasks"
+151	cost_shift: "+a few hundred one-time system-prompt tokens per task and possibly +1-2 verification commands on service tasks; expected net-neutral-to-negative overall since it should cut the multi-hundred-second thrash loops (task_000716 at 1280s, task_000348 at 845s) that currently dominate budget spend"
+152	rollback_trigger: "If R5 pass_rate does not improve AND any previously-passing short task regresses (T->F) or median elapsed_s rises materially, revert the sidecar to the 5-line default"
+153	-->
+154	
+155	### Why
+156	
+157	R3 = 26/50; score has been stuck in the 25-29 band across all rounds and
+158	the two prior config bets (R1 control loop-guard reverted, R3 verifier dep
+159	guard accepted) each moved only +/-3 tasks — inside the repeat-spread noise.
+160	The system-prompt sidecar is still the 5-line default and encodes none of
+161	the workflow discipline the TB2 playbook flags as the single biggest score
+162	lever (upfront survey, explicit plan, diagnose-before-retry, verify
+163	deliverables the way a checker would). Two distinct failing sub-clusters
+164	share the absence of that discipline: (a) a budget-thrash/blind-retry
+165	cluster whose longest members burn 600-1280s iterating "let me try a
+166	different approach" to the step ceiling with no plan or root-cause step,
+167	and (b) a lenient-self-verification cluster where the agent's own final
+168	check is looser than the verifier's — task_001857 confirmed its HTTP
+169	endpoint with a raw socket read (reported Match:True) but the verifier's
+170	requests client rejected the response with BadStatusLine because the
+171	server omitted the HTTP status line. The fast passing tasks (30-95s) show
+172	the opposite: a compact inspect -> act -> confirm arc.
+173	
+174	### Changes
+175	
+176	- system_prompt.txt (sidecar beside R4 config.yaml, loaded by
+177	  SiblingSystemPromptBuilder) — replaced the 5-line default with an
+178	  explicit general workflow: (1) survey first, (2) restate deliverables and
+179	  plan, (3) diagnose root cause before retrying, (4) budget awareness /
+180	  stop looping, (5) verify the way a checker would — real HTTP client not
+181	  raw socket, exact output path/format, run programs end-to-end, (6) keep
+182	  required services alive after exit, (7) avoid polluting the working dir
+183	  (incl. filename/stdlib-module collisions). Strategy-only, no task
+184	  literals, no copy-this-code directives.
+185	- config.yaml — unchanged pipeline; documented the sidecar revision in a
+186	  header comment on the SystemPromptProcessor. R3's accepted
+187	  verifier_dep_guard is kept as-is.
+188	
+189	### Evidence
+190	
+191	- task_001857_24daeef3: final steps run a raw socket probe printing
+192	  Actual: {"status": "healthy"} / Match: True then declare done;
+193	  verifier pytest tail = Failed: ... BadStatusLine('{"status": "healthy"}').
+194	  Lenient self-check masked a protocol-framing bug an HTTP client catches.
+195	- task_000470_f819ab03: last 4 assistant turns are byte-identical
+196	  echo "..." | /app/metrics_extractor 2>&1; echo "Exit: $?", each
+197	  prefaced "I've been stuck in a loop" — repeats the probe instead of
+198	  diagnosing why the service isn't listening (verifier: ConnectionRefused).
+199	- task_000716_206dc0f6 (1280s), task_000506_c13429e7 (629s),
+200	  task_001378_3143a60f (662s): first assistant message is already
+201	  mid-trial-and-error with no plan/deliverable list; ~33 turns to budget.
+202	- Passing task_000404_e2591ca5 (52s), task_000225_1391f954 (91s),
+203	  task_000741_7786c14b (30s): compact inspect->act->confirm sequences —
+204	  the habit this round lifts into an explicit rule.
+205	
+206	### Uncertainty
+207	
+208	Instruction lever on a 9B model: the guidance may not be reliably
+209	followed, and R1's mechanical loop guard (different lever) was reverted, so
+210	the loop cluster is hard. The clean bet is task_001857 (a correct fix is
+211	one HTTP-client check away). Signal to watch in R5: does median elapsed_s
+212	on the thrash cluster drop, does task_001857 flip F->T, and do any fast
+213	passing tasks regress or slow down materially? If pass_rate is flat and
+214	short tasks slow, the prompt is too heavy — trim or revert.

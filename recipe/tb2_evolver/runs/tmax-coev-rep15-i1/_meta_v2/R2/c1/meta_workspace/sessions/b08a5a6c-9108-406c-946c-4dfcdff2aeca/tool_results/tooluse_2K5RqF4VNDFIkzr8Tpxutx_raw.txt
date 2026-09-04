@@ -1,0 +1,61 @@
+    (?:\btesseract\b)          # the tesseract CLI
+    | (?:\bpytesseract\b)      # the python binding
+    | (?:image_to_string)      # pytesseract API call
+    | (?:\bocrmypdf\b)         # pdf OCR wrapper
+    | (?:\bgocr\b|\bocrad\b)   # alternative OCR engines
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_OCR_MSG = """\
+[OcrRobustnessCheck] You are extracting text from an image with OCR, and the \
+correctness of the whole task depends on transcribing that text accurately. \
+Default / cosmetic OCR runs (a bare `tesseract in out`, or only tweaking \
+contrast/brightness/sharpness) frequently return garbled text on clean \
+synthetic renders and screenshots. Before you trust any OCR output — and \
+BEFORE you fall back to guessing from a sample file — work the standard \
+OCR-recovery ladder and stop as soon as the text is clean and internally \
+consistent:
+
+1. UPSCALE the image first. This is usually the single biggest win for \
+   low-resolution renders (if OCR warned about low/`0 dpi`, this is almost \
+   certainly the fix). Resize 3-4x with a good resampling filter, e.g. \
+   `Image.open(p).resize((w*3, h*3), Image.LANCZOS)`, then OCR the enlarged copy.
+2. Tell tesseract the resolution: add `--dpi 300` (and consider `-l eng`).
+3. Sweep page-segmentation modes: try several `--psm` values (e.g. 3, 4, 6, \
+   11, 12) and keep the cleanest result — the default mode often mis-segments \
+   tables, lists, and single blocks of text.
+4. Binarize / grayscale + threshold (Otsu-style) can help, but apply it AFTER \
+   upscaling, not instead of it. Avoid aggressive char whitelists that can \
+   silently drop needed symbols.
+5. Sanity-check the transcription: re-read it, confirm it is plausible and \
+   internally consistent, and cross-check it against any structure you can see \
+   (line count, expected token shapes, any sample provided).
+
+Crucially, DERIVE the required output from the AUTHORITATIVE SOURCE (the image \
+you just OCR'd), not from the incidental values in a provided sample. If a \
+mapping/schema is shown as `left -> right`, the output field names come from \
+the RIGHT-hand (target) side of the mapping, not from the input's own \
+parameter names. A sample input is only for smoke-testing that your parser \
+runs — it does not define the target contract.
+
+This is guidance, not a task step: skip any rung that is clearly unnecessary \
+once the text is already clean."""
+
+
+class OcrRobustnessReminderProcessor(MultiHookProcessor):
+    """One-shot OCR-robustness strategy nudge, keyed off the agent's OCR usage.
+
+    Fires at most once per task, and only after the agent's Bash activity has
+    matched an OCR-tool signal. The checklist is queued the moment the first OCR
+    command is observed and delivered on the *next* model turn by appending a
+    single user message in ``on_before_model``. This lands the guidance early
+    (right after the first OCR attempt returns, before the agent has a chance to
+    give up on the image and guess from a sample) and — because it only *appends*
+    a message and never rewrites the model's tool calls — it can never clobber a
+    legitimate or foreign-processor tool call on that turn.
+
+    Task-agnostic: it simply never arms on a task that does not run OCR.
+    """
+
+    _singleton_group = "ocr_robustness_reminder"

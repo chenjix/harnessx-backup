@@ -1,0 +1,72 @@
+752	    event: Event,
+753	    processors: "list[Processor]",
+754	    tracer: "object | None" = None,
+755	    hook: str = "",
+756	) -> "Event | None":
+757	    """Pass event through processors sequentially.  Returns the last yielded event, or
+758	    ``None`` if any processor intercepted (yielded nothing).
+759	
+760	    Use ``pipe_all`` when the processor chain may yield heterogeneous event types
+761	    (e.g. ``ModelResponseEvent`` + ``SpawnSubAgentEvent`` from ``after_model``).
+762	    """
+763	    chain = ProcessorChain(*processors)
+764	    result = None
+765	    async for ev in chain.process(event, tracer=tracer, hook=hook):
+766	        result = ev
+767	    return result
+768	
+769	
+770	async def pipe_all(
+771	    event: Event,
+772	    processors: "list[Processor]",
+773	    tracer: "object | None" = None,
+774	    hook: str = "",
+775	) -> "list[Event]":
+776	    """Pass *event* through processors; return **every** yielded event.
+777	
+778	    Unlike ``pipe()``, no intermediate events are discarded.  Necessary when a
+779	    hook point may produce heterogeneous output — for example when a custom
+780	    ``after_model`` processor yields a ``ModelResponseEvent`` plus one or more
+781	    ``SpawnSubAgentEvent`` values.
+782	
+783	    Returns ``[event]`` when *processors* is empty (pass-through).
+784	    """
+785	    chain = ProcessorChain(*processors)
+786	    return [ev async for ev in chain.process(event, tracer=tracer, hook=hook)]
+787	
+788	
+789	# ─── Hook Decorators (syntax sugar for single-node Processors) ─────────────────
+790	
+791	
+792	def _make_hook_processor(fn: Callable, event_type: type) -> Processor:
+793	    """Wrap an async generator function into a Processor object."""
+794	
+795	    class HookProcessor:
+796	        async def process(self, event: Event) -> AsyncIterator[Event]:
+797	            if isinstance(event, event_type):
+798	                async for out in fn(event):
+799	                    yield out
+800	            else:
+801	                yield event
+802	
+803	    HookProcessor.__name__ = getattr(fn, "__name__", "HookProcessor")
+804	    return HookProcessor()
+805	
+806	
+807	def task_start(fn: Callable) -> Processor:
+808	    """Decorator: wrap async generator into TaskStartEvent processor."""
+809	    return _make_hook_processor(fn, TaskStartEvent)
+810	
+811	
+812	def step_start(fn: Callable) -> Processor:
+813	    """Decorator: wrap async generator into StepStartEvent processor."""
+814	    return _make_hook_processor(fn, StepStartEvent)
+815	
+816	
+817	def before_model(fn: Callable) -> Processor:
+818	    """Decorator: wrap async generator into BeforeModelEvent processor."""
+819	    return _make_hook_processor(fn, BeforeModelEvent)
+820	
+821	
+
+[Showing lines 752–821 of 844 total. Use offset=821 to read the next section.]

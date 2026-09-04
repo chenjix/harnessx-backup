@@ -1,0 +1,40 @@
+13 len= 38 'fuser -k 8080/tcp 2>/dev/null; sleep 1'
+15 len= 32 'python3 /home/user/mock_api.py &'
+17 len= 20 'ss -tlnp | grep 8080'
+19 len= 84 "netstat -tlnp 2>/dev/null | grep 8080 || ps aux | grep -E '8080|mock' "
+21 len= 34 'ps aux | grep socat | grep -v grep'
+23 len= 26 'pkill -9 -f socat; sleep 1'
+25 len= 44 "ps aux | grep -E 'socat|mock' | grep -v grep"
+31 len= 39 'python3 /home/user/k8s_operator.py 2>&1'
+33 len= 37 'ps aux | grep mock_api | grep -v grep'
+35 len= 32 'python3 /home/user/mock_api.py &'
+37 len= 43 "ps aux | grep -E '8080|mock' | grep -v grep"
+41 len= 170 'pkill -9 socat; sleep 1; python3 /home/user/mock_api.py &; sleep 1; so'
+43 len= 14 'pkill -9 socat'
+45 len= 32 'python3 /home/user/mock_api.py &'
+47 len= 48 'sleep 1 && ps aux | grep mock_api | grep -v grep'
+49 len= 57 'socat TCP-LISTEN:9090,fork,reuseaddr TCP:127.0.0.1:8080 &'
+51 len= 45 'sleep 1 && ps aux | grep socat | grep -v grep'
+53 len= 34 'python3 /home/user/k8s_operator.py'
+56 len= 76 'ls -la /home/user/k8s_backup.tar.gz && tar -tzf /home/user/k8s_backup.'
+58 len= 111 'python3 -c "import urllib.request; print(urllib.request.urlopen(\'http:'
+62 len= 29 'ls -la /home/user/k8s/active/'
+64 len= 107 'python3 -c "import urllib.request; print(urllib.request.urlopen(\'http:'
+68 len= 48 "ps aux | grep -E 'mock_api|socat' | grep -v grep"
+--- repeated full commands (count>1) ---
+  count=4 len=32: 'python3 /home/user/mock_api.py &'
+=== task_000010 full task ===
+You need to create a custom Kubernetes manifest operator script in Python. We have a mock Kubernetes cluster API running locally on port `8080`, and a legacy interactive CLI tool used to apply manifests to it. 
+
+Your objective is to write a Python script at `/home/user/operator.py` that fully automates the backup of existing manifests, sets up a required port forward, and interactively applies new manifests using the CLI tool.
+
+Here are the system details and constraints:
+1. **Directories**:
+   - `/home/user/k8s/active/`: Contains the currently applied manifests (`deploy.yaml`, `svc.yaml`).
+   - `/home/user/k8s/incoming/`: Contains new manifests to be applied (`deploy-v2.yaml`, `config.yaml`).
+2. **Backup Strategy**:
+   - Before applying anything, your Python script must create a compressed tarball of the `/home/user/k8s/active/` directory and save it exactly to `/home/user/k8s_backup.tar.gz`.
+3. **Port Forwarding (Simulated Firewall)**:
+   - The mock API listens on `127.0.0.1:8080`.
+   - The interactive CLI tool is strictly hardcoded to connect to `127.0.0.1:9090`. 
+   - Your script (or a background shell process you spawn) must forward traffic from `127.0.0.1:9090` to `127.0.0.1:

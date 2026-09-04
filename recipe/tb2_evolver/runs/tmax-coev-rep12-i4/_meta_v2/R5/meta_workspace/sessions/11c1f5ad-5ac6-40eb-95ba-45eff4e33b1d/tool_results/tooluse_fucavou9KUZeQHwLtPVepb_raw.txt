@@ -1,0 +1,190 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""DegenerateTurnTerminatorProcessor — force a clean stop on identical-turn loops.
+4	
+5	Systemic failure mode observed across every Tmax evolve round (R0-R3): on hard
+6	tasks the model falls into a *degenerate assistant-turn loop* — it emits the
+7	byte-for-byte identical assistant message over and over, sometimes carrying a
+8	useless repeated ``Bash`` call, sometimes carrying **no tool call at all**
+9	(e.g. repeating a self-verify acknowledgement), until it exhausts the step
+10	budget (``exit_reason=budget_exceeded``) or the repetition trips an internal
+11	safety and the whole run crashes (``exit_reason=error`` / ``agent_error``).
+12	
+13	In the R3 trajectories, 16 distinct FAILING tasks emitted the same assistant
+14	message 4-41 times consecutively; **no PASSING task ever emitted the same
+15	assistant message more than twice**. Four of the 16 ended in
+16	``exit_reason=error``. The existing ``BashLoopBreakerProcessor`` only
+17	fingerprints the ``Bash`` tool *input*, so it is blind to the no-tool-call /
+18	self-verify half of this pattern, and its soft "BLOCKED" redirect is routinely
+19	ignored — transcripts show the model re-emitting the identical turn 12-38 more
+20	times after being blocked.
+21	
+22	This processor closes both gaps with a single, input-independent guard that
+23	acts at the model-call boundary:
+24	
+25	* **Fingerprint the whole assistant turn, not just a tool input.** It hashes the
+26	  text of the last assistant message in the assembled context. This catches
+27	  Bash loops, no-tool-call loops, and self-verify loops alike — anything where
+28	  the model regenerates the identical turn.
+29	* **Warn, then hard-terminate.** At ``warn_threshold`` consecutive identical
+30	  assistant turns a nudge is appended (one extra user message, contract-safe).
+31	  At ``terminate_threshold`` the processor sets ``skip_model=True`` with a final
+32	  ``synthetic_output``; the run loop turns that into a ``finish_reason="stop"``
+33	  ModelResponseEvent with no tool calls, which is the run loop's own clean-exit
+34	  condition. The task ends ``exit_reason=done`` instead of crashing to
+35	  ``error`` or burning the whole budget — banking whatever partial deliverables
+36	  exist and letting exit-intent processors (e.g. the verifier-dep guard) run.
+37	
+38	Design notes (grounded in the R3 evidence):
+39	
+40	* **Conservative thresholds.** Every observed passing task had a max identical-
+41	  assistant run of <= 2; ``warn_threshold=4`` / ``terminate_threshold=6`` leaves
+42	  the passing set completely untouched (regression surface is nil) while
+43	  catching all 16 failing loopers (runs of 4-41).
+44	* **Only fires after the loop is provably dead.** Termination is a last resort —
+45	  by the 6th identical turn the model has demonstrably failed to self-correct
+46	  through both the R2 prompt and the R1/soft-block redirect.
+47	* **Contract-safe.** The warn path appends at most one ``user`` message; the
+48	  terminate path does not mutate ``event.messages`` at all (it only sets
+49	  ``skip_model`` / ``synthetic_output``).
+50	
+51	Strategy-only / benchmark-agnostic: no task ids, no command literals, no domain
+52	constants. Fires purely on the structural "identical assistant turn N times in a
+53	row" shape.
+54	"""
+55	
+56	from __future__ import annotations
+57	
+58	import dataclasses
+59	import hashlib
+60	
+61	from harnessx.core.events import (
+62	    BeforeModelEvent,
+63	    Message,
+64	    TaskEndEvent,
+65	    TaskStartEvent,
+66	    _extract_text,
+67	)
+68	from harnessx.core.processor import MultiHookProcessor
+69	
+70	_WARN_TEMPLATE = (
+71	    "[LoopTerminator] You have now produced the SAME response {count} times in a "
+72	    "row with no change in outcome. Repeating it will not help. Take a genuinely "
+73	    "different action this turn — inspect a different file, change the command, "
+74	    "try another approach, or, if your required deliverables already exist at the "
+75	    "paths the task names, verify them with `ls -lh` and finish. If you keep "
+76	    "repeating the identical response the session will be ended automatically."
+77	)
+78	
+79	_TERMINATE_OUTPUT = (
+80	    "[LoopTerminator] The session was ended automatically after the identical "
+81	    "response was produced {count} times consecutively with no progress. "
+82	    "Whatever work was completed before the loop has been preserved on disk and "
+83	    "will be evaluated. Ending now to avoid wasting the remaining budget on a "
+84	    "dead loop."
+85	)
+86	
+87	
+88	class DegenerateTurnTerminatorProcessor(MultiHookProcessor):
+89	    """Detect byte-identical repeated assistant turns and force a clean stop.
+90	
+91	    Args:
+92	        warn_threshold: consecutive identical assistant turns at which a nudge is
+93	            injected (default 4). Must be >= 2.
+94	        terminate_threshold: consecutive identical assistant turns at which the
+95	            session is force-terminated via skip_model + synthetic_output
+96	            (default 6). Must be > warn_threshold.
+97	    """
+98	
+99	    _singleton_group = "degenerate_turn_terminator"
+100	    # After compaction (8)/token-budget(10) so the fingerprint reflects the
+101	    # context the model will actually see this step; before the model call.
+102	    _order = 22
+103	
+104	    def __init__(
+105	        self,
+106	        warn_threshold: int = 4,
+107	        terminate_threshold: int = 6,
+108	    ) -> None:
+109	        self.warn_threshold = max(2, int(warn_threshold))
+110	        self.terminate_threshold = max(self.warn_threshold + 1, int(terminate_threshold))
+111	        self._last_fp: str = ""
+112	        self._run: int = 0
+113	        self._terminated: bool = False
+114	
+115	    # ------------------------------------------------------------------
+116	    def _reset(self) -> None:
+117	        self._last_fp = ""
+118	        self._run = 0
+119	        self._terminated = False
+120	
+121	    @staticmethod
+122	    def _fingerprint(text: str) -> str:
+123	        norm = " ".join((text or "").split())
+124	        if not norm:
+125	            return ""
+126	        return hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:16]
+127	
+128	    @staticmethod
+129	    def _last_assistant_text(messages: tuple) -> str:
+130	        for m in reversed(messages):
+131	            role = getattr(m, "role", None)
+132	            if role == "assistant":
+133	                return _extract_text(getattr(m, "content", "")) or ""
+134	            # Skip trailing tool/user messages injected after the assistant turn
+135	        return ""
+136	
+137	    # ------------------------------------------------------------------
+138	    async def on_task_start(self, event: TaskStartEvent):
+139	        self._reset()
+140	        yield event
+141	
+142	    async def on_task_end(self, event: TaskEndEvent):
+143	        self._reset()
+144	        yield event
+145	
+146	    async def on_before_model(self, event: BeforeModelEvent):
+147	        # Once we've decided to terminate, stay terminated (idempotent).
+148	        if self._terminated:
+149	            yield event
+150	            return
+151	
+152	        text = self._last_assistant_text(event.messages)
+153	        fp = self._fingerprint(text)
+154	
+155	        if not fp:
+156	            # No assistant turn yet, or empty turn — reset the run and pass through.
+157	            self._last_fp = ""
+158	            self._run = 0
+159	            yield event
+160	            return
+161	
+162	        if fp == self._last_fp:
+163	            self._run += 1
+164	        else:
+165	            self._last_fp = fp
+166	            self._run = 1
+167	
+168	        # Hard terminate: force a clean stop. The run loop converts skip_model
+169	        # into a finish_reason="stop" response with no tool calls -> clean break
+170	        # -> exit_reason="done".
+171	        if self._run >= self.terminate_threshold:
+172	            self._terminated = True
+173	            yield dataclasses.replace(
+174	                event,
+175	                skip_model=True,
+176	                synthetic_output=_TERMINATE_OUTPUT.format(count=self._run),
+177	            )
+178	            return
+179	
+180	        # Warn: append exactly one user message (contract-safe; last context
+181	        # message here is the repeated assistant turn, so +1 user is valid).
+182	        if self._run >= self.warn_threshold:
+183	            warn = _WARN_TEMPLATE.format(count=self._run)
+184	            yield dataclasses.replace(
+185	                event,
+186	                messages=event.messages + (Message(role="user", content=warn),),
+187	            )
+188	            return
+189	
+190	        yield event

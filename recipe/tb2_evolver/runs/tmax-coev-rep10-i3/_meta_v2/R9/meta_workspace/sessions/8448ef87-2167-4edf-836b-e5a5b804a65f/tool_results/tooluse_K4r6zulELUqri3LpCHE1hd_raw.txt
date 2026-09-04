@@ -1,0 +1,117 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	
+16	tool_registry:
+17	  builtin:
+18	  - Bash
+19	  custom: []
+20	tracer: null
+21	processors:
+22	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+23	  system_builder:
+24	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+25	  _hook_: '*'
+26	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+27	  working_dir: /home/user
+28	  constraints: {}
+29	  header: Environment
+30	  max_tree_lines: 20
+31	  non_interactive: true
+32	  inject_integrity_rules: true
+33	  show_project_dir: false
+34	  _hook_: '*'
+35	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+36	  tool_schemas: {}
+37	  _hook_: '*'
+38	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+39	  warn_at:
+40	  - 0.7
+41	  - 0.9
+42	  _hook_: '*'
+43	# Step-based deadline nudge. The recipe runner enforces a hard step budget
+44	# (task.max_steps=80) but never sets TaskTimeReminderProcessor.timeout_seconds,
+45	# so the wall-clock reminder above is inert. Multiple failures ended at
+46	# exit_reason=budget_exceeded (80 steps) with NO deliverable file on disk —
+47	# an automatic 0. This processor fires escalating "commit your best-effort
+48	# output to disk now" reminders as the step budget is consumed.
+49	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i3/R0/assets/processors/step_budget_deadline.py::StepBudgetDeadlineProcessor
+50	  warn_at:
+51	  - 0.65
+52	  - 0.85
+53	  _hook_: '*'
+54	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+55	# Without this, one stuck task can block an entire evolve round.
+56	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+57	  repeat_threshold: 2
+58	  head_chars: 1200
+59	  tail_chars: 600
+60	  _hook_: '*'
+61	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+62	  token_threshold: 140000
+63	  message_threshold: 100
+64	  retention_window: 6
+65	  eviction_fraction: 0.5
+66	  summarize_key: summarize
+67	  preserve_first_message: true
+68	  _hook_: '*'
+69	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+70	  max_consecutive_errors: 1
+71	  _hook_: '*'
+72	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+73	  drop_threshold: 5
+74	  _hook_: '*'
+75	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+76	  _hook_: '*'
+77	# Ensure the external verifier's standard Python HTTP client (`requests`) is
+78	# importable in the container. TB2's verifier runs AFTER the agent exits and
+79	# frequently does `import requests` to probe HTTP/network services the task
+80	# asked the agent to build. When `requests` is absent the verifier's test
+81	# module fails to collect (pytest rc=2, ModuleNotFoundError) → automatic 0
+82	# even for a correct service. Agents build the server in C/Go/stdlib and
+83	# probe with curl, so they never install the Python client themselves.
+84	# This processor injects ONE quiet, idempotent `pip install requests` on the
+85	# first model turn (append-only to the model's own call; `|| true` so it can
+86	# never fail the turn). Fires once per task; no-op when already installed.
+87	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i3/_meta_v2/R3/processors/verifier_dep_primer.py::VerifierDepPrimerProcessor
+88	  packages: requests
+89	  _hook_: '*'
+90	# Ensure the standard networking CLI tools the external verifier shells out to
+91	# are installed in the container. Same structural gap as the `requests` pip
+92	# primer above, one layer down: several TB2 verifier tests do
+93	# `subprocess.run(["curl", ...])` / `subprocess.run(["ss", ...])` in the
+94	# post-agent phase and die with `FileNotFoundError: 'curl'` / `'ss'` before
+95	# they can assert on otherwise-correct work → automatic 0. The agent hits
+96	# `curl: command not found` during its own phase and simply works around it
+97	# (wget / python stdlib), so it never installs the CLI client itself.
+98	# This processor injects ONE quiet, idempotent, time-boxed apt install on the
+99	# first model turn: a `command -v` guard makes it a no-op when the tools are
+100	# already present, `timeout 90` bounds a blocked package index, and `|| true`
+101	# means it can never fail the turn. Touches only system dirs, never a task
+102	# output path. Fires once per task.
+103	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i3/_meta_v2/R4/processors/verifier_cli_primer.py::VerifierCliPrimerProcessor
+104	  apt_packages: curl iproute2
+105	  _hook_: '*'
+106	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+107	  threshold: 7
+108	  _hook_: '*'
+109	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+110	  _hook_: '*'
+111	workspace: null
+112	workspace_template: default
+113	init_workspace: false
+114	step_snapshots: true
+115	sandbox_provider: null
+116	sandbox_hint_id: null
+117	plugins: []

@@ -1,0 +1,77 @@
+227	    _singleton_group = "task_time_reminder"
+228	    _order = 6
+229	
+230	    def __init__(
+231	        self,
+232	        timeout_seconds: float | None = None,
+233	        warn_at: tuple[float, ...] = (0.70, 0.90),
+234	    ) -> None:
+235	        self._timeout = timeout_seconds
+236	        self._warn_at = sorted(warn_at)
+237	        self._triggered: set[float] = set()
+238	        self._start: float = 0.0
+239	
+240	    async def on_task_start(self, event: TaskStartEvent):
+241	        self._triggered = set()
+242	        self._start = time.monotonic()
+243	        yield event
+244	
+245	    async def on_step_start(self, event: StepStartEvent):
+246	        if not self._timeout or self._timeout <= 0:
+247	            yield event
+248	            return
+249	
+250	        elapsed = time.monotonic() - self._start
+251	        pct = elapsed / self._timeout
+252	        remaining = self._timeout - elapsed
+253	
+254	        warn: str | None = None
+255	        for threshold in reversed(self._warn_at):
+256	            if pct >= threshold and threshold not in self._triggered:
+257	                self._triggered.add(threshold)
+258	                if threshold >= 0.90:
+259	                    warn = _TASK_TIME_WARN_90.format(elapsed=elapsed, total=self._timeout, remaining=remaining)
+260	                else:
+261	                    warn = _TASK_TIME_WARN_70.format(elapsed=elapsed, total=self._timeout)
+262	                break
+263	
+264	        if warn:
+265	            msg = Message(role="user", content=warn)
+266	            yield dataclasses.replace(
+267	                event,
+268	                messages=event.messages + (msg,),
+269	                raw_messages=event.raw_messages + (msg,),
+270	            )
+271	        else:
+272	            yield event
+273	
+274	    async def on_task_end(self, event: TaskEndEvent):
+275	        self._triggered = set()
+276	        yield event
+277	
+278	
+279	# ---------------------------------------------------------------------------
+280	# PostCompactionRefreshProcessor
+281	# ---------------------------------------------------------------------------
+282	
+283	
+284	class PostCompactionRefreshProcessor(MultiHookProcessor):
+285	    """After context compaction, re-inject a fresh workspace snapshot from the
+286	    sandbox so the model knows what files currently exist rather than relying on
+287	    compressed-away history.
+288	
+289	    Detects compaction by a significant drop in message count between steps
+290	    (same heuristic used by LoopDetectionProcessor).
+291	    """
+292	
+293	    _singleton_group = "tb2_post_compaction_refresh"
+294	    _order = 11  # runs after CompactionProcessor (8)
+295	
+296	    def __init__(self, drop_threshold: int = 5) -> None:
+297	        self._drop_threshold = drop_threshold
+298	        self._prev_count: int = 0
+299	
+300	    async def on_task_start(self, event: TaskStartEvent):
+301	        self._prev_count = 0
+
+[Showing lines 227–301 of 466 total. Use offset=301 to read the next section.]

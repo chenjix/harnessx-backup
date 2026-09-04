@@ -1,0 +1,70 @@
+1	# Evolve Journal — tmax-coev-rep23-i1
+2	
+3	## Round 1 — verifier requests import
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-09-01T18:00:00Z
+8	hypothesis_id: h_verifier_client_ready_v1
+9	levers: [control]
+10	predicted_affected: [task_000028_7fe033ac, task_000958_4bb2b05d]
+11	cited_candidates: [C-001]
+12	gating_outcome: pending
+13	gating_attribution: pending
+14	expected_global_gain: "Flips the network-service failures whose Python verifier crashes at `import requests`; generalizes to any TB2 HTTP-service task with a requests-based test module"
+15	regression_risk: "Low — one-shot appended user message gated on network-service + verifier regex; never blocks a tool call, so cannot break a passing task. Worst case: ~250 wasted tokens on a service task that already has requests"
+16	cost_shift: "+~250 tokens context + one short idempotent install on matched service tasks only; non-service tasks untouched"
+17	rollback_trigger: "If R2 shows no flip on task_000028/task_000958 AND any regression on previously-passing service tasks, revert"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus task_000028_7fe033ac: the agent fully solved the task — fixed
+23	nginx.conf to `/tmp/video_backend.sock`, rewrote and compiled server.cpp, ran it
+24	in background, wrote logrotate.conf, started nginx, and its final probe returned
+25	`HTTP/1.1 200 OK ... 150` through the proxy. reward=0 anyway. The sole cause: the
+26	verifier's `test_final_state.py` does `import requests`, which is not installed
+27	in the container, so pytest fails at collection with
+28	`ModuleNotFoundError: No module named 'requests'`. This is a structural TB2
+29	gap: the verifier's test module is injected after the agent session ends and the
+30	agent never sees it, so it has no way to learn the verifier needs `requests`.
+31	Grep over all 21 failing tasks: exactly task_000028 and task_000958 carry this
+32	`No module named 'requests'` collection failure — a small but genuine
+33	network-service cluster with an identical root cause.
+34	
+35	### Changes
+36	
+37	- `processors/verifier_client_ready.py` — new `VerifierClientReadyProcessor`
+38	  (MultiHookProcessor). On `on_task_start` it arms only if the task description
+39	  matches a network-service regex AND a verifier regex; on the first
+40	  `on_step_start` it appends one user message telling the agent that TB2 network
+41	  verifiers commonly `import requests` and to make the Python HTTP client
+42	  importable before finishing (idempotent, offline-friendly install snippet).
+43	  Fires at most once per task.
+44	- `config.yaml` — register the processor via absolute `file://` path at order 7
+45	  (after env/time setup, before length/compaction control).
+46	
+47	### Evidence
+48	
+49	- `task_000028_7fe033ac` result.json final_pytest tail: `test_final_state.py:6:
+50	  import requests` → `E ModuleNotFoundError: No module named 'requests'` →
+51	  `Interrupted: 1 error during collection`. messages.json final probe:
+52	  `HTTP/1.1 200 OK ... Content-Length: 150 ... 150` — service was correct.
+53	- `task_000958_4bb2b05d` result.json final_pytest tail: same `import requests` /
+54	  `ModuleNotFoundError` at `test_final_state.py:4`. Agent had built and
+55	  curl-tested the C++ microservice on `127.0.0.1:9090`.
+56	- Description match: both contain HTTP/reverse-proxy/`127.0.0.1:PORT` vocabulary
+57	  and an explicit "automated verifier will make HTTP requests"/checker mention,
+58	  so `_SERVICE_RE` + `_VERIFIER_RE` both fire.
+59	
+60	### Uncertainty
+61	
+62	Open question: whether `pip install requests` / `apt-get install -y
+63	python3-requests` succeeds under the default network-blocked agent phase. The
+64	snippet tries `import` first (no-op if present), then pip, then apt against
+65	pre-cached package lists (the base image pre-caches apt indices per the system
+66	prompt). If none of these channels can produce `requests` offline, the reminder
+67	cannot flip these tasks — that would show as `still_F` on both predicted tasks
+68	with no regression, and is the signal to escalate (e.g. request the base image
+69	pre-stage `requests`) via NEEDS_FROM_HUMAN next round rather than re-ship this
+70	shape.

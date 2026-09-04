@@ -1,0 +1,69 @@
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:509:                    tool_input=tc.input,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:510:                    tool_call_id=tc.id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:511:                    approved=True,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:512:                )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:513:                _bt_events = await pipe_all(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:514:                    tc_event,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:515:                    get_procs("before_tool"),
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:516:                    tracer=tracer,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:517:                    hook="before_tool",
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:518:                )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:519:                tc_event = next(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:520:                    (e for e in reversed(_bt_events) if isinstance(e, ToolCallEvent)),
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:521:                    tc_event,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:522:                )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:523:                await tracer.on_event(tc_event)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:544:                _mcp_ctx_token = _mcp_results_ctx.set(_step_mcp_dir)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:545:                try:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:546:                    if tc_event.approved:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:547:                        t0 = time.monotonic()
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:548:                        try:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:549:                            result = await tool_registry.execute(tc_event.tool_name, tc_event.tool_input)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:550:                            tr_event = ToolResultEvent(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:551:                                run_id=state.run_id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:552:                                step_id=step_id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:553:                                tool_name=tc_event.tool_name,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:554:                                tool_call_id=tc_event.tool_call_id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:555:                                result=result.output,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:556:                                error=result.error,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:557:                                duration_ms=(time.monotonic() - t0) * 1000,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:558:                                content_blocks=tuple(result.content_blocks) if result.content_blocks else (),
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:598:                            )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:599:                        )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:600:                    elif tc_event.synthetic_result is not None:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:601:                        tr_event = ToolResultEvent(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:602:                            run_id=state.run_id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:603:                            step_id=step_id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:604:                            tool_name=tc_event.tool_name,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:605:                            tool_call_id=tc_event.tool_call_id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:606:                            result=tc_event.synthetic_result,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:607:                            duration_ms=0.0,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:608:                        )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:609:                        _at_syn_events = await pipe_all(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:610:                            tr_event,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:611:                            get_procs("after_tool"),
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:612:                            tracer=tracer,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:613:                            hook="after_tool",
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:614:                        )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:615:                        tr_event = next(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:616:                            (e for e in reversed(_at_syn_events) if isinstance(e, ToolResultEvent)),
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:617:                            tr_event,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:618:                        )
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:632:                            Message(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:633:                                role="tool",
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:634:                                content="Tool call not approved.",
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:635:                                tool_call_id=tc_event.tool_call_id,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:636:                                name=tc_event.tool_name,
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:637:                            )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:638:                        )
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:639:                finally:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:640:                    # Always reset per-tool-call context vars, even if a processor raises.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:641:                    _mcp_results_ctx.reset(_mcp_ctx_token)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:642:                if _spawn_ctx_token is not None:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:643:                    try:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:644:                        from ..tools.spawn_subagent import _spawn_ctx
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:645:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/runloop.py:646:                        _spawn_ctx.reset(_spawn_ctx_token)

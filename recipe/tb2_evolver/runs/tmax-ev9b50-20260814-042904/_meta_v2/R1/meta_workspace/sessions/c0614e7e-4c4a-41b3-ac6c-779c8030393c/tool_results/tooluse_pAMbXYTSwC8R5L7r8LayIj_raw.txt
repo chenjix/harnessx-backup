@@ -1,0 +1,80 @@
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+from collections import deque
+
+import json
+
+from ...core.events import (
+    StepStartEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from ...core.processor import MultiHookProcessor
+from ...core.runloop import LoopDetectedError
+
+
+_WARN_TEMPLATE = (
+    "\n\n[LoopDetection] ⚠️  The exact same tool call(s) have been issued {count} times "
+    "in a row ({tools}). You are stuck in a loop. Stop and reconsider your approach: "
+    "re-read the task, check what you have already tried, and try something fundamentally "
+    "different."
+)
+
+_NAME_WARN_TEMPLATE = (
+    "\n\n[LoopDetection] ⚠️  You have called `{tool}` {count} times consecutively with "
+    "different arguments. This suggests you are stuck in a repetitive pattern "
+    "({pattern}). Stop and ask yourself: is this work actually necessary, or are "
+    "you going in circles? Re-read the task requirements and consider a completely "
+    "different approach — or simply finish if the task is already done."
+)
+
+
+class LoopDetectionProcessor(MultiHookProcessor):
+    """Detect repeating step patterns using two parallel fingerprint strategies.
+
+    **Strategy 1 — exact** (name + inputs): high-precision, two-phase
+    (warn then raise).  Catches identical tool calls repeated verbatim.
+
+    **Strategy 2 — name-only** (tool names, inputs ignored): catches semantic
+    loops where the agent repeatedly calls the same *type* of tool with varying
+    arguments (document-generation loops, infinite analysis sampling, etc.).
+    Warn-only — never raises, because name-only matching is noisier and
+    terminating on a loose signal would cause false-positive task failures.
+
+    Both strategies use the **consecutive run length** at the tail of their
+    respective sliding windows, so interleaved steps break the count and avoid
+    false positives on legitimate exploration.
+
+    **Compaction awareness**: fingerprint windows are cleared when a
+    message-count drop of ≥ ``compaction_drop_threshold`` is detected in
+    ``on_step_start``, preventing stale pre-compaction fingerprints from
+    contributing to spurious loop counts.
+
+    Args:
+        window_size:               Sliding window size for both strategies
+                                   (default 12).
+        warn_threshold:            Strategy 1 consecutive-repeat count that
+                                   injects a warning (default 3).
+        threshold:                 Strategy 1 consecutive-repeat count that
+                                   raises :exc:`LoopDetectedError` (default 5).
+        name_warn_threshold:       Strategy 2 consecutive-repeat count that
+                                   injects a warning (default 8).  No raise.
+        compaction_drop_threshold: Message-count drop that signals compaction
+                                   and triggers a fingerprint reset (default 5).
+    """
+
+    _singleton_group = "loop_detection"
+    _order = 20
+
+    def __init__(
+        self,
+        window_size: int = 12,
+        warn_threshold: int = 3,
+        threshold: int = 5,
+        name_warn_threshold: int = 8,

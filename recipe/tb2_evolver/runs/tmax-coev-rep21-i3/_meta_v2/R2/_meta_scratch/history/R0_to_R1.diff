@@ -1,0 +1,20 @@
+--- R0
++++ R1
+@@ -49,2 +49,17 @@
+   _hook_: '*'
++# Break IDENTICAL-tool-call repetition loops (agent re-issues the byte-for-byte
++# same Bash call every step, e.g. a stuck `pkill`/`nc` command returning
++# exit 143, until the step budget is exhausted). Strategy-1 injects an escalating
++# "you are stuck, try something different" nudge into the tool result once a call
++# repeats warn_threshold times consecutively; the hard raise (LoopDetectedError,
++# caught cleanly by the run loop as exit_reason=loop_detected) is set high so it
++# only fires on pathological runaway loops, sparing legitimate long identical
++# runs (e.g. repeated identical SQL queries in already-passing tasks).
++- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
++  window_size: 12
++  warn_threshold: 3
++  threshold: 40
++  name_warn_threshold: 8
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

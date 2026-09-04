@@ -1,0 +1,18 @@
+You are an MLOps engineer responsible for tracking data artifacts from acoustic experiments. A recent batch of sensor data was corrupted during transmission, introducing silent conversion errors where dropped packets were recorded as the minimum 16-bit integer value (`-32768`), destroying down-stream correlation analysis.
+
+You are provided with one of these corrupted files: `/app/experiment_audio.wav`. It is a standard 10-second, 8000 Hz, mono, 16-bit PCM WAV file. 
+
+Your task is to write and execute a reproducible Go-based ETL pipeline (`/home/user/pipeline.go`) that computes fixed-length feature embeddings from this audio while handling the missing data. 
+
+Your Go program must perform the following:
+1. **Load and Validate**: Read `/app/experiment_audio.wav` and convert the 16-bit integers to `float64`.
+2. **Data Imputation**: Identify all instances of dropped packets (value exactly `-32768`) and replace them with `0.0`.
+3. **Windowing**: Segment the audio into 1-second non-overlapping windows (exactly 8000 samples per window, resulting in 10 windows).
+4. **Embedding Computation**: For each 1-second window, compute a 3-dimensional feature embedding consisting of:
+   - `[0]`: The Mean of the 8000 samples.
+   - `[1]`: The Population Variance of the 8000 samples.
+   - `[2]`: The Pearson Correlation Coefficient between the first half of the window (samples 0-3999) and the second half (samples 4000-7999). If the variance of either half is zero (e.g., entirely imputed zeroes), the correlation should be set to `0.0`.
+5. **Output Validation**: Save the resulting embeddings as a JSON array of 10 arrays (each containing 3 floats) to `/home/user/embeddings.json`.
+6. Identify the 0-indexed window number that has the highest proportion of imputed data, and write that single integer to `/home/user/anomaly.txt`.
+
+You must use Go for the pipeline implementation. Standard system packages (like `ffmpeg`) are allowed for inspection, but the core processing must be in Go. You may use third-party Go packages (e.g., for parsing WAV files) by initializing a Go module in `/home/user`.

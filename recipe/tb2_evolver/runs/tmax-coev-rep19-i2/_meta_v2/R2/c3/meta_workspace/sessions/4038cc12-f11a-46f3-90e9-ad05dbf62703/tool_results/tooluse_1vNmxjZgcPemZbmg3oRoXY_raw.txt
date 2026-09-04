@@ -1,0 +1,186 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""NumericResultAuditProcessor — steer self-verification toward *interpretation*
+4	audit on computational tasks that emit a numeric result.
+5	
+6	Motivation (from Tmax r0 trajectories)
+7	--------------------------------------
+8	A recurring failure class on scientific_computing / data_science tasks: the
+9	agent writes a program, it compiles/runs cleanly, produces a plausible-looking
+10	numeric answer, and the agent exits after very few steps (``no_tool_calls``,
+11	7-15 steps). The verifier then rejects the answer because it is *close but
+12	wrong* — the number came from a subtle misread of the algorithmic
+13	specification, e.g.:
+14	
+15	* OLS + bootstrap: slope 2.5056 vs expected 2.5997 (task_000111) — the
+16	  computation was structurally correct but the data/index interpretation
+17	  differed from the reference;
+18	* Monte-Carlo trajectory fit: m=0.048 vs expected 0.050 (task_001330) — the
+19	  order / application of the seeded RNG draws differed from the reference;
+20	* grid optimisation: reported 60 vs expected 50 (task_001937).
+21	
+22	The benchmark's built-in ``CustomSelfVerifyProcessor`` already fires a
+23	one-shot checklist on exit-intent, but that checklist is oriented toward
+24	*file existence and output format* ("does the file exist at the exact path",
+25	"is the format right"). In every cited trajectory the agent's self-verify
+26	turn degenerated into re-``cat``-ing the file and re-confirming the format —
+27	it never re-examined whether its *interpretation of the method* was the one
+28	the task intended. Re-running the same program reproduces the same wrong
+29	number, so a "re-check your output" nudge alone does not help; what these
+30	tasks needed was a nudge to re-read the *ambiguous algorithmic points* and
+31	consider the alternative interpretation.
+32	
+33	What this processor does
+34	------------------------
+35	It piggybacks on the existing self-verify turn. When the built-in
+36	``CustomSelfVerifyProcessor`` fires its synthetic ``_tb2_self_verify`` tool,
+37	the run loop routes that synthetic result through ``on_after_tool``. This
+38	processor appends an *additional* computational-interpretation audit
+39	directive to that result — but only when the session actually looks
+40	numeric-computational (a short numeric-looking result was produced during
+41	the run). On non-numeric tasks it stays completely silent, so it adds no
+42	nagging surface to the already-passing clusters.
+43	
+44	This is a strategy-level directive (re-read the spec; question ordering,
+45	indexing, seed/RNG usage, parsing edge cases; sanity-check against a tiny
+46	hand-computed case). It contains **no task-specific literals, constants,
+47	algorithms, or file paths** — it generalises to any computational task whose
+48	answer is a small set of numbers.
+49	
+50	Contract safety
+51	---------------
+52	The processor only augments ``event.result`` inside ``on_after_tool``; it
+53	never inserts messages, never touches the system prompt, and never mutates
+54	the message list. This is the same contract-safe pattern used by
+55	``RepeatedCommandBreaker`` and ``CustomEditToolProcessor``.
+56	"""
+57	
+58	from __future__ import annotations
+59	
+60	import dataclasses
+61	import re
+62	
+63	from harnessx.core.events import (
+64	    TaskEndEvent,
+65	    TaskStartEvent,
+66	    ToolResultEvent,
+67	)
+68	from harnessx.core.processor import MultiHookProcessor
+69	
+70	# The synthetic tool name the built-in CustomSelfVerifyProcessor injects on
+71	# exit-intent. Matching it lets us extend that one-shot verification turn.
+72	_SELF_VERIFY_TOOL = "_tb2_self_verify"
+73	
+74	# A "numeric result signature": a tool output line that is dominated by
+75	# floating-point / integer numbers, optionally comma- or key=value-separated
+76	# (e.g. "2.5056,1.2262,3.9742,6.2925" or "m=0.048, c=40.237"). We detect the
+77	# *shape*, not any specific value.
+78	_NUMBER_RE = re.compile(r"[-+]?\d+\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+")
+79	
+80	
+81	def _looks_numeric(text: str) -> bool:
+82	    """True when a tool result contains a short numeric-answer signature.
+83	
+84	    Heuristic (value-agnostic): at least one non-empty line that, after
+85	    stripping, contains >= 2 numbers and is short (a result line, not a big
+86	    data dump). This catches CSV-style and key=value result echoes without
+87	    firing on large logs or source-code echoes.
+88	    """
+89	    for raw in text.splitlines():
+90	        line = raw.strip()
+91	        if not line or len(line) > 200:
+92	            continue
+93	        nums = _NUMBER_RE.findall(line)
+94	        if len(nums) < 2:
+95	            continue
+96	        # Fraction of the line that is numeric/separator characters — a genuine
+97	        # result line is mostly digits, dots, commas, signs, and separators.
+98	        numeric_chars = sum(c.isdigit() or c in ".,+-eE= \t" for c in line)
+99	        if numeric_chars / max(len(line), 1) >= 0.6:
+100	            return True
+101	    return False
+102	
+103	
+104	_AUDIT_DIRECTIVE = (
+105	    "\n\n[NumericResultAudit] Your output is a computed numeric result. A "
+106	    "program that runs cleanly and prints a plausible number is the most "
+107	    "common source of a silent WRONG answer: the code is fine but your "
+108	    "*interpretation of the method* differs from what the task intended, so "
+109	    "the value is close but not exact. Re-running the same code will reproduce "
+110	    "the same wrong number, so do NOT just re-read the output file. Instead, "
+111	    "before you finish, re-read the task's method description and explicitly "
+112	    "audit each interpretation choice:\n"
+113	    "  1. ORDER OF OPERATIONS / RNG: if a random seed or a fixed number of "
+114	    "draws is specified, confirm the seed is set exactly once at the specified "
+115	    "point and that you draw random numbers in the exact order and grouping "
+116	    "the task implies — a different draw order changes seeded results.\n"
+117	    "  2. INDEX / COORDINATE / AXIS CONVENTIONS: confirm 0- vs 1-indexing, "
+118	    "row-vs-column (x=column, y=row) orientation, inclusive-vs-exclusive "
+119	    "bounds, and which variable is regressed on which.\n"
+120	    "  3. PARSING EDGE CASES: confirm every input row was read (check the "
+121	    "first and last lines, trailing newline/blank line, any header) and that "
+122	    "none were silently skipped or mis-split.\n"
+123	    "  4. ROUNDING / PRECISION / FORMULA VARIANT: confirm you used the exact "
+124	    "estimator/formula and rounding the task asked for (e.g. population vs "
+125	    "sample, percentile index convention).\n"
+126	    "  5. SANITY CHECK: recompute the answer a second, independent way (a "
+127	    "different library or a tiny hand-checkable subset) and confirm the two "
+128	    "agree. If the task states or implies an expected magnitude, verify yours "
+129	    "is consistent.\n"
+130	    "If any interpretation is ambiguous, try the alternative reading and see "
+131	    "whether it changes the result before committing."
+132	)
+133	
+134	
+135	class NumericResultAuditProcessor(MultiHookProcessor):
+136	    """Append a computational-interpretation audit to the self-verify turn.
+137	
+138	    Fires at most once per task (bound to the one-shot self-verify tool) and
+139	    only when the session produced a numeric-result signature. Purely augments
+140	    the synthetic ``_tb2_self_verify`` tool result — contract-safe.
+141	
+142	    Parameters
+143	    ----------
+144	    self_verify_tool:
+145	        Name of the synthetic verification tool to piggyback on. Defaults to
+146	        the TB2 built-in ``_tb2_self_verify``.
+147	    """
+148	
+149	    _singleton_group = "numeric_result_audit"
+150	    # After CustomSelfVerifyProcessor (_order=90) so the synthetic self-verify
+151	    # result already exists by the time we augment it.
+152	    _order = 95
+153	
+154	    def __init__(self, self_verify_tool: str = _SELF_VERIFY_TOOL) -> None:
+155	        self.self_verify_tool = self_verify_tool
+156	        self._seen_numeric = False
+157	        self._fired = False
+158	
+159	    async def on_task_start(self, event: TaskStartEvent):
+160	        self._seen_numeric = False
+161	        self._fired = False
+162	        yield event
+163	
+164	    async def on_after_tool(self, event: ToolResultEvent):
+165	        # 1. When the self-verify turn fires, augment it (once) if the run
+166	        #    looked numeric-computational.
+167	        if event.tool_name == self.self_verify_tool:
+168	            if self._seen_numeric and not self._fired:
+169	                self._fired = True
+170	                yield dataclasses.replace(
+171	                    event, result=(event.result or "") + _AUDIT_DIRECTIVE
+172	                )
+173	                return
+174	            yield event
+175	            return
+176	
+177	        # 2. Otherwise, watch real tool results for a numeric-answer signature.
+178	        if not self._seen_numeric and event.result and not event.error:
+179	            if _looks_numeric(event.result):
+180	                self._seen_numeric = True
+181	        yield event
+182	
+183	    async def on_task_end(self, event: TaskEndEvent):
+184	        self._seen_numeric = False
+185	        self._fired = False
+186	        yield event

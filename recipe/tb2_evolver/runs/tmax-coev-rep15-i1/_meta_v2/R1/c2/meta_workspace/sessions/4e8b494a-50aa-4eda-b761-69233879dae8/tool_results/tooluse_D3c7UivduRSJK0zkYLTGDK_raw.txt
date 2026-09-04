@@ -1,0 +1,102 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""TB2 harness config factory and processor implementations.
+4	
+5	Public API
+6	----------
+7	``make_tb2_harness_config(*, timeout_seconds=None) -> HarnessConfig``
+8	    Build a fully serializable ``HarnessConfig`` with no runtime slots.
+9	    Persist it with ``cfg.to_yaml_file(path)`` for meta-harness evolution.
+10	
+11	    Runtime-only slots (``sandbox_provider``, ``tracer``) are **not** included
+12	    here — they are injected by the agent at run time via ``cfg.copy(...)``.
+13	
+14	All processor classes are kept in this module so that YAML round-trip
+15	deserialization (``HarnessConfig.from_yaml_file``) can resolve their
+16	``_target_`` dotted paths.
+17	"""
+18	
+19	from __future__ import annotations
+20	
+21	import dataclasses
+22	import re
+23	import time
+24	import uuid
+25	
+26	from harnessx.core.builder import HarnessBuilder
+27	from harnessx.core.harness import HarnessConfig
+28	from harnessx.core.events import (
+29	    BeforeModelEvent,
+30	    Message,
+31	    ModelResponseEvent,
+32	    StepStartEvent,
+33	    TaskEndEvent,
+34	    TaskStartEvent,
+35	    ToolCall,
+36	    ToolCallEvent,
+37	    ToolResultEvent,
+38	)
+39	from harnessx.core.processor import MultiHookProcessor
+40	from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+41	from harnessx.processors.context.strategies.system_prompt.base import (
+42	    BaseSystemPromptBuilder,
+43	)
+44	from harnessx.processors.context.system_prompt import SystemPromptProcessor
+45	from harnessx.processors.control.bg_install_guard import BgInstallGuard
+46	from harnessx.processors.control.compaction import CompactionProcessor
+47	from harnessx.processors.control.parse_retry import ParseRetryProcessor
+48	from harnessx.processors.control.tool_call_correction import ToolCallCorrectionLayer
+49	from harnessx.tools.builtin import bash_tool
+50	from harnessx.tools.inmemory import InMemoryToolRegistry
+51	
+52	from .defaults import OUTPUT_LIMIT, WORKSPACE_PATH
+53	
+54	_REDIRECT_WRITE_RE = re.compile(r"(?<![<>2&\d])>{1,2}\s*([^\s;&|><\n'\"]+)")
+55	_SED_INPLACE_RE = re.compile(r"\bsed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|-i\S*)\s+\S+\s+([^\s;&|><\n'\"]+)")
+56	_TEE_WRITE_RE = re.compile(r"\btee\s+(?:-\S+\s+)*([^\s;&|><\n'\"]+)")
+57	_SKIP_PATH_RE = re.compile(r"^(/dev/|/proc/|/sys/|-|\d+$)")
+58	
+59	
+60	def _extract_written_files(cmd: str) -> list[str]:
+61	    """Return deduplicated file paths that a bash command writes to."""
+62	    if ">" not in cmd and "sed" not in cmd and "tee" not in cmd:
+63	        return []
+64	    paths: set[str] = set()
+65	    for pattern in (_REDIRECT_WRITE_RE, _SED_INPLACE_RE, _TEE_WRITE_RE):
+66	        for m in pattern.finditer(cmd):
+67	            p = m.group(1).strip("'\"")
+68	            if p and not _SKIP_PATH_RE.match(p):
+69	                paths.add(p)
+70	    return list(paths)
+71	
+72	
+73	_EDIT_LIMIT_WARN = (
+74	    "\n\n[EditDetection] File `{path}` has been modified more than {threshold} times. "
+75	    "You are over-editing this file — step back and try a fundamentally different approach."
+76	)
+77	
+78	
+79	_SELF_VERIFY_TOOL = "_tb2_self_verify"
+80	_SELF_VERIFY_ACK = "Verification check initiated. See the message above for instructions."
+81	_SELF_VERIFY_MSG = """\
+82	Before finishing, run through this checklist — do not skip any step even if you already verified:
+83	
+84	1. **Re-read the task description now.** Does your solution address every requirement, including edge cases, accuracy thresholds, and exact output format?
+85	
+86	2. **Check every required output file exists at its exact path:**
+87	```bash
+88	ls -lh /path/to/each/required/output/file
+89	```
+90	A script that ran without errors does NOT guarantee the file was written. Run `ls` explicitly for each required file.
+91	
+92	3. **Inspect the actual file contents** — `cat` or `head` each output file and confirm the values are semantically correct, not just that the file exists or is non-empty.
+93	
+94	4. **Validate your verification method.** Did your test actually exercise the real behavior? Tests that only check syntax, importability, or exit code 0 on a trivial case are NOT valid — they can pass even on a broken implementation.
+95	
+96	5. **For running services:** confirm they are still alive and reachable right now, not just that they started earlier.
+97	
+98	Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+99	**SUCCESS: task complete. Output files confirmed at [list each required path].**\
+100	"""
+
+[Showing lines 1–100 of 466 total. Use offset=100 to read the next section.]

@@ -1,0 +1,72 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	from __future__ import annotations
+4	
+5	import dataclasses
+6	
+7	from ...core.events import BeforeModelEvent, Message, StepStartEvent, TaskEndEvent, ToolResultEvent
+8	from ...core.processor import MultiHookProcessor
+9	
+10	
+11	class ToolFailureLimitError(Exception):
+12	    """Raised by ToolFailureGuard when failure count exceeds the configured limit."""
+13	
+14	
+15	class ToolFailureGuard(MultiHookProcessor):
+16	    """Stop or warn when too many tool calls fail in a single turn.
+17	
+18	    Counts tool errors within a turn (reset at ``step_start``).  When the
+19	    count reaches ``max_failures``:
+20	
+21	    - ``raise_on_exceed=True``  → raises :exc:`ToolFailureLimitError`.
+22	    - ``raise_on_exceed=False`` → injects a diagnostic warning into the system
+23	      prompt, nudging the model to change strategy instead of retrying.
+24	
+25	    Args:
+26	        max_failures:    Maximum allowed tool failures per turn (default 3).
+27	        raise_on_exceed: Raise instead of warn when the limit is reached.
+28	    """
+29	
+30	    _singleton_group = "tool_failure_guard"
+31	    _order = 30
+32	
+33	    def __init__(self, max_failures: int = 3, raise_on_exceed: bool = False) -> None:
+34	        self.max_failures = max_failures
+35	        self.raise_on_exceed = raise_on_exceed
+36	        self._failure_count = 0
+37	        self._pending_failure_count = 0
+38	
+39	    async def on_after_tool(self, event: ToolResultEvent):
+40	        if event.error:
+41	            self._failure_count += 1
+42	        yield event
+43	
+44	    async def on_task_end(self, event: TaskEndEvent):
+45	        self._failure_count = 0
+46	        yield event
+47	
+48	    async def on_step_start(self, event: StepStartEvent):
+49	        self._pending_failure_count = self._failure_count
+50	        self._failure_count = 0
+51	        yield event
+52	
+53	    async def on_before_model(self, event: BeforeModelEvent):
+54	        count = self._pending_failure_count
+55	        if count >= self.max_failures:
+56	            if self.raise_on_exceed:
+57	                raise ToolFailureLimitError(
+58	                    f"Too many tool failures this turn ({count} >= {self.max_failures}). "
+59	                    "Halting to prevent runaway retry loops."
+60	                )
+61	            warning = (
+62	                f"[ToolFailureGuard] {count} tool calls failed last turn "
+63	                f"({self.max_failures} is the limit). "
+64	                "Stop retrying the same failing approach. Diagnose the root cause "
+65	                "and take a fundamentally different action, or report the failure."
+66	            )
+67	            yield dataclasses.replace(
+68	                event,
+69	                messages=event.messages + (Message(role="user", content=warning),),
+70	            )
+71	        else:
+72	            yield event

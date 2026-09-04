@@ -1,0 +1,319 @@
+1	# Evolve journal — tmax-ev9b50-20260814-203834
+2	
+3	## Round 1 — break max_tokens repetition loop
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-14T21:30:00Z
+8	hypothesis_id: h_length_recovery_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_000015_89886d8d, task_000118_3043e92d, task_000264_ab8c7253, task_001032_1adaccb9, task_001321_658ce4a8, task_001652_86e1d185]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=31/50; +2/-1 gained=task_001264_9f4ca84a,task_001652_86e1d185 lost=task_001818_b251e5ea; score 0.6200 >= incumbent(mean) 0.6000 - tol 0.0400
+14	expected_global_gain: "Flip some of the 7 agent_error tasks (largest homogeneous failing cluster, cross-domain) by breaking the degenerate max_tokens repetition loop"
+15	regression_risk: "None expected on the 30 passing tasks — processor is a no-op on any turn that ends normally or with a tool call; only fires on finish_reason=length with no tool call"
+16	cost_shift: "Strongly negative — eliminates 160K-330K-char runaway output blobs and repeated max_tokens generations on the crashed tasks"
+17	rollback_trigger: "If R2 regresses any of the 30 R0-passing tasks, or the agent_error count does not drop, revert the processor"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 30/50 (60%). Of the 20 failures, 7 share one exact mechanism:
+23	`status=agent_error`, `agent.exit_reason=error`, and very high `elapsed_s`
+24	(352–1160s). Every one of these 7 tasks — and no others — contains the run
+25	loop's user nudge "Your previous response was cut off by the token limit.
+26	Please continue from where you left off." The mechanism: the small model
+27	(Qwen3.5-9B) enters a degenerate repetition loop, emitting the same narration
+28	paragraph hundreds of times in the assistant `content` field with no tool
+29	call until it hits `max_tokens` (`finish_reason=length`). The run loop's
+30	`runloop.py` then appends a *passive* "please continue" nudge, which merely
+31	re-primes the same runaway generation. The cycle repeats until the container
+32	errors out. This cuts across system_administration, data_querying,
+33	software_engineering, security, and data_processing domains — a harness
+34	deficiency, not a domain-knowledge gap.
+35	
+36	The remaining 13 failures are heterogeneous capability gaps (wrong recursive
+37	SQL / index creation in task_000264, wrong output paths, domain logic errors)
+38	with no shared harness lever — no harness fix; skip.
+39	
+40	### Changes
+41	
+42	- `processors/length_recovery.py` — new `LengthTruncationRecoveryProcessor`
+43	  (Control). `on_after_model`: on `finish_reason=length` with no tool call,
+44	  collapse runaway `content` to a head+tail excerpt and arm a corrective
+45	  nudge; reset streak on any normal/tool-calling turn. `on_before_model`:
+46	  append exactly one `user` message redirecting the model to stop narrating
+47	  and issue a single concrete Bash command, escalating on consecutive
+48	  truncations.
+49	- `config.yaml` — register the processor (`_order=5`, early in the
+50	  after-model chain) via absolute `file://` path, between
+51	  `TaskTimeReminderProcessor` and `CompactionProcessor`.
+52	
+53	### Evidence
+54	
+55	- `task_000015_89886d8d` step 25: assistant `content` length = 286,609,
+56	  `tool_calls=0` — the same "Actually, let me try a different approach ..."
+57	  paragraph repeated hundreds of times to the token cap; followed by the
+58	  "cut off by the token limit" nudge then another over-length turn → error.
+59	- `task_000264_ab8c7253` step 37: `content` length = 328,921, `tool_calls=0`;
+60	  two "cut off ... continue" nudges precede `agent.exit_reason=error`.
+61	- `task_001032_1adaccb9` step 45: `content` length = 166,154, `tool_calls=0`;
+62	  nudge-then-relapse → agent_error.
+63	- Perfect correlation: the 7 tasks containing the "cut off by the token limit"
+64	  nudge are exactly the 7 `status=agent_error` failures.
+65	
+66	### Uncertainty
+67	
+68	Breaking the loop resumes productive tool calls, but does not guarantee the
+69	underlying task is then solved correctly (some of the 7 also had upstream
+70	logic gaps, e.g. task_000264's SQL). Expected outcome is partial recovery —
+71	crashes become normal runs, and a subset flip to pass. If R2 shows no drop in
+72	agent_error count, the redirect nudge is not strong enough / fires too late —
+73	revert and reconsider (e.g. hard-terminate the turn on repeat rather than
+74	nudge). Watched signal: agent_error count and pass-rate on the 30 R0-passing
+75	tasks.
+76	
+77	## Round 2 — break identical-command loop
+78	
+79	<!-- journal:frontmatter
+80	round: 2
+81	timestamp: 2026-08-14T23:10:00Z
+82	hypothesis_id: h_repeated_command_breaker_v1
+83	levers: [control]
+84	predicted_affected: [task_001818_b251e5ea, task_000010_644ab1c2, task_000118_3043e92d, task_001031_a8f0eb37, task_000396_e56917e2]
+85	cited_candidates: [C-002]
+86	gating_outcome: accepted
+87	gating_attribution: score=30/50; +1/-2 gained=task_001818_b251e5ea lost=task_001090_c61c71f2,task_001515_eed714e6; score 0.6000 >= incumbent(mean) 0.6200 - tol 0.0400
+88	expected_global_gain: "Close the new dominant R1 failing cluster — degenerate identical-command loops that burn the whole step/wall budget (1000-4300s) across system_administration, data_processing, scientific_computing, data_querying"
+89	regression_risk: "Low — pure no-op unless the same normalized Bash command repeats 3+ times consecutively; soft nudge at streak 3, hard nudge at 4, execution suppression only at streak 5+. Passing runs adapt between commands so they never trip it."
+90	cost_shift: "Strongly negative — eliminates thousands of seconds and dozens of wasted identical tool calls on runaway failing tasks."
+91	rollback_trigger: "If R3 regresses any of the 31 R1-passing tasks, or the runaway-elapsed failing tasks do not drop in elapsed_s / step count, revert the processor."
+92	-->
+93	
+94	### Why
+95	
+96	R1's LengthTruncationRecoveryProcessor worked as intended: the
+97	status=agent_error (finish_reason=length crash) cluster dropped from 7 to 2,
+98	and R1 scored 31/50. But a distinct failure shape now dominates the slow
+99	failures: several tasks end each turn normally (a well-formed Bash tool call,
+100	not a length truncation) yet issue the SAME command over and over without ever
+101	reacting to the result. They grind to the ~33-step cap and time out with reward
+102	0 (task_000264 4307s, task_001818 3144s, task_000118 1931s, task_001031 1433s,
+103	task_000010 964s). The existing CustomEditToolProcessor emits a passive
+104	EditDetection text warning on over-writes, but the model ignores it and keeps
+105	looping. This is a cross-domain harness deficiency, not a domain-knowledge gap.
+106	
+107	### Changes
+108	
+109	- processors/repeat_command_breaker.py — new RepeatedCommandBreakerProcessor
+110	  (Control, order=40, after EditDetection, before self-verify). on_before_tool:
+111	  normalize each Bash command (whitespace-collapse) and count consecutive
+112	  identical repeats; at streak 3+ arm a soft redirect nudge, at 4+ a hard one,
+113	  and at 5+ suppress the execution via approved=False, synthetic_result so the
+114	  loop physically cannot continue. on_before_model: append exactly one user
+115	  redirect (contract-safe +1). Streak resets on any different command / task
+116	  boundary.
+117	- config.yaml — register the processor via absolute file:// path.
+118	
+119	### Evidence
+120	
+121	- task_001818 msgs 6-68: identical 3238-char main.rs heredoc written ~20x
+122	  consecutively, each exit 0; EditDetection warns at msgs 21/23/37/39/53/56 and
+123	  is ignored. Dup ratio 0.89 (26 of 28 commands identical).
+124	- task_000010 msgs 2-15: identical socket port-probe issued 4x, ps aux grep 5x,
+125	  cycling start/kill/check with no adaptation.
+126	- task_001031: identical mpiexec -n 4 run 3x with no code change between.
+127	
+128	### Uncertainty
+129	
+130	Breaking the loop reclaims budget and forces a different action, but does not
+131	guarantee the task is then solved (task_001818 still had an unaddressed E0308
+132	mismatched-types compiler error; task_000264 has an upstream SQL logic gap).
+133	Expected outcome is partial recovery: runaway grinds become bounded runs, a
+134	subset flip to pass, elapsed_s/step counts drop sharply. If R3 shows no drop in
+135	elapsed_s on the runaway cluster, thresholds fire too late — lower
+136	suppress_threshold or revert.
+137	
+138	## Round 3 — no-op: remaining failures are capability gaps, control lever exhausted
+139	
+140	<!-- journal:frontmatter
+141	round: 3
+142	timestamp: 2026-08-15T00:30:00Z
+143	hypothesis_id: h_noop_capability_gaps_v1
+144	levers: []
+145	predicted_affected: []
+146	gating_outcome: reverted
+147	gating_attribution: score=27/50; +1/-4 gained=task_001515_eed714e6 lost=task_001498_df8254c9,task_001536_acfe6c35,task_001706_24462a09,task_001818_b251e5ea; score 0.5400 < incumbent(mean) 0.6200 - tol 0.0400 -> revert to R1
+148	expected_global_gain: "None claimed — no harness lever plausibly flips a failing cluster this round; explicit no-op protects the 30 passing tasks from a speculative regression."
+149	regression_risk: "None — config is byte-identical to R2 (which passed replay). R1+R2 processors still resolve at their absolute file:// paths."
+150	cost_shift: "Zero — no config change."
+151	rollback_trigger: "N/A (no-op). Next round should revisit only if a NEW, non-capability harness signal appears."
+152	-->
+153	
+154	### Why
+155	
+156	R2 scored 30/50 (60%), flat vs R0 (30) and down 1 from R1 (31). I swept all
+157	50 trajectories (frontmatter + bodies of every failing task and a sample of
+158	passing ones). The 20 failures decompose into two groups, neither of which a
+159	harness lever can flip this round:
+160	
+161	1. Catastrophic runaway/crash tasks (task_000010 3119s, task_001031 4317s,
+162	   task_001032 4538s, task_000015 5219s agent_error). These are the tasks the
+163	   R1 length-recovery and R2 repeat-command-breaker were built for. Body reading
+164	   shows the loop is now a symptom of an upstream capability gap, not the
+165	   blocker itself: task_001031 = MPI send/recv deadlock the model cannot debug
+166	   (it re-emits an identical heredoc write 14x and RepeatGuard fired 138 nudges +
+167	   suppression, which the model simply ignored across 2 sessions); task_000010 =
+168	   k8s port-forward/socat/zombie-process management + a path mismatch (wrote the
+169	   operator to the wrong filename vs the required path); task_001032 = ustar
+170	   header parsing the model gets wrong. The Variant-A retroactive check for
+171	   another loop-breaker is NO — breaking the loop harder does not supply the
+172	   missing capability, so it cannot flip these. (analyze skill: "a tighter loop
+173	   detector requires the loop to be the actual blocker, not the consequence of
+174	   the real blocker.")
+175	
+176	2. Short multi-requirement failures (system_administration 0/5, plus scattered
+177	   data_science / software_engineering). Every one opens with the SAME habit the
+178	   passing cluster uses — "Let me break down the task: 1... 2... 3..." then
+179	   survey with find/ls/cat — so the plan/survey Instruction lever is already
+180	   saturated (Variant-B/C check: habit present in BOTH pass and fail clusters, so
+181	   encoding it is dead weight). They also all receive the existing
+182	   CustomSelfVerifyProcessor checklist (fired 2x, SUCCESS marker emitted 2x) and
+183	   run extra ls/cat verification, yet still fail eval because their
+184	   self-verification is superficial (existence, not semantic correctness against
+185	   every sub-requirement). That is a model capability gap — per SOUL, not the
+186	   harness's job; more instruction around a missing capability compounds failure
+187	   (analyze skill: Capability-gap / Instruction is "almost always wrong").
+188	
+189	### Changes
+190	
+191	- `config.yaml` — byte-identical copy of R2 config (explicit no-op).
+192	  `system_prompt.txt` sidecar copied unchanged so SiblingSystemPromptBuilder
+193	  resolves next to the new config.
+194	
+195	### Evidence
+196	
+197	- task_001031_a8f0eb37: identical heredoc-write command (2364 chars) issued 14x;
+198	  RepeatGuard nudges fired 138x, byte-identical suppression fired, model looped
+199	  anyway across 2 oh_runs sessions. Root cause in raw_assistant content: "the
+200	  send/recv pattern is blocking" (MPI deadlock).
+201	- task_000010_644ab1c2: cycles pkill/ps/socat/mock_api among ~8 distinct
+202	  commands (RepeatGuard fired 0x — not byte-identical), wrote operator to wrong
+203	  filename vs required path. Genuine multi-part sysadmin task + capability gap.
+204	- task_000015_89886d8d: status=agent_error, 73 steps, 5219s; length-recovery
+205	  "stop narrating" nudge fired but the model kept length-truncating until the
+206	  container errored — reward 0 either way.
+207	- task_000028_7fe033ac, task_000140_01c78b42, task_001090_c61c71f2,
+208	  task_001653_c4cafa73: all open with "Let me break down the task: 1... 2..."
+209	  (habit present) and end with a confident "task complete / all requirements
+210	  verified" + SUCCESS marker, yet fail eval on semantic correctness.
+211	- Passing cluster (task_000024, task_000344, task_000818, task_001536) uses the
+212	  identical opening habit — confirming the habit is not the differentiator;
+213	  correctness is.
+214	- R1->R2 regressions (task_001090, task_001515) had RepeatGuard fire 0x — they
+215	  are run-to-run variance, not processor-induced; the R2 processor is not
+216	  actively harming any passing task.
+217	
+218	### Uncertainty
+219	
+220	The honest risk of a no-op is under-spending on a live signal. I judged that a
+221	hard step/wall-clock circuit breaker (the only remaining low-effort control
+222	move) carries real regression risk against currently-PASSING slow tasks
+223	(task_001701 passes at 1024s, task_001818 passes at 1484s) while flipping zero
+224	failing tasks — a negative-Pareto trade the auto-revert gate would reject. If a
+225	future round finds a NEW harness-shaped signal (e.g. a tool-return-shape gap, or
+226	evidence that a specific slow-but-passing task would tolerate a bounded budget),
+227	that is the place to spend. This round protects the 30 passing tasks and
+228	declines to burn a round on an exhausted lever.
+229	
+230	### needs_from_human
+231	
+232	The dominant remaining failure driver on this task set is a model capability gap
+233	(MPI concurrency debugging, ustar parsing, multi-service sysadmin orchestration,
+234	rigorous self-verification of multi-requirement solutions) on a 9B model, not a
+235	harness deficiency. Further pass-rate gains here likely require a stronger base
+236	model or task-specific tooling that a general harness cannot supply without
+237	memorising tasks. Flag for human: consider whether the eval set's expected
+238	ceiling for Qwen3.5-9B is meaningfully above 60% given these gaps.
+239	
+240	## Round 5 — budget-reclaiming loop guard (total-repeat, with suppression)
+241	
+242	<!-- journal:frontmatter
+243	round: 5
+244	timestamp: 2026-08-16T06:00:00Z
+245	hypothesis_id: h_loop_budget_guard_total_repeat_v1
+246	levers: [control]
+247	predicted_affected: [task_000118_3043e92d, task_000863_7acceb19, task_001032_1adaccb9, task_001652_86e1d185, task_001031_a8f0eb37]
+248	cited_candidates: [C-001]
+249	gating_outcome: accepted
+250	gating_attribution: score=28/50; +3/-3 gained=task_000863_7acceb19,task_001536_acfe6c35,task_001652_86e1d185 lost=task_001090_c61c71f2,task_001701_95e3bbcb,task_001818_b251e5ea; score 0.5600 >= incumbent(mean) 0.5900 - tol 0.0400
+251	expected_global_gain: "Flip a subset of the 8 R4 budget_exceeded failures (largest homogeneous cross-domain failing cluster) by converting whole-budget byte-identical command loops into bounded runs that retain budget to recover."
+252	regression_risk: "Low — strict no-op unless the exact same normalized Bash command is issued 3+ times in one task; the 23 R4 passing tasks finish in 8-54 adaptive steps and never repeat one command that many times, so they never arm nudge/suppression."
+253	cost_shift: "Strongly negative — eliminates 20-30 wasted identical tool executions and 250-3200s runaway wall-clock on looping tasks; passing tasks unaffected."
+254	rollback_trigger: "If R6 regresses any currently-passing task where LoopGuard fired, or the budget_exceeded count does not drop, revert the processor."
+255	-->
+256	
+257	### Why
+258	
+259	R4 measured the incumbent R1 config (the R2 identical-command breaker was
+260	reverted at the R3 gate back to R1). R4 scored 27/50 — a low draw of a noisy
+261	config (R1 spread 27-31). The 20 failures split cleanly:
+262	
+263	1. Eight budget_exceeded at the 80-step cap — 4-5 dominated by a single
+264	   byte-identical Bash command repeated 22-33 times out of ~33 total tool calls.
+265	   With no loop guard active in the incumbent, these burn the entire step/wall
+266	   budget on one useless command and never recover. Harness deficiency: the
+267	   model does not react to the unchanging tool result (task_001652 literally
+268	   narrates "I'm stuck in a loop" 20x while re-issuing the same command).
+269	2. Fourteen done with reward=0 — natural finishes that fail verification
+270	   (superficial self-verification / genuine capability gaps). No new harness
+271	   lever this round; consistent with R3's capability-gap finding.
+272	
+273	The R2 breaker was reverted as part of a whole-config revert (its own predicted
+274	tasks were not the regression driver — R1->R2 losses had RepeatGuard fire 0x, run
+275	variance). The mechanism is sound; the miss was that it tracked only consecutive
+276	repeats and suppressed at streak 5 — blind to the interleaved-narration loop
+277	(task_001652) and A/B cycling. R5 re-scopes it to key on total per-command issue
+278	count, catching both shapes and biting sooner, under a new hypothesis id.
+279	
+280	### Changes
+281	
+282	- processors/loop_budget_guard.py — new LoopBudgetGuardProcessor (Control,
+283	  order=40, after CustomEditToolProcessor, before CustomSelfVerifyProcessor).
+284	  on_before_tool: count total issues of each whitespace-normalized Bash command
+285	  this task; at 3 arm one escalating user redirect, at 5 suppress the execution
+286	  (approved=False, synthetic result) so the loop physically cannot continue.
+287	  on_before_model: append exactly one user redirect (contract-safe). Counters
+288	  reset at task boundaries.
+289	- config.yaml — R1 config plus the new processor registered via absolute file://
+290	  path. system_prompt.txt sidecar copied for SiblingSystemPromptBuilder.
+291	
+292	### Evidence
+293	
+294	- task_000118_3043e92d: monitor-launch + ps-aux command issued 33x identically;
+295	  every result shows the monitor NOT running — relaunching a crashing process.
+296	- task_000863_7acceb19: identical Python heredoc file write 29x.
+297	- task_001032_1adaccb9: identical C++ heredoc file write 31x.
+298	- task_001652_86e1d185: identical failing strings|grep 22x, each exit 1 no
+299	  output; recovered via tesseract only after ~50 wasted steps, then out of budget.
+300	- Passing cluster (23 tasks) finish in 8-54 steps with distinct adaptive
+301	  commands — never repeat one command 3+ times, so the guard is a no-op on them.
+302	
+303	### Uncertainty
+304	
+305	Breaking the loop reclaims budget and forces a different action but does not
+306	supply a missing capability. Expected outcome is partial recovery: task_001652
+307	and the pure relaunch/rewrite loops have real headroom to finish once budget is
+308	not burned; task_001031 (MPI deadlock) may still fail on the underlying gap. If
+309	R6 shows no drop in budget_exceeded count, suppression fires too late (lower
+310	suppress_threshold) or the loops are downstream of capability gaps and the
+311	control lever is exhausted (revert). The config is noisy (+-4 tasks); attribute
+312	against R1's mean, not its best draw.
+313	
+314	### needs_from_human
+315	
+316	The 14 done+reward=0 failures remain a model capability gap (superficial
+317	self-verification of multi-requirement solutions, MPI concurrency, ustar
+318	parsing) on a 9B model — not a harness deficiency. Pass-rate ceiling above ~60%
+319	likely needs a stronger base model.

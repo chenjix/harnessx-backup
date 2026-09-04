@@ -1,0 +1,111 @@
+@tool(
+    name="Bash",
+    description="Execute a shell command and return stdout+stderr. Use for running scripts, checking files, and system commands.",
+    input_schema=_SCHEMA,
+)
+async def bash_tool(command: str, timeout: int = _DEFAULT_TIMEOUT_MS) -> str:
+    blocked_msg = _check_blocked(command)
+    if blocked_msg:
+        return f"Error: {blocked_msg}"
+
+    timeout_sec = min(timeout, _MAX_TIMEOUT_MS) / 1000
+    from ...sandbox.base import get_current_sandbox
+
+    _sandbox = get_current_sandbox()
+
+    if _sandbox is not None:
+        # Route through sandbox (handles LocalSandbox and remote sandboxes like Harbor).
+        try:
+            return _cap_output(
+                await asyncio.wait_for(
+                    _sandbox.exec(command, timeout=timeout_sec),
+                    timeout=timeout_sec + 5,
+                ),
+                "output",
+            )
+        except asyncio.TimeoutError:
+            # Kill orphaned container processes so they don't OOM the sandbox.
+            try:
+                await asyncio.shield(_sandbox.kill_running())
+            except Exception:
+                pass
+            return f"Error: command timed out after {timeout_sec:.0f}s"
+
+    # No sandbox — direct local subprocess, confined to a per-run work dir
+    # so the agent's `cat > file` / `python3 script.py` don't pollute the repo.
+    cwd = _get_work_dir()
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return f"Error: command timed out after {timeout_sec:.0f}s"
+    output = _cap_output(stdout.decode("utf-8", errors="replace"), "stdout")
+    errors = _cap_output(stderr.decode("utf-8", errors="replace"), "stderr")
+    if errors:
+        return f"{output}\nSTDERR: {errors}"
+    return output
+=== EDIT TOOL ===
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+from __future__ import annotations
+
+from ..base import tool
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "file_path": {"type": "string", "description": "The path to the file to edit"},
+        "old_string": {"type": "string", "description": "The text to replace"},
+        "new_string": {"type": "string", "description": "The replacement text"},
+        "replace_all": {
+            "type": "boolean",
+            "description": "Replace all occurrences (default false)",
+        },
+    },
+    "required": ["file_path", "old_string", "new_string"],
+}
+
+
+@tool(
+    name="Edit",
+    description="Make targeted edits to a file by replacing old_string with new_string.",
+    input_schema=_SCHEMA,
+)
+async def edit_tool(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    from ...sandbox.base import get_current_sandbox
+
+    sandbox = get_current_sandbox()
+    resolved = sandbox.resolve(file_path) if sandbox is not None else file_path
+    try:
+        if sandbox is not None:
+            content = await sandbox.read_file(resolved)
+        else:
+            with open(resolved, "r", encoding="utf-8") as f:
+                content = f.read()
+        if old_string not in content:
+            return f"Error: old_string not found in {file_path}"
+        if replace_all:
+            new_content = content.replace(old_string, new_string)
+            count = content.count(old_string)
+        else:
+            new_content = content.replace(old_string, new_string, 1)
+            count = 1
+        if sandbox is not None:
+            await sandbox.write_file(resolved, new_content)
+        else:
+            with open(resolved, "w", encoding="utf-8") as f:
+                f.write(new_content)
+        return f"Replaced {count} occurrence(s) in {file_path}"
+    except FileNotFoundError:
+        return f"Error: File not found: {file_path}"
+    except Exception as e:
+        return f"Error: {e}"

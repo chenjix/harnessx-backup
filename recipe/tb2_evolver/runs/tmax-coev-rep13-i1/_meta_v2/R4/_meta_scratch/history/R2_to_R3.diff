@@ -1,0 +1,29 @@
+--- R2
++++ R3
+@@ -49,10 +49,18 @@
+   _hook_: '*'
+-# Break exact-identical Bash command loops (see processors/repeat_command_guard.py).
+-# The length_recovery guard only catches finish_reason=length runaways and the
+-# CustomEditToolProcessor only counts file writes; neither breaks the "re-run the
+-# same failing query/build verbatim" loop that burned every budget_exceeded task
+-# in the baseline round. This guard escalates a break-out nudge on exact repeats.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep13-i1/_meta_v2/R1/processors/repeat_command_guard.py::RepeatCommandGuard
+-  threshold: 3
+-  hard_stop_extra: 2
++# Break GENUINE dead command loops (see processors/dead_loop_breaker.py).
++# Successor to R1's RepeatCommandGuard. That guard keyed on the command string
++# alone and was advisory-only; on this model the agent ignored the advisory and
++# re-ran the exact same command with the exact same output until it burned the
++# step budget (one task looped 12x on a read-only diagnostic -> agent_error).
++# DeadLoopBreaker keys on (command, output-fingerprint) so healthy
++# iterate-and-test loops (output changes each run) are never touched, and it
++# escalates from an advisory to a HARD BLOCK: at block_threshold identical
++# (command, output) repeats the next identical call is intercepted (approved=
++# False + synthetic directive) and does not execute, forcing the agent off the
++# dead command. block_threshold=5 sits above the max identical (command,output)
++# repeat count reached by any observed PASSING task (<=2), so passers that
++# re-run a build/write many times are unaffected.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep13-i1/_meta_v2/R3/processors/dead_loop_breaker.py::DeadLoopBreaker
++  advisory_threshold: 3
++  block_threshold: 5
+   _hook_: '*'

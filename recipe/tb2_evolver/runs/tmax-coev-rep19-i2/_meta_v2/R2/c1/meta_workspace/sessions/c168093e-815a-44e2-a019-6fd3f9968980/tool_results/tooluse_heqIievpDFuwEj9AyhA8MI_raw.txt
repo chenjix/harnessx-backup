@@ -1,0 +1,113 @@
+75	## Round 2 — no-op: assigned focus is infra, not harness
+76	
+77	<!-- journal:frontmatter
+78	round: 2
+79	timestamp: 2026-06-01T00:00:00Z
+80	hypothesis_id: h_docker_name_collision_noop_v1
+81	levers: []
+82	predicted_affected: []
+83	gating_outcome: noop
+84	gating_attribution: noop
+85	expected_global_gain: "0 flips this round — the assigned failure is not fixable via HarnessConfig; documented the systemic infra bug for a human"
+86	regression_risk: "None — config is a byte-for-byte copy of R1"
+87	cost_shift: "0 — no config change"
+88	rollback_trigger: "N/A (no-op)"
+89	-->
+90	
+91	### Why
+92	
+93	Assigned focus `task_000118_3043e92d` fails with `status=error`,
+94	`elapsed_s=0.1`, and NO agent trajectory. Root cause is a Docker container
+95	name collision raised in `recipe/tmax_eval/docker_env.py::start_container`
+96	BEFORE the run loop (and therefore any HarnessConfig processor/tool/prompt)
+97	is ever invoked. This is a harness INFRASTRUCTURE bug, not a HarnessConfig
+98	capability gap and not a model capability gap. It is systemic: 10/50 tasks
+99	this round (20%) failed with the identical error and 0.1s elapsed.
+100	
+101	### Changes
+102	
+103	- `config.yaml` — byte-for-byte copy of R1 config (explicit no-op; verified
+104	  `cmp` identical). No processor/tool/template authored.
+105	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — full diagnosis + recommended fix.
+106	
+107	### Evidence
+108	
+109	- `task_000118_3043e92d.result.json`: `status=error`, `elapsed_s=0.1`,
+110	  error `docker run failed ... container name "/tmax-task0001183043e92d-1788106888"
+111	  is already in use`.
+112	- Same error shape on 9 other tasks (0.1s each): task_000010_644ab1c2,
+113	  task_000028_7fe033ac, task_000140_01c78b42, task_000505_50b5162d,
+114	  task_000748_c9807703, task_000933_1f27096a, task_001032_1adaccb9,
+115	  task_001781_529727cf, task_001937_ac874115. Timestamps `-1788106887` /
+116	  `-1788106888` show adjacent-second collisions.
+117	- `recipe/tmax_eval/docker_env.py:105`: name = `f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"` — whole-second granularity + 20-char id truncation gives no per-container uniqueness within a second.
+118	
+119	### Uncertainty
+120	
+121	None on diagnosis (deterministic error text, pre-run failure, read-only
+122	recipe). The fix (uuid/PID/ns suffix or rm-then-run/retry-on-Conflict) is
+123	outside my write scope; HarnessConfig has no lever that runs before container
+124	launch. Any config edit here would be drift onto invented territory, so the
+125	correct action is the explicit no-op + NEEDS_FROM_HUMAN.
+126	
+127	## Round 2 — infra flake, not a harness gap (no-op)
+128	
+129	<!-- journal:frontmatter
+130	round: 2
+131	timestamp: 2026-06-01T12:00:00Z
+132	hypothesis_id: h_docker_name_conflict_infra_v1
+133	levers: []
+134	predicted_affected: []
+135	gating_outcome: noop
+136	gating_attribution: noop
+137	expected_global_gain: "None from config — the assigned failure is a host-side Docker runner bug (container-name collision), not reachable by any processor/tool/template. Documented as an out-of-scope fix request."
+138	regression_risk: "None — config is byte-for-byte identical to current_config."
+139	cost_shift: "Zero — no change."
+140	rollback_trigger: "N/A (no-op)."
+141	-->
+142	
+143	### Why
+144	
+145	Assigned focus `task_000010_644ab1c2` (system_administration) did NOT fail
+146	on agent behavior. Its `result.json` shows `status: error`, `elapsed_s: 0.1`,
+147	and NO episode/message log — the task died at host-side `docker run` before
+148	the agent phase ever started. The error is a Docker container-**name
+149	Conflict**: `/tmax-task000010644ab1c2-1788106887` already in use. This is
+150	identical across ALL 10 `status: error` tasks this round (000010, 000028,
+151	000118, 000140, 000505, 000748, 000933, 001032, 001781, 001937), each at
+152	0.1s with timestamps clustered at `1788106887/…888`. Root cause:
+153	`recipe/tmax_eval/docker_env.py:105` builds the container name with
+154	`int(time.time())` (1-second resolution), so concurrent workers / leftover
+155	containers collide. HarnessConfig only evolves the in-container processor
+156	pipeline + system prompt (tb2-playbook); no hook fires before the agent
+157	launches. Therefore this is neither a harness deficiency nor a model
+158	capability gap — it is a runner infrastructure bug outside my writable scope.
+159	
+160	### Changes
+161	
+162	- `config.yaml` — byte-for-byte copy of `current_config` (R1/config.yaml).
+163	  Explicit no-op. No processors/tools/templates authored.
+164	
+165	### Evidence
+166	
+167	- `task_000010_644ab1c2/result.json`: `status: "error"`, `elapsed_s: 0.1`,
+168	  `error: "RuntimeError: docker run failed ... The container name
+169	  \"/tmax-task000010644ab1c2-1788106887\" is already in use ..."`.
+170	- Cross-task: `grep -l '"status": "error"'` → 10/50 tasks, all with the same
+171	  Conflict shape and near-identical timestamps → deterministic collision, not
+172	  a per-task agent issue.
+173	- `docker_env.py:105`: `name = f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"[:63]`.
+174	
+175	### needs_from_human
+176	
+177	See `_meta_scratch/NEEDS_FROM_HUMAN.md`. Fix `docker_env.py::start_container`
+178	to use a high-entropy suffix (e.g. `uuid4().hex[:12]`) instead of
+179	second-resolution time, and/or `docker rm -f <name>` before `docker run`,
+180	and/or retry-with-fresh-name on Conflict. Until fixed, these 10 tasks are
+181	un-scoreable regardless of agent/harness quality.
+182	
+183	### Uncertainty
+184	
+185	Low. The failure signature is unambiguous and host-side. Risk is only that a
+186	future round mistakes these `status: error` tasks for agent failures and
+187	spends config edits chasing them — this entry exists to prevent that.

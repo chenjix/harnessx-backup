@@ -1,0 +1,182 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatedCommandBreakerProcessor.
+4	
+5	Closes a systemic failure mode that survived the R1 length-recovery fix:
+6	the small model ends each turn *normally* (a well-formed Bash tool call, not
+7	a ``finish_reason=length`` truncation) but issues the **same command over and
+8	over** without adapting. It never reacts to the tool result — it re-writes the
+9	identical file, re-runs the identical port check, or re-launches the identical
+10	process, burning the entire step / wall-clock budget and still failing.
+11	
+12	Observed shapes (generic): re-writing an identical file heredoc many times in
+13	a row with no intervening change; re-issuing an identical probe/status command
+14	and cycling start/kill/check without adapting; re-launching an identical
+15	long-running command with no code change between runs. In every shape the
+16	successive commands are byte-identical modulo whitespace and the tool result is
+17	never acted on.
+18	
+19	The existing ``CustomEditToolProcessor`` (EditDetection) *does* fire a passive
+20	text warning appended to the tool result, but the model ignores it and keeps
+21	looping. The lever here is **Control with teeth**: detect consecutive
+22	byte-identical (whitespace-normalized) Bash commands and, past a threshold,
+23	(1) inject one escalating ``user`` redirect that names the loop explicitly, and
+24	(2) at a higher threshold, *suppress the redundant execution itself* by
+25	returning a synthetic tool result — the loop physically cannot continue, which
+26	forces the model onto a different action.
+27	
+28	The processor is benchmark-agnostic in mechanism: it keys purely on the
+29	normalized text of successive ``Bash`` commands, never on task content.
+30	"""
+31	
+32	from __future__ import annotations
+33	
+34	import dataclasses
+35	
+36	from harnessx.core.events import (
+37	    BeforeModelEvent,
+38	    Message,
+39	    TaskEndEvent,
+40	    TaskStartEvent,
+41	    ToolCallEvent,
+42	    ToolResultEvent,
+43	)
+44	from harnessx.core.processor import MultiHookProcessor
+45	
+46	
+47	def _normalize(cmd: str) -> str:
+48	    """Collapse whitespace so trivially-reformatted repeats still match."""
+49	    return " ".join((cmd or "").split())
+50	
+51	
+52	_NUDGE_SOFT = (
+53	    "[RepeatGuard] You have now issued the SAME command {n} times in a row "
+54	    "without changing it. Repeating an identical command will keep producing "
+55	    "the same result. Do NOT run it again unchanged. Read the most recent tool "
+56	    "output carefully, state in one sentence what is actually different from "
+57	    "what you expected, then take a DIFFERENT concrete action — change the "
+58	    "command, inspect a different file, or fix the underlying cause."
+59	)
+60	
+61	_NUDGE_HARD = (
+62	    "[RepeatGuard] STOP. You are stuck in a loop: the identical command has now "
+63	    "run {n} times with no progress. Whatever you are retrying is NOT the "
+64	    "problem to keep poking — the approach itself is wrong. Abandon it. Pick a "
+65	    "materially different strategy: inspect the error output line by line, "
+66	    "check assumptions you have not verified (file paths, process state, exact "
+67	    "error message), or solve the task a different way. Your next command MUST "
+68	    "differ from the one you just repeated."
+69	)
+70	
+71	# Synthetic result returned when execution is suppressed.
+72	_SUPPRESSED = (
+73	    "[RepeatGuard] This command was NOT executed: it is byte-for-byte identical "
+74	    "to the previous {n} command(s), which all produced the same result. "
+75	    "Re-running it cannot make progress. Take a different action — the repeated "
+76	    "command is not solving the problem. Review the last real output above and "
+77	    "change your approach before running anything again."
+78	)
+79	
+80	
+81	class RepeatedCommandBreakerProcessor(MultiHookProcessor):
+82	    """Detect and break consecutive-identical Bash command loops.
+83	
+84	    Parameters
+85	    ----------
+86	    warn_threshold:
+87	        Number of consecutive identical Bash commands at which a corrective
+88	        ``user`` nudge is armed (soft nudge). Default 3.
+89	    hard_threshold:
+90	        Number of consecutive identical Bash commands at which the escalated
+91	        nudge is used. Default 4.
+92	    suppress_threshold:
+93	        Number of consecutive identical Bash commands at (or above) which the
+94	        execution itself is suppressed and replaced with a synthetic result.
+95	        Must be >= warn_threshold to be meaningful. Default 5.
+96	    """
+97	
+98	    _singleton_group = "tb2_repeat_command_breaker"
+99	    # Run after EditDetection (_order=30) so the two guards don't collide, and
+100	    # before the self-verify keepalive (_order=90).
+101	    _order = 40
+102	
+103	    def __init__(
+104	        self,
+105	        warn_threshold: int = 3,
+106	        hard_threshold: int = 4,
+107	        suppress_threshold: int = 5,
+108	    ) -> None:
+109	        self.warn_threshold = max(2, int(warn_threshold))
+110	        self.hard_threshold = max(self.warn_threshold, int(hard_threshold))
+111	        self.suppress_threshold = max(self.hard_threshold + 1, int(suppress_threshold))
+112	        self._last_norm: str = ""
+113	        self._streak: int = 0
+114	        self._pending_nudge: str = ""
+115	
+116	    async def on_task_start(self, event: TaskStartEvent):
+117	        self._last_norm = ""
+118	        self._streak = 0
+119	        self._pending_nudge = ""
+120	        yield event
+121	
+122	    async def on_before_tool(self, event: ToolCallEvent):
+123	        if event.tool_name != "Bash":
+124	            yield event
+125	            return
+126	
+127	        cmd = _normalize(event.tool_input.get("command", ""))
+128	        if not cmd:
+129	            yield event
+130	            return
+131	
+132	        if cmd == self._last_norm:
+133	            self._streak += 1
+134	        else:
+135	            self._last_norm = cmd
+136	            self._streak = 1
+137	
+138	        # Suppress the physical execution once the loop is entrenched. The
+139	        # synthetic result stands in for the tool output so the run loop keeps
+140	        # going, but the model no longer gets a fresh identical result to react
+141	        # to — it must change course.
+142	        if self._streak >= self.suppress_threshold:
+143	            self._pending_nudge = _NUDGE_HARD.format(n=self._streak)
+144	            yield dataclasses.replace(
+145	                event,
+146	                approved=False,
+147	                synthetic_result=_SUPPRESSED.format(n=self._streak - 1),
+148	            )
+149	            return
+150	
+151	        # Otherwise arm a redirect nudge (soft then hard) but let the command run
+152	        # once more so the model still sees a real result alongside the warning.
+153	        if self._streak >= self.hard_threshold:
+154	            self._pending_nudge = _NUDGE_HARD.format(n=self._streak)
+155	        elif self._streak >= self.warn_threshold:
+156	            self._pending_nudge = _NUDGE_SOFT.format(n=self._streak)
+157	
+158	        yield event
+159	
+160	    async def on_after_tool(self, event: ToolResultEvent):
+161	        # A distinct command breaks the streak; that reset already happens in
+162	        # on_before_tool for the next call. Nothing to do here except pass
+163	        # through — kept for symmetry / future counters.
+164	        yield event
+165	
+166	    async def on_before_model(self, event: BeforeModelEvent):
+167	        if not self._pending_nudge:
+168	            yield event
+169	            return
+170	        nudge = self._pending_nudge
+171	        self._pending_nudge = ""
+172	        # Contract-safe: append exactly one user message.
+173	        yield dataclasses.replace(
+174	            event,
+175	            messages=event.messages + (Message(role="user", content=nudge),),
+176	        )
+177	
+178	    async def on_task_end(self, event: TaskEndEvent):
+179	        self._last_norm = ""
+180	        self._streak = 0
+181	        self._pending_nudge = ""
+182	        yield event

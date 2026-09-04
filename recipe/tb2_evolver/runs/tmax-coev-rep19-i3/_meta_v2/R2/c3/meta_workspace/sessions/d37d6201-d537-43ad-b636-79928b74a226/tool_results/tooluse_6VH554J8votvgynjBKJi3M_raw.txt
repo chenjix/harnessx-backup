@@ -1,0 +1,68 @@
+151	## Round 2 — optimum-selection clause on exit-intent nudge
+152	
+153	<!-- journal:frontmatter
+154	round: 2
+155	timestamp: 2026-06-02T00:00:00Z
+156	hypothesis_id: h_optimum_selection_argmin_v1
+157	levers: [control]
+158	predicted_affected: [task_000017_fed73abc]
+159	cited_candidates: [C-001]
+160	gating_outcome: pending
+161	gating_attribution: pending
+162	expected_global_gain: "Flips task_000017 and any 'return the optimum of a stochastic/iterative search' task where the agent commits the last-iterate value instead of the argmin/argmax candidate; targets the 7/7-red scientific_computing cluster via a pure strategy clause with no task literals."
+163	regression_risk: "Low — adds one gated bullet to a message that fires at most once per task on the voluntary exit-intent turn; runs that die at the step cap never see it, and no already-passing cluster depends on committing a last-iterate value."
+164	cost_shift: "Negligible-to-slightly-up: one ~120-word paragraph on <=1 turn/task, plus maybe 1-2 verification Bash calls on genuine optimum tasks."
+165	rollback_trigger: "If a previously-passing scientific_computing task newly fails and its trajectory shows the agent second-guessing a correct last-iterate optimum after reading the [NumericCrossCheck] optimum-selection bullet, drop the clause."
+166	-->
+167	
+168	### Why
+169	
+170	Assigned focus `task_000017_fed73abc` (scientific_computing) exited `done` in
+171	17/80 steps with reward 0. Every mechanical step was correct: it found the
+172	`temp *= 1.05` bug, changed it to `0.95`, confirmed `libnetcdf-dev`, compiled,
+173	ran the annealer, and `ncdump`ed the trajectory. The single error: the objective
+174	`score_position(pos) = (pos-42)^2 - 50` has its minimum at position 42, but the
+175	agent took the LAST element of the `position` array (43) — a stochastic accepted
+176	step, one index off the optimum — and never inspected the `score` variable at
+177	all. Expected primer `AGCTAGCGCGCTAGC` (pos 42); committed `GCTAGCGCGCTAGCT`
+178	(pos 43). This is a generalizable failure shape: for "return the optimum of a
+179	search" deliverables the answer is the candidate at argmin/argmax of the recorded
+180	objective, not the last iterate the search happened to log.
+181	
+182	### Changes
+183	
+184	- `processors/numeric_crosscheck_nudge.py` — copy of the R1/c3 NumericCrossCheckNudge
+185	  with one added bullet (#2): if the deliverable is the optimum of a search/
+186	  optimization (annealing, MCMC, gradient descent, genetic/random search, grid
+187	  sweep), select it by inspecting the recorded score/energy/error series and
+188	  taking the argmin/argmax candidate, and reconcile against the last-iterate
+189	  value rather than assuming the last logged value is the optimum. Same
+190	  exit-intent trigger, singleton, order 91, no tool calls.
+191	- `config.yaml` — repoint NumericCrossCheckNudge `_target_` to the new file;
+192	  updated the accompanying comment to describe the optimum-selection clause.
+193	
+194	### Evidence
+195	
+196	- `task_000017_fed73abc` result.json: `exit_reason=done`, steps=17; final_pytest
+197	  `AssertionError: Expected primer sequence 'AGCTAGCGCGCTAGC', but got
+198	  'GCTAGCGCGCTAGCT'` — a one-position shift (42 vs 43).
+199	- `task_000017` messages.json (assistant after `ncdump -v position`): "The final
+200	  position (last value in the array) is 43 ... So the optimal position is 43";
+201	  the `score` variable was never inspected. The subsequent `_tb2_self_verify`
+202	  exit-intent turn fired the existing nudge, but its "re-derive by a second
+203	  method" wording gave no reason to re-select the trajectory value, so the agent
+204	  re-verified file existence and committed 43.
+205	- Cluster context: all 7 scientific_computing tasks scored 0 this round
+206	  (task_000017/000111/000117/001035/001048/001330/001937); task_001035 (optimal
+207	  primer GCGG vs GCAT) and task_001937 (optimal grid 60 vs 50) are same-cluster
+208	  "find the optimum" deliverables, weaker corroboration (different mechanisms).
+209	
+210	### Uncertainty
+211	
+212	The clause frees the correct selection path but does not guarantee the agent
+213	executes it — it must still inspect the `score` series and take argmin. If
+214	task_000017 stays red at `done` with the same one-shift answer even with the
+215	clause present, the gap is a model-capability one (won't act on the reminder),
+216	not a harness one — log and stop spending rounds on it. Watch for any
+217	previously-passing scientific_computing task regressing after reading the new
+218	bullet.

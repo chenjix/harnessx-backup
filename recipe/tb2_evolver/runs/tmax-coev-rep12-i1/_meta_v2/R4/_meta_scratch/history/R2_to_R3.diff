@@ -1,0 +1,13 @@
+--- R2
++++ R3
+@@ -70,2 +70,10 @@
+   _hook_: '*'
++# Ensure common verifier test-deps (HTTP client / config parser) are importable
++# in the container Python before the agent exits. TB2 verifiers frequently
++# `import requests` to probe a running HTTP server; when the base image lacks
++# it the verifier aborts at pytest collection time (ModuleNotFoundError) and a
++# correct solution scores 0. Fires at most once per run, only on exit-intent,
++# and is a no-op when the module is already present.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i1/_meta_v2/R3/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
++  _hook_: '*'
+ workspace: null

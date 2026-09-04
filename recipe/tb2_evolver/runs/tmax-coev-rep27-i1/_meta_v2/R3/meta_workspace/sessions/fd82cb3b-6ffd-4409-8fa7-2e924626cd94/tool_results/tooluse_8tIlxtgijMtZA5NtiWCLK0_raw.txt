@@ -1,0 +1,135 @@
+1	# Evolve Journal — tmax-coev-rep27-i1
+2	
+3	## Round 1 — verifier requests dep
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_verifier_requests_dep_v1
+9	levers: [instruction]
+10	predicted_affected: [task_000028_7fe033ac, task_000958_4bb2b05d]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=43/50; +3/-1 gained=task_000028_7fe033ac,task_000958_4bb2b05d,task_001818_b251e5ea lost=task_000396_e56917e2; score 0.8600 >= incumbent(mean) 0.8200 - tol 0.0400
+14	expected_global_gain: "Flips the 2-task cross-domain cluster whose verifier dies at `import requests`; generalizes to any future service task using that verifier convention"
+15	regression_risk: "Low — additive checklist item on the once-per-task self-verify turn; identical singleton group/hooks to the processor it replaces, so no double-injection; `|| pip install` is a no-op when requests present or no service exists"
+16	cost_shift: "Negligible — ~90 extra tokens in the single self-verify turn; at most one extra Bash call on service tasks"
+17	rollback_trigger: "If task_000028/task_000958 stay F AND any previously-passing service task (e.g. task_000344, task_000015) flips to F, revert"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 41/50 (0.82). Of the 9 failures, only one root cause recurred
+23	across ≥2 distinct tasks with the same mechanism: the verifier's test module
+24	does `import requests` at collection time, and the agent — which never sees
+25	the verifier file — never installs `requests`. Both affected tasks build a
+26	localhost network service (task_000028: Nginx + C++ backend on :8080;
+27	task_000958: C++ HTTP microservice on :9090), test them with `curl`/`ss`, and
+28	exit reporting success. The verifier then dies with
+29	`ModuleNotFoundError: No module named 'requests'`, scoring 0 regardless of
+30	whether the service is correct. For task_000958 this was a hard collection
+31	error blocking ALL assertions. The other 7 failures are one-off,
+32	distinct-mechanism capability/logic gaps (process cleanup, log-rotation size,
+33	SQLite index usage, numeric error, packaging, text-casing) plus a task-design
+34	collision (task_000010's mandated `operator.py` shadows the stdlib module and
+35	breaks the verifier's Python) — none harness-fixable without embedding domain
+36	knowledge, so logged as skips.
+37	
+38	### Changes
+39	
+40	- `processors/service_verify.py` — new `ServiceVerifyDepsProcessor`: drop-in
+41	  replacement for `CustomSelfVerifyProcessor` (same one-shot keepalive
+42	  mechanism, same `tb2_self_verify` singleton group and `_order=90`) with one
+43	  added checklist item — for network-service tasks, ensure Python `requests`
+44	  is importable (`python3 -c "import requests" || pip install requests`)
+45	  because the automated checker probes services from Python.
+46	- `config.yaml` — replaced the `CustomSelfVerifyProcessor` pipeline entry with
+47	  a `file://` reference to the new processor.
+48	
+49	### Evidence
+50	
+51	- `task_000028_7fe033ac` final_pytest: `test_final_state.py:6: in <module>
+52	  import requests → ModuleNotFoundError: No module named 'requests'`. Body:
+53	  agent tested via `curl` ("curl: command not found"), never installed requests.
+54	- `task_000958_4bb2b05d` final_pytest: `test_final_state.py:4: in <module>
+55	  import requests → ModuleNotFoundError`, `1 error in collection` (all tests
+56	  blocked). Body: agent probed its own server with `curl`/`ss`, never installed
+57	  requests.
+58	- Feasibility: pip installs succeed at run time in this environment (numpy in
+59	  task_000684, pillow in task_001652, biopython in task_001031) — internet is
+60	  NOT blocked, so the `pip install requests` the checklist nudges toward works.
+61	
+62	### Uncertainty
+63	
+64	If the two service tasks have additional, independent failures beyond the
+65	missing import (task_000028's Nginx/C++ integration may still be wrong), fixing
+66	the import unblocks collection but may not flip the reward. task_000958 is the
+67	higher-confidence flip (pure collection error). Watch the rollback trigger: any
+68	regression on a currently-passing service task means the checklist swap
+69	disturbed the self-verify flow and should be reverted.
+70	
+71	## Round 2 — stray/zombie process cleanup
+72	
+73	<!-- journal:frontmatter
+74	round: 2
+75	timestamp: 2026-06-02T00:00:00Z
+76	hypothesis_id: h_lingering_process_cleanup_v1
+77	levers: [instruction]
+78	predicted_affected: [task_000140_01c78b42]
+79	cited_candidates: [C-002]
+80	gating_outcome: accepted
+81	gating_attribution: score=44/50; +1/-0 gained=task_000396_e56917e2; score 0.8800 >= incumbent(mean) 0.8600 - tol 0.0400
+82	expected_global_gain: "Flips the lingering-service-process failure in the system_administration cluster (2/5 failing) and hardens all passing service/daemon tasks against the same silent final-state trap; same class of structural verifier fact as the R1 requests fix that flipped both its predicted tasks"
+83	regression_risk: "Low — additive checklist text on the once-per-task self-verify turn; mechanism (keepalive/singleton) unchanged from R1 which flipped both service tasks with no service regression; item is conditional on having launched a background process and explicitly warns against killing a service the task needs alive"
+84	cost_shift: "Negligible — ~120 extra tokens in the single self-verify turn, and at most 2-3 extra Bash calls (ps|grep, pkill, re-check) on tasks that actually spawned background processes"
+85	rollback_trigger: "If task_000140 stays F AND any previously-passing service/daemon task (e.g. 000028, 000958, 001090) flips to F — i.e. the cleanup nudge made an agent kill a service the verifier needed alive — revert to the R1 checklist"
+86	-->
+87	
+88	### Why
+89	
+90	R1 scored 43/50 and both R1-predicted service tasks (000028, 000958) flipped to
+91	pass. Of the 7 remaining failures, exactly one is a recurring, structural,
+92	harness-fixable pattern: **lingering background processes at container final
+93	state**. The TB2 verifier runs pytest against the final container state after
+94	the agent exits; some verifiers assert "no lingering `<service>` processes" via
+95	`pgrep -f <name>` (which matches `<defunct>` zombies too). Agents that build a
+96	daemon develop by launching it repeatedly in their persistent Bash session
+97	(`./svc &`), leaving orphaned/zombie children that fail the clean-state
+98	assertion even when the deliverable scripts are correct. The other 6 failures
+99	are one-off model capability/logic gaps (log-rotation size, SQLite index
+100	semantics, numeric deviation, grid optimization, tarball packaging) plus the
+101	task_000010 `operator.py` stdlib-shadow task-design collision — none
+102	harness-fixable without embedding domain knowledge, so logged as skips.
+103	
+104	### Changes
+105	
+106	- `processors/service_verify.py` — extended R1's `ServiceVerifyDepsProcessor`
+107	  with an additive checklist item #7: audit for and clear stray/zombie
+108	  background processes the agent spawned during development. It explains that a
+109	  `<defunct>` process cannot be signalled and is reaped only when its parent
+110	  exits (so kill the parent PID for zombies), kill ordinary strays with
+111	  `pkill -f`, then confirm the process list is empty — with a guard not to kill
+112	  a service the task requires to stay alive. Same singleton group
+113	  (`tb2_self_verify`), `_order=90`, and keepalive mechanism as R1 (pure text
+114	  extension).
+115	- `config.yaml` — repointed the `ServiceVerifyDepsProcessor` `file://` entry to
+116	  the R2 copy of the processor.
+117	
+118	### Evidence
+119	
+120	- `task_000140_01c78b42` verifier: `test_no_lingering_service_processes` →
+121	  `AssertionError: Lingering vm_service processes found: ['353','587','889','1114','1307']`.
+122	  Agent's own `ps` output (msg 36): `[vm_service] <defunct>` (Z-state zombies)
+123	  from repeated dev runs. Agent msg 37/39: "There are some zombie processes from
+124	  previous runs. Let me clean those up" — then exited without doing so. The
+125	  other 2 verifier tests passed and `vm_setup.log` was correct.
+126	
+127	### Uncertainty
+128	
+129	task_000140's zombies are children of the agent's own persistent shell; whether
+130	the agent can actually reap them depends on identifying the right parent PID at
+131	exit time. If the parent is the agent's session shell itself (which persists for
+132	the verifier), killing it may not be possible from within — in that case the
+133	nudge helps only for strays the agent can `pkill` directly, and the flip is
+134	uncertain. Watch the rollback trigger: a regression on a keep-alive service task
+135	means the cleanup nudge over-killed and should be reverted.

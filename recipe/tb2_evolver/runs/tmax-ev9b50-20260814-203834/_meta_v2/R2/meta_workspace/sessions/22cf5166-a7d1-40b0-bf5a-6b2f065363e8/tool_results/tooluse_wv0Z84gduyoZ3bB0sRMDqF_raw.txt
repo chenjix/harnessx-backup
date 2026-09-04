@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=tmax-ev9b50
+#SBATCH --account=interactive-ai
+#SBATCH --partition=ml.p5en.48xlarge
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:h200:8
+#SBATCH --cpus-per-task=96
+#SBATCH --mem=0
+#SBATCH --time=2-00:00:00
+#SBATCH --requeue
+#SBATCH --output=/fsx/home/jixuan.chen/logs/tmax_evolve9b50_%j.out
+#SBATCH --error=/fsx/home/jixuan.chen/logs/tmax_evolve9b50_%j.err
+
+# Harness evolve on 50 Tmax tasks (held-out: the 102 tmax_only200 eval tasks).
+#   base agent : Qwen3.5-9B (8× vLLM)
+#   meta agent : Bedrock Claude Opus 4.8
+#   rounds     : 5 (R0 rollout + 5 evolve steps → R1..R5)
+#
+#   # cancel old low-pri pending job first if still PD:
+#   scancel 1530
+#   sbatch /fsx/home/jixuan.chen/h200_evolve_9b_tmax50.sbatch
+#
+# Optional:
+#   EVOLVE_ROUNDS=5 TMAX_CONCURRENT=8 RESUME=0
+#
+# Rough ETA: ~10–16h (6× ~50-task rollouts @ ~1.5–2.5h each + meta Bedrock).
+
+set -Eeuo pipefail
+
+REPO=/fsx/home/jixuan.chen/harnessx-backup
+cd "$REPO"
+
+echo "===== job ====="
+echo "job     : ${SLURM_JOB_ID}  restart #${SLURM_RESTART_COUNT:-0}"
+echo "node    : $(hostname)"
+echo "gpus    : ${CUDA_VISIBLE_DEVICES:-unset}"
+echo "cpus    : $(nproc)"
+echo "start   : $(date -u '+%F %T UTC')"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+
+DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc '0-9'; }
+echo "docker root : $DOCKER_ROOT"
+df -h "$DOCKER_ROOT" | tail -1
+if (( $(free_gb "$DOCKER_ROOT") < 40 )); then
+  echo "below floor — reclaiming docker disk"
+  docker container prune -f >/dev/null 2>&1 || true
+  docker image prune -af >/dev/null 2>&1 || true
+  docker builder prune -af >/dev/null 2>&1 || true
+fi
+
+export PYTHON_BIN=/fsx/home/jixuan.chen/.venv/bin/python
+export SFT_PYTHON="${SFT_PYTHON:-$PYTHON_BIN}"
+export VLLM_VENV="${VLLM_VENV:-/fsx/home/jixuan.chen/.venv}"
+
+# Models
+export MODEL_SIZE=9b
+export META_MODEL="${META_MODEL:-bedrock/us.anthropic.claude-opus-4-8}"
+export AWS_REGION_NAME="${AWS_REGION_NAME:-us-west-2}"
+

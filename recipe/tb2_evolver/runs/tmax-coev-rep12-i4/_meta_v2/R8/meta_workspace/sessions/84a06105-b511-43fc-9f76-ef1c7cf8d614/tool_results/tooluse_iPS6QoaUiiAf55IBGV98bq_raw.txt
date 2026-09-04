@@ -1,0 +1,85 @@
+########### task_001674_125bb961 ###########
+       log_results = parse_log_file(log_path)
+    
+        modified = []
+        missing = []
+    
+        for filename in expected_files:
+            if filename not in log_results:
+                missing.append(filename)
+            elif log_results[filename] != "ACCEPTED":
+                modified.append(filename)
+    
+        error_msg = []
+        if modified:
+            error_msg.append(f"{len(modified)} of {len(expected_files)} clean modified (expected ACCEPTED): {', '.join(modified)}")
+        if missing:
+            error_msg.append(f"{len(missing)} of {len(expected_files)} clean files missing from log: {', '.join(missing)}")
+    
+>       assert not modified and not missing, " | ".join(error_msg)
+E       AssertionError: 2 of 2 clean files missing from log: create_table.diff, add_index.diff
+E       assert (not [] and not ['create_table.diff', 'add_index.diff'])
+
+/tmp/test_final_state.py:87: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_evil_corpus_rejected - AssertionEr...
+FAILED ../../tmp/test_final_state.py::test_clean_corpus_accepted - AssertionE...
+2 failed, 1 passed in 0.22s
+
+########### task_001037_92db2552 ###########
+FAILURES ===================================
+__________________ test_server_behavior_and_reproduce_script ___________________
+
+    def test_server_behavior_and_reproduce_script():
+        server_path = "/home/user/server.py"
+        assert os.path.isfile(server_path), f"File {server_path} does not exist."
+    
+        # Start the server
+        server_process = subprocess.Popen(
+            ["python3", server_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+    
+        # Give the server a moment to start
+        time.sleep(1)
+    
+        try:
+            # Check if server is still running
+>           assert server_process.poll() is None, "Server crashed immediately after starting."
+E           AssertionError: Server crashed immediately after starting.
+E           assert 1 is None
+E            +  where 1 = poll()
+E            +    where poll = <Popen: returncode: 1 args: ['python3', '/home/user/server.py']>.poll
+
+/tmp/test_final_state.py:51: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_server_behavior_and_reproduce_script
+1 failed, 2 passed in 1.02s
+
+########### task_000709_12e0d757 ###########
+no = b'0'
+                err_msg = 'Bad exception data from child: {!r}'.format(
+                              bytes(errpipe_data))
+            child_exception_type = getattr(
+                    builtins, exception_name.decode('ascii'),
+                    SubprocessError)
+            if issubclass(child_exception_type, OSError) and hex_errno:
+                errno_num = int(hex_errno, 16)
+                child_exec_never_called = (err_msg == "noexec")
+                if child_exec_never_called:
+                    err_msg = ""
+                    # The error must be from chdir(cwd).
+                    err_filename = cwd
+                else:
+                    err_filename = orig_executable
+                if errno_num != 0:
+                    err_msg = os.strerror(errno_num)
+>               raise child_exception_type(errno_num, err_msg, err_filename)
+E               FileNotFoundError: [Errno 2] No such file or directory: 'python'
+
+/usr/lib/python3.10/subprocess.py:1863: FileNotFoundError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_adversarial_corpus - FileNotFoundE...
+1 failed, 1 passed in 0.05s
+

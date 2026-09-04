@@ -1,0 +1,50 @@
+--- R0
++++ R1
+@@ -15,14 +15,21 @@
+ #
+-# R4 change (Instruction lever — first attempt on this lever):
+-#   system_prompt.txt (sibling, read by SiblingSystemPromptBuilder) is
+-#   upgraded from the bare 5-line default to a general work-discipline
+-#   prompt: survey -> restate concrete requirements -> implement ->
+-#   change-the-assumption-not-the-command when stuck -> verify each named
+-#   requirement with Bash before stopping. This targets the two largest
+-#   R3 failing shapes that the control lever (R1 advisory, R3 hard-block)
+-#   could not convert: premature confident commit and thrash-without-
+-#   replanning. General strategy only, no task-specific literals.
+-#   The DeadLoopBreaker processor is retained unchanged (additive, harmless
+-#   in the general case); its module is now vendored under this round's
+-#   output_dir so the config is self-contained.
++# R1 (_meta_v2) change (Control lever — corrective, cluster: HTTP-service
++#   verifier dependency):
++#   New VerifierDepEnsurer processor. The single largest failing cluster in the
++#   R0 trajectories (7 of 32 failures, 6 domains) is "HTTP server + endpoint"
++#   tasks where the external verifier's test_final_state.py does `import
++#   requests` in its first lines. The base image often lacks `requests`, so
++#   pytest aborts at COLLECTION time (ModuleNotFoundError -> "Interrupted: 1
++#   error during collection") and every test errors at once — including the
++#   ones the agent's solution would have passed. The agent cannot anticipate
++#   this: it self-tests its server with urllib/curl (no `requests` needed) and
++#   the verifier's test file does not exist during the agent phase. This is a
++#   harness/environment deficiency, not a model capability gap. The processor
++#   arms only on HTTP-service task descriptions and, on the first Bash call,
++#   prepends an idempotent silent best-effort `pip install requests` guard that
++#   can never abort the agent's own command. pip works in this environment
++#   (numpy/scipy/flask were fetched by other tasks), so the fix is viable.
++#   The DeadLoopBreaker processor and system_prompt.txt sidecar are retained
++#   unchanged; both are vendored under this round's output_dir so the config
++#   is self-contained.
+ 
+@@ -46,2 +53,8 @@
+   show_project_dir: false
++  _hook_: '*'
++# Ensure the standard HTTP-client verifier dependency (`requests`) is importable
++# on HTTP-service tasks so the external verifier's test module can be collected.
++# Purely mechanical, scoped to the HTTP-service task class, fires once per task,
++# and never alters the agent's own command semantics. See processor docstring.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep13-i2/_meta_v2/R1/processors/verifier_dep_ensurer.py::VerifierDepEnsurer
+   _hook_: '*'
+@@ -75,3 +88,3 @@
+ # re-run a build/write many times are unaffected. Retained unchanged from R3.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep13-i2/R0/assets/processors/dead_loop_breaker.py::DeadLoopBreaker
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep13-i2/_meta_v2/R1/assets/processors/dead_loop_breaker.py::DeadLoopBreaker
+   advisory_threshold: 3

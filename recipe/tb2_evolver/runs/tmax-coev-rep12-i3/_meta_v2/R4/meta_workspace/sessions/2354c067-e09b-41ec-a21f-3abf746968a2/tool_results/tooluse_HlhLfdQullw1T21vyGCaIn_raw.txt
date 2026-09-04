@@ -1,0 +1,62 @@
+1227	                    token_budget=task.token_budget,
+1228	                    max_cost_usd=task.max_cost_usd,
+1229	                    spawn_depth=task.spawn_depth,
+1230	                )
+1231	                user_content = task.description or ""
+1232	                if user_content:
+1233	                    state.add_raw_message(Message(role="user", content=user_content))
+1234	
+1235	            # Transfer any pending plugin side-channels so processors / run_loop
+1236	            # can read them.  Command prompts and allowed_tools are stored as
+1237	            # plain attributes on the state object (not in state.slots, which
+1238	            # requires StateSlot objects).  Slash slots use set_slot().
+1239	            pending_cmd_prompt = getattr(self, "_pending_command_prompt", None)
+1240	            if pending_cmd_prompt is not None:
+1241	                state._pending_command_prompt = pending_cmd_prompt  # type: ignore[attr-defined]
+1242	                try:
+1243	                    del self._pending_command_prompt  # type: ignore[attr-defined]
+1244	                except AttributeError:
+1245	                    pass
+1246	
+1247	            pending_allowed_tools = getattr(self, "_pending_command_allowed_tools", None)
+1248	            if pending_allowed_tools is not None:
+1249	                state._pending_command_allowed_tools = pending_allowed_tools  # type: ignore[attr-defined]
+1250	                try:
+1251	                    del self._pending_command_allowed_tools  # type: ignore[attr-defined]
+1252	                except AttributeError:
+1253	                    pass
+1254	            else:
+1255	                # Clear any stale value from a previous command that had restrictions
+1256	                try:
+1257	                    del state._pending_command_allowed_tools  # type: ignore[attr-defined]
+1258	                except AttributeError:
+1259	                    pass
+1260	
+1261	            pending_slots = getattr(self, "_pending_slash_slots", {})
+1262	            if pending_slots:
+1263	                for slot_key, slot_val in pending_slots.items():
+1264	                    state.set_slot(slot_key, "slash_command", slot_val)
+1265	                self._pending_slash_slots = {}  # type: ignore[attr-defined]
+1266	
+1267	            route_slot_keys: list[str] = []
+1268	            for procs in self._rt.processors.values():
+1269	                for proc in procs:
+1270	                    if getattr(type(proc), "_singleton_group", None) != "model_router":
+1271	                        continue
+1272	                    key = getattr(proc, "slot_key", "model.route")
+1273	                    if isinstance(key, str) and key and key not in route_slot_keys:
+1274	                        route_slot_keys.append(key)
+1275	            if not route_slot_keys:
+1276	                route_slot_keys = ["model.route"]
+1277	
+1278	            def _select_model_provider(current_state: State):
+1279	                for route_slot_key in route_slot_keys:
+1280	                    slot = current_state.get_slot(route_slot_key)
+1281	                    if slot is None or not isinstance(slot.content, dict):
+1282	                        continue
+1283	                    selected_key = slot.content.get("selected_key")
+1284	                    if not isinstance(selected_key, str) or not selected_key:
+1285	                        continue
+1286	                    try:
+
+[Showing lines 1227–1286 of 1369 total. Use offset=1286 to read the next section.]

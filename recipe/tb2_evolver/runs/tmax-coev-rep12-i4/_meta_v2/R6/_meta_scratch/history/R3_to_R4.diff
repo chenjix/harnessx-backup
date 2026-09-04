@@ -1,0 +1,67 @@
+--- R3
++++ R4
+@@ -15,19 +15,21 @@
+ #
+-# R3 (meta): the R0/R2 VerifierDepGuardProcessor fired the "ensure common
+-# verifier test-deps importable" step ONLY at clean exit-intent. But the tasks
+-# that need it most — long HTTP-service builds whose verifier does
+-# `import requests` — routinely hit exit_reason=budget_exceeded at the step cap
+-# and NEVER reach exit intent, so the guard never fired: three separate tasks
+-# failed at verifier *collection* with `ModuleNotFoundError: No module named
+-# 'requests'` (a guaranteed 0 regardless of how correct the server was), with
+-# the dep-check banner appearing zero times in their transcripts. R3 swaps in
+-# ProactiveVerifierDepGuardProcessor which ALSO fires proactively: it prepends
+-# the dep-ensure Bash call onto the first mid-run tool-call turn at/after
+-# proactive_step=4 (the run loop executes every tool call in a turn), so
+-# requests/pyyaml are installed long before the budget can be exhausted, while
+-# keeping the original exit-intent path as a fallback for short clean tasks.
+-# pip reaches PyPI in this environment (an unrelated task installed flask + its
+-# full dependency chain from PyPI at full speed). Idempotent no-op when the
+-# package is already present, so the passing set is unaffected. Rest of the
+-# pipeline + sibling system_prompt.txt copied byte-for-byte from R2.
++# R4 (meta): the dominant cross-round failure shape (R0-R3 all flat at 0.20) is
++# a DEGENERATE ASSISTANT-TURN LOOP — the model emits the byte-identical
++# assistant turn 4-41 times in a row, sometimes with a useless repeated Bash
++# call, sometimes with NO tool call at all (a self-verify ack loop). 16 distinct
++# FAILING tasks in R3 showed a run >= 4; no PASSING task ever exceeded 2. Four of
++# the 16 ended in exit_reason=error (agent_error crash). The R1 BashLoopBreaker
++# only fingerprints the Bash tool INPUT, so it is blind to the no-tool-call half
++# of the loop, and its soft "BLOCKED" redirect is ignored verbatim (transcripts
++# show 12-38 blocks the model re-emits identically). The R2 system prompt already
++# tells the model to stop looping; it ignores that too. Instruction + soft
++# redirect are proven-saturated. R4 adds DegenerateTurnTerminatorProcessor: it
++# fingerprints the whole last assistant turn, warns at warn_threshold=4, and at
++# terminate_threshold=6 sets skip_model + synthetic_output so the run loop takes
++# its own clean-exit path (finish_reason=stop, no tool calls -> exit_reason=done).
++# This converts the error/budget_exceeded runaways into a clean done that banks
++# partial work and lets exit-intent processors (verifier-dep guard) fire, and
++# reclaims 20-70 wasted step-generations per looping task. Thresholds leave the
++# entire passing set (max identical-assistant run = 2) untouched. Rest of the
++# pipeline + sibling system_prompt.txt copied byte-for-byte from R3.
+ 
+@@ -73,2 +75,5 @@
+ # doomed subgoal" to help the model act on this signal rather than ignore it.
++# R4: BashLoopBreaker is retained (it still trims the Bash-input half of the
++# loop early), but the new DegenerateTurnTerminatorProcessor below now provides
++# the HARD escalation the model needs when it ignores the soft block.
+ - _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R1/processors/bash_loop_breaker.py::BashLoopBreakerProcessor
+@@ -76,2 +81,13 @@
+   break_threshold: 6
++  _hook_: '*'
++# R4 (meta): degenerate assistant-turn terminator. Fingerprints the whole last
++# assistant turn (not just a Bash input), so it catches Bash loops AND
++# no-tool-call / self-verify loops that BashLoopBreaker cannot see. Warns at 4
++# consecutive identical turns; at 6 it force-terminates via skip_model +
++# synthetic_output so the run loop exits cleanly (exit_reason=done) instead of
++# crashing to error or burning the whole step budget. Passing set (max identical
++# run = 2) is untouched; fires only after the loop is provably dead.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R4/processors/degenerate_turn_terminator.py::DegenerateTurnTerminatorProcessor
++  warn_threshold: 4
++  terminate_threshold: 6
+   _hook_: '*'
+@@ -107,2 +123,5 @@
+ # Fires at most once per run; a no-op when the module is already present.
++# R4 note: R3 result confirms this works — the three target tasks (796/910/2108)
++# no longer hit collection ImportError; they now fail with real ConnectionError
++# (server capability gap, not a harness gap). Kept unchanged.
+ - _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R3/processors/verifier_dep_guard_proactive.py::ProactiveVerifierDepGuardProcessor

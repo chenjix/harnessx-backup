@@ -1,0 +1,92 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	
+16	tool_registry:
+17	  builtin:
+18	  - Bash
+19	  custom: []
+20	tracer: null
+21	processors:
+22	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+23	  system_builder:
+24	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+25	  _hook_: '*'
+26	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+27	  working_dir: /home/user
+28	  constraints: {}
+29	  header: Environment
+30	  max_tree_lines: 20
+31	  non_interactive: true
+32	  inject_integrity_rules: true
+33	  show_project_dir: false
+34	  _hook_: '*'
+35	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+36	  tool_schemas: {}
+37	  _hook_: '*'
+38	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+39	  warn_at:
+40	  - 0.7
+41	  - 0.9
+42	  _hook_: '*'
+43	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+44	# Without this, one stuck task can block an entire evolve round.
+45	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+46	  repeat_threshold: 2
+47	  head_chars: 1200
+48	  tail_chars: 600
+49	  _hook_: '*'
+50	# Break ACTION-level repetition loops (identical Bash calls repeated with no
+51	# state progress). Complements LengthTruncationRecoveryProcessor, which only
+52	# catches finish_reason=length narration loops. Strategy 1 (exact name+inputs)
+53	# warns at 3 identical consecutive calls and raises LoopDetectedError at 5,
+54	# yielding a clean `loop_detected` exit instead of wasting the whole budget.
+55	# Strategy 2 (name-only) is disabled here (threshold set very high) because the
+56	# agent has only the Bash tool, so >=8 consecutive Bash calls is normal and
+57	# would produce constant false-positive warnings.
+58	- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+59	  window_size: 12
+60	  warn_threshold: 3
+61	  threshold: 5
+62	  name_warn_threshold: 999
+63	  compaction_drop_threshold: 5
+64	  _hook_: '*'
+65	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+66	  token_threshold: 140000
+67	  message_threshold: 100
+68	  retention_window: 6
+69	  eviction_fraction: 0.5
+70	  summarize_key: summarize
+71	  preserve_first_message: true
+72	  _hook_: '*'
+73	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+74	  max_consecutive_errors: 1
+75	  _hook_: '*'
+76	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+77	  drop_threshold: 5
+78	  _hook_: '*'
+79	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+80	  _hook_: '*'
+81	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+82	  threshold: 7
+83	  _hook_: '*'
+84	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+85	  _hook_: '*'
+86	workspace: null
+87	workspace_template: default
+88	init_workspace: false
+89	step_snapshots: true
+90	sandbox_provider: null
+91	sandbox_hint_id: null
+92	plugins: []

@@ -1,0 +1,75 @@
+class TaskTimeReminderProcessor(MultiHookProcessor):
+    _singleton_group = "task_time_reminder"
+    _order = 6
+
+    def __init__(
+        self,
+        timeout_seconds: float | None = None,
+        warn_at: tuple[float, ...] = (0.70, 0.90),
+    ) -> None:
+        self._timeout = timeout_seconds
+        self._warn_at = sorted(warn_at)
+        self._triggered: set[float] = set()
+        self._start: float = 0.0
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._triggered = set()
+        self._start = time.monotonic()
+        yield event
+
+    async def on_step_start(self, event: StepStartEvent):
+        if not self._timeout or self._timeout <= 0:
+            yield event
+            return
+
+        elapsed = time.monotonic() - self._start
+        pct = elapsed / self._timeout
+        remaining = self._timeout - elapsed
+
+        warn: str | None = None
+        for threshold in reversed(self._warn_at):
+            if pct >= threshold and threshold not in self._triggered:
+                self._triggered.add(threshold)
+                if threshold >= 0.90:
+                    warn = _TASK_TIME_WARN_90.format(elapsed=elapsed, total=self._timeout, remaining=remaining)
+                else:
+                    warn = _TASK_TIME_WARN_70.format(elapsed=elapsed, total=self._timeout)
+                break
+
+        if warn:
+            msg = Message(role="user", content=warn)
+            yield dataclasses.replace(
+                event,
+                messages=event.messages + (msg,),
+                raw_messages=event.raw_messages + (msg,),
+            )
+        else:
+            yield event
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._triggered = set()
+        yield event
+
+
+# ---------------------------------------------------------------------------
+# PostCompactionRefreshProcessor
+# ---------------------------------------------------------------------------
+
+
+class PostCompactionRefreshProcessor(MultiHookProcessor):
+    """After context compaction, re-inject a fresh workspace snapshot from the
+    sandbox so the model knows what files currently exist rather than relying on
+    compressed-away history.
+
+    Detects compaction by a significant drop in message count between steps
+    (same heuristic used by LoopDetectionProcessor).
+    """
+
+    _singleton_group = "tb2_post_compaction_refresh"
+    _order = 11  # runs after CompactionProcessor (8)
+
+    def __init__(self, drop_threshold: int = 5) -> None:
+        self._drop_threshold = drop_threshold
+        self._prev_count: int = 0
+
+    async def on_task_start(self, event: TaskStartEvent):

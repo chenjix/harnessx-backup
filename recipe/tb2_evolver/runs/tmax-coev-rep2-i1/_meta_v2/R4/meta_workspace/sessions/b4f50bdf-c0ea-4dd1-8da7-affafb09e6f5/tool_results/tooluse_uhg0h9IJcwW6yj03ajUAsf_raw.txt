@@ -1,0 +1,122 @@
+461	    before: "HarnessConfig",
+462	    after: "HarnessConfig",
+463	) -> dict[str, Any]:
+464	    """Return a stable plain-dict diff of two canonical HarnessConfigs.
+465	
+466	    Buckets (all optional, omitted when empty):
+467	
+468	    - ``tools_added`` / ``tools_removed``
+469	    - ``processors_added`` / ``processors_removed``
+470	    - ``processors_config_changed`` — labels whose kwargs differ
+471	    - ``templates_added`` / ``templates_removed`` / ``templates_changed``
+472	    """
+473	    b_tools = _tool_names(before)
+474	    a_tools = _tool_names(after)
+475	    b_procs = _processor_labels(before)
+476	    a_procs = _processor_labels(after)
+477	    b_proc_kwargs = _processor_kwargs_by_label(before)
+478	    a_proc_kwargs = _processor_kwargs_by_label(after)
+479	    b_tpl = _template_fingerprints(before)
+480	    a_tpl = _template_fingerprints(after)
+481	
+482	    tpl_added = sorted(set(a_tpl) - set(b_tpl))
+483	    tpl_removed = sorted(set(b_tpl) - set(a_tpl))
+484	    tpl_changed = sorted(p for p in set(a_tpl) & set(b_tpl) if a_tpl[p] != b_tpl[p])
+485	
+486	    shared_labels = set(b_proc_kwargs) & set(a_proc_kwargs)
+487	    procs_cfg_changed = sorted(lbl for lbl in shared_labels if b_proc_kwargs[lbl] != a_proc_kwargs[lbl])
+488	
+489	    diff: dict[str, Any] = {}
+490	    if a_tools - b_tools:
+491	        diff["tools_added"] = sorted(a_tools - b_tools)
+492	    if b_tools - a_tools:
+493	        diff["tools_removed"] = sorted(b_tools - a_tools)
+494	    if a_procs - b_procs:
+495	        diff["processors_added"] = sorted(a_procs - b_procs)
+496	    if b_procs - a_procs:
+497	        diff["processors_removed"] = sorted(b_procs - a_procs)
+498	    if procs_cfg_changed:
+499	        diff["processors_config_changed"] = procs_cfg_changed
+500	    if tpl_added:
+501	        diff["templates_added"] = tpl_added
+502	    if tpl_removed:
+503	        diff["templates_removed"] = tpl_removed
+504	    if tpl_changed:
+505	        diff["templates_changed"] = tpl_changed
+506	    return diff
+507	
+508	
+509	# ---------------------------------------------------------------------------
+510	# MetaAgent — the main public class.
+511	# ---------------------------------------------------------------------------
+512	
+513	
+514	class MetaAgent:
+515	    """The meta-agent: reads trajectories, ships evolved HarnessConfigs.
+516	
+517	    Instantiate once per benchmark run; call ``await agent.evolve(...)``
+518	    per round. Per-instance fields hold values that don't change across
+519	    rounds (model, memo path, budgets, skill dirs); the ``evolve``
+520	    method takes the per-round things (current_config, trajectories_dir,
+521	    output_dir, ...).
+522	
+523	    The HarnessConfig is rebuilt per evolve() call — the sandbox
+524	    provider needs ``output_dir`` as its default Bash cwd, and
+525	    ``output_dir`` changes per round. Rebuilding is cheap (~ms).
+526	    """
+527	
+528	    def __init__(
+529	        self,
+530	        *,
+531	        inner_model: "ModelConfig",
+532	        memo_path: Path | None = None,
+533	        extra_skills_dirs: "list[str | Path] | None" = None,
+534	        max_cost_usd: "float | None" = _DEFAULT_MAX_COST_USD,
+535	        wall_clock_s: float = _DEFAULT_WALL_CLOCK_S,
+536	        max_steps: int = _DEFAULT_MAX_STEPS,
+537	        allowed_write_roots: tuple[Path, ...] = (),
+538	        allowed_write_files: tuple[Path, ...] = (),
+539	        step_deadline_reminder_step: int | None = 260,
+540	        step_deadline_early_reminder_step: "int | None" = None,
+541	        step_deadline_output_within: int = 30,
+542	        context_recent_window: int = 5,
+543	        extra_harness_kws: "dict | None" = None,
+544	        require_evidence: bool = True,
+545	    ) -> None:
+546	        self.inner_model = inner_model
+547	        self.memo_path = Path(memo_path).resolve() if memo_path else None
+548	        self.extra_skills_dirs = list(extra_skills_dirs) if extra_skills_dirs else None
+549	        self.max_cost_usd = float(max_cost_usd) if max_cost_usd is not None else None
+550	        self.wall_clock_s = float(wall_clock_s)
+551	        self.max_steps = int(max_steps)
+552	        self.allowed_write_roots = tuple(allowed_write_roots)
+553	        self.allowed_write_files = tuple(allowed_write_files)
+554	        self.step_deadline_reminder_step = step_deadline_reminder_step
+555	        self.step_deadline_early_reminder_step = step_deadline_early_reminder_step
+556	        self.step_deadline_output_within = int(step_deadline_output_within)
+557	        self.context_recent_window = int(context_recent_window)
+558	        self.extra_harness_kws: dict = extra_harness_kws or {}
+559	        self.require_evidence = bool(require_evidence)
+560	
+561	    async def evolve(
+562	        self,
+563	        *,
+564	        current_config: "HarnessConfig | Path",
+565	        trajectories_dir: Path,
+566	        output_dir: Path,
+567	        replay_model: "ModelConfig | None" = None,
+568	        replay_max_cost_usd: float | None = 0.5,
+569	        replay_timeout_s: float = 300.0,
+570	        replay_mode: str = "synthetic_task",
+571	    ) -> Path:
+572	        """Run one meta-agent pass. Returns path to ``output_dir/config.yaml``.
+573	
+574	        Post-flight checks: canonicalize → novelty → evidence →
+575	        changeset → replay smoke gate.
+576	        """
+577	        from ..core.harness import BaseTask
+578	
+579	        trajectories_dir = Path(trajectories_dir).resolve()
+580	        if not trajectories_dir.is_dir():
+
+[Showing lines 461–580 of 949 total. Use offset=580 to read the next section.]

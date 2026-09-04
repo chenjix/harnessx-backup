@@ -1,0 +1,122 @@
+456	                not _cost_warned
+457	                and state.max_cost_usd is not None
+458	                and state.cumulative_cost_usd >= state.max_cost_usd * 0.7
+459	            ):
+460	                _cost_warned = True
+461	                remaining_pct = 100 * (1 - state.cumulative_cost_usd / state.max_cost_usd)
+462	                state.add_raw_message(
+463	                    Message(
+464	                        role="user",
+465	                        content=(
+466	                            f"[COST WARNING: You have used {state.cumulative_cost_usd:.2f} of "
+467	                            f"${state.max_cost_usd:.2f} budget ({remaining_pct:.0f}% remaining). "
+468	                            "Start wrapping up — provide your FINAL ANSWER soon. "
+469	                            "A best-effort answer is better than running out of budget.]"
+470	                        ),
+471	                    )
+472	                )
+473	
+474	            if not before_event.skip_model:
+475	                state.add_raw_message(
+476	                    Message(
+477	                        role="assistant",
+478	                        content=model_event.content,
+479	                        tool_calls=model_event.tool_calls,
+480	                        thinking=model_event.thinking,
+481	                        thinking_blocks=model_event.thinking_blocks,
+482	                    )
+483	                )
+484	
+485	            if model_event.content:
+486	                final_output = model_event.content
+487	
+488	            # ── 4. Execute tools ─────────────────────────────────────────────
+489	            step_tool_results: list[ToolResultEvent] = []
+490	            interrupt_triggered = False
+491	            # Compute MCP results dir once per step (stable across all tool calls).
+492	            _tracer_session = getattr(tracer, "session_id", "")
+493	            _step_mcp_dir: str | None = None
+494	            if hasattr(tracer, "base_dir") and _tracer_session:
+495	                _step_mcp_dir = os.path.join(tracer.base_dir, _tracer_session, "mcp_results")
+496	            _pre_tool_raw_idx = len(state.raw_messages)
+497	            for tc in model_event.tool_calls:
+498	                interrupt_on = getattr(task, "interrupt_on", []) or []
+499	                if tc.name in interrupt_on:
+500	                    interrupted_at = tc
+501	                    exit_reason = "interrupted"
+502	                    interrupt_triggered = True
+503	                    break
+504	
+505	                tc_event = ToolCallEvent(
+506	                    run_id=state.run_id,
+507	                    step_id=step_id,
+508	                    tool_name=tc.name,
+509	                    tool_input=tc.input,
+510	                    tool_call_id=tc.id,
+511	                    approved=True,
+512	                )
+513	                _bt_events = await pipe_all(
+514	                    tc_event,
+515	                    get_procs("before_tool"),
+516	                    tracer=tracer,
+517	                    hook="before_tool",
+518	                )
+519	                tc_event = next(
+520	                    (e for e in reversed(_bt_events) if isinstance(e, ToolCallEvent)),
+521	                    tc_event,
+522	                )
+523	                await tracer.on_event(tc_event)
+524	
+525	                # Propagate run context for spawn_subagent and similar tools
+526	                try:
+527	                    from ..tools.spawn_subagent import _spawn_ctx
+528	
+529	                    _spawn_ctx_token = _spawn_ctx.set(
+530	                        {
+531	                            "run_id": state.run_id,
+532	                            "step_id": step_id,
+533	                            "spawn_depth": state.spawn_depth,
+534	                            "state": state,
+535	                            "tracer": tracer,
+536	                            "model_config": model_config,
+537	                            "harness_config": harness_config,
+538	                            "child_harness_config": child_harness_config,
+539	                        }
+540	                    )
+541	                except ImportError:
+542	                    _spawn_ctx_token = None
+543	
+544	                _mcp_ctx_token = _mcp_results_ctx.set(_step_mcp_dir)
+545	                try:
+546	                    if tc_event.approved:
+547	                        t0 = time.monotonic()
+548	                        try:
+549	                            result = await tool_registry.execute(tc_event.tool_name, tc_event.tool_input)
+550	                            tr_event = ToolResultEvent(
+551	                                run_id=state.run_id,
+552	                                step_id=step_id,
+553	                                tool_name=tc_event.tool_name,
+554	                                tool_call_id=tc_event.tool_call_id,
+555	                                result=result.output,
+556	                                error=result.error,
+557	                                duration_ms=(time.monotonic() - t0) * 1000,
+558	                                content_blocks=tuple(result.content_blocks) if result.content_blocks else (),
+559	                            )
+560	                        except Exception as e:
+561	                            tr_event = ToolResultEvent(
+562	                                run_id=state.run_id,
+563	                                step_id=step_id,
+564	                                tool_name=tc_event.tool_name,
+565	                                tool_call_id=tc_event.tool_call_id,
+566	                                result="",
+567	                                error=str(e),
+568	                                duration_ms=(time.monotonic() - t0) * 1000,
+569	                            )
+570	                        _at_events = await pipe_all(
+571	                            tr_event,
+572	                            get_procs("after_tool"),
+573	                            tracer=tracer,
+574	                            hook="after_tool",
+575	                        )
+
+[Showing lines 456–575 of 981 total. Use offset=575 to read the next section.]

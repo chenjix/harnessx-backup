@@ -1,0 +1,62 @@
+161	                    except Exception:
+162	                        temperature = None
+163	            if temperature is not None:
+164	                provider_kwargs["temperature"] = temperature
+165	
+166	            # For vLLM/Qwen/Gemma thinking mode: pass OpenAI extra_body JSON.
+167	            extra_body = self._extra_body or _parse_json_obj(os.environ.get("TB2_EXTRA_BODY_JSON"))
+168	            if extra_body:
+169	                provider_kwargs["extra_body"] = extra_body
+170	            provider = OpenAIProvider(model=model, **provider_kwargs)
+171	
+172	        # ── Resolve task timeout ──────────────────────────────────────────────
+173	        task_timeout = getattr(context, "timeout_sec", None)
+174	        if not task_timeout:
+175	            try:
+176	                task_toml = environment.environment_dir.parent / "task.toml"
+177	                m = re.search(r"timeout_sec\s*=\s*([0-9.]+)", task_toml.read_text())
+178	                if m:
+179	                    task_timeout = float(m.group(1))
+180	            except Exception:
+181	                pass
+182	        task_timeout = task_timeout or 3600
+183	
+184	        # ── Load harness config ───────────────────────────────────────────────
+185	        # Load the processor pipeline from an evolved YAML when available,
+186	        # otherwise build the default config.  Either way, inject the
+187	        # runtime-only slots (sandbox_provider, tracer) via .copy() — these
+188	        # are never serialised into the config YAML.
+189	        if self._harness_config_yaml:
+190	            base_config = HarnessConfig.from_yaml_file(self._harness_config_yaml)
+191	        else:
+192	            base_config = make_tb2_harness_config(timeout_seconds=task_timeout)
+193	
+194	        harness_config = base_config.copy(
+195	            sandbox_provider=HarborSandboxProvider(
+196	                environment,
+197	                workspace_path=WORKSPACE_PATH,
+198	                output_limit=OUTPUT_LIMIT,
+199	            ),
+200	            tracer=HarnessJournal(
+201	                base_dir=str(self.logs_dir / "oh_runs"),
+202	                export_jsonl=True,
+203	            ),
+204	        )
+205	
+206	        harness = ModelConfig(main=provider).agentic(harness_config)
+207	        task = BaseTask(
+208	            description=instruction,
+209	            max_steps=self._max_steps,
+210	            token_budget=TOKEN_BUDGET,
+211	        )
+212	
+213	        # ── Run ───────────────────────────────────────────────────────────────
+214	        # Harbor enforces the wall-clock timeout (task.toml agent.timeout_sec)
+215	        # externally; no internal asyncio.wait_for needed.
+216	        try:
+217	            result = await harness.run(task)
+218	            context.n_input_tokens = result.total_tokens
+219	            context.n_output_tokens = 0  # HarnessX tracks combined tokens
+220	
+221	        except Exception:
+222	            traceback.print_exc()

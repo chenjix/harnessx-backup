@@ -1,0 +1,21 @@
+--- R2
++++ R3
+@@ -21,2 +21,18 @@
+ processors:
++# R3 change (C-001): instruction lever. R1 (functional-verify) and R2
++# (warn-only loop breaker) both landed flat at 23/50. Two systemic
++# harness-addressable shapes remain: (a) 7 budget_exceeded tasks that are
++# complex multi-step/multi-service builds where the agent thrashes and never
++# commits the deliverable; (b) the SAME agents repeatedly say "I'm stuck in a
++# loop, let me try a different approach" (16-17x in tasks 028/300) but keep
++# making cosmetic variants of the failing command. The R2 exact-match loop
++# warn (Strategy 1) barely fires now because the loops became SEMANTIC
++# (varying args), and the agent already HAS the "I'm looping" awareness the
++# warn provides — what it lacks is the recovery STRATEGY. This sidecar prompt
++# rewrite adds two general strategies: (1) decompose-first for multi-step
++# tasks (get a minimal end-to-end version + every deliverable on disk before
++# perfecting one stage), and (2) a loop-escape protocol (after 2 failures,
++# name the root cause and switch to a STRUCTURALLY different mechanism, not a
++# tweaked flag). No task literals; general strategy only. The strong R1
++# survey/restate/functional-verify content is carried forward unchanged.
+ - _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor

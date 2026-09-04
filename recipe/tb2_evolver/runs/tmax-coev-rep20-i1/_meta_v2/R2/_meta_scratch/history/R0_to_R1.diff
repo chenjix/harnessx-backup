@@ -1,0 +1,21 @@
+--- R0
++++ R1
+@@ -70,2 +70,18 @@
+   _hook_: '*'
++# Break identical-repeated-tool-call loops. The round's dominant failure
++# mode is the agent emitting the SAME Bash call verbatim until the step
++# budget is exhausted (e.g. task_000010: same `python3 -c "import socket"`
++# call 33x, distinct=1). LengthTruncationRecoveryProcessor above only
++# handles finish_reason=length loops; these calls are well-formed and
++# succeed, so a different guard is required. Strategy 1 injects a
++# "you are stuck, try something different" warning at 3 consecutive
++# identical calls and raises LoopDetectedError (clean exit) at 5;
++# Strategy 2 is name-only warn-only at 8. Compaction-aware.
++- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
++  window_size: 12
++  warn_threshold: 3
++  threshold: 5
++  name_warn_threshold: 8
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ workspace: null

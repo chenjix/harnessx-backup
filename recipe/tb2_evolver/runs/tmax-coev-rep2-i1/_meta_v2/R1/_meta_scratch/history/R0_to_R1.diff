@@ -1,0 +1,29 @@
+--- recipe/tb2_evolver/runs/tmax-coev-rep2-i1/R0/config.yaml
++++ recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R1/config.yaml
+@@ -40,12 +40,23 @@
+   - 0.7
+   - 0.9
+   _hook_: '*'
+-# Break max_tokens repetition loops (finish_reason=length, no tool call).
+-# Without this, one stuck task can block an entire evolve round.
+-- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
++# R1: replaces stock LengthTruncationRecoveryProcessor (same singleton group
++# "tmax_length_recovery", same _order=5) with a variant that additionally
++# DE-PRIMES the max_tokens repetition loop. Root cause on the weak model:
++# a truncated no-tool narration turn is persisted in full, the model sees its
++# own repeated prose 5-6x in context, and re-primes the identical runaway
++# generation — burning the whole 80-step budget on one task (264/958/1818,
++# all budget_exceeded at 70 msgs). On repeated consecutive truncations this
++# processor drops the runaway narration to a tiny stub (so history stops
++# re-showing the loop text) and escalates to a hard "one Bash command, no
++# prose" directive. First truncation keeps the stock head+tail collapse.
++# Contract-safe: only mutates current event content in on_after_model and
++# replaces/append-one the last user message in on_before_model.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R1/processors/length_loop_deprime.py::LengthLoopDeprimeProcessor
+   repeat_threshold: 2
+   head_chars: 1200
+   tail_chars: 600
++  deprime_after: 2
+   _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor
+   token_threshold: 140000

@@ -1,0 +1,82 @@
+402	        self,
+403	        event: Event,
+404	        tracer: "object | None" = None,
+405	        hook: str = "",
+406	    ) -> AsyncIterator[Event]:
+407	        if tracer is not None:
+408	            _raw_fn = getattr(tracer, "on_raw_event", None)
+409	            if _raw_fn is not None:
+410	                await _raw_fn(event)
+411	
+412	        _do_validate = bool(hook)
+413	        initial_msgs = _get_event_messages(event) if _do_validate else None
+414	
+415	        # Fail-fast pre-condition: before_model and step_start must not receive empty messages
+416	        if hook in ("before_model", "step_start") and initial_msgs is not None and len(initial_msgs) == 0:
+417	            _handle_violation(
+418	                f"{hook}: received empty messages — fail fast",
+419	                hook=hook,
+420	                violation_type=_VT_EMPTY_MESSAGES,
+421	                step_id=getattr(event, "step_id", -1),
+422	            )
+423	
+424	        events: list[Event] = [event]
+425	        event_type = type(event)
+426	        chain_user_additions = 0  # tracks user msg insertions in before_model chain
+427	
+428	        for processor in self.processors:
+429	            prev = events[:]
+430	            prev_primary = next((e for e in reversed(prev) if isinstance(e, event_type)), None)
+431	            prev_msgs = _get_event_messages(prev_primary) if _do_validate else None
+432	
+433	            next_events: list[Event] = []
+434	            for ev in events:
+435	                async for out in processor.process(ev):
+436	                    next_events.append(out)
+437	            events = next_events
+438	            if not events:
+439	                return
+440	
+441	            # Per-processor contract validation
+442	            if _do_validate and prev_msgs is not None:
+443	                curr_primary = next((e for e in reversed(events) if isinstance(e, event_type)), None)
+444	                curr_msgs = _get_event_messages(curr_primary)
+445	                if curr_msgs is not None:
+446	                    chain_user_additions = _validate_messages_contract(
+447	                        hook,
+448	                        prev_msgs,
+449	                        curr_msgs,
+450	                        processor_name=type(processor).__name__,
+451	                        step_id=getattr(event, "step_id", -1),
+452	                        chain_user_additions=chain_user_additions,
+453	                    )
+454	
+455	            if tracer is not None:
+456	                action = _diff_primary(prev, events, event_type)
+457	                if action:
+458	                    trigger = ProcessorTriggerEvent(
+459	                        run_id=event.run_id,
+460	                        step_id=event.step_id,
+461	                        processor=type(processor).__name__,
+462	                        hook=hook,
+463	                        action=action,
+464	                        detail={},
+465	                    )
+466	                    await tracer.on_event(trigger)  # type: ignore[attr-defined]
+467	
+468	        # Chain-level post-hook invariant check
+469	        if _do_validate and initial_msgs is not None:
+470	            final_primary = next((e for e in reversed(events) if isinstance(e, event_type)), None)
+471	            final_msgs = _get_event_messages(final_primary)
+472	            if final_msgs is not None:
+473	                check_post_hook_invariants(
+474	                    hook,
+475	                    initial_msgs,
+476	                    final_msgs,
+477	                    step_id=getattr(event, "step_id", -1),
+478	                )
+479	
+480	        for ev in events:
+481	            yield ev
+
+[Showing lines 402–481 of 844 total. Use offset=481 to read the next section.]

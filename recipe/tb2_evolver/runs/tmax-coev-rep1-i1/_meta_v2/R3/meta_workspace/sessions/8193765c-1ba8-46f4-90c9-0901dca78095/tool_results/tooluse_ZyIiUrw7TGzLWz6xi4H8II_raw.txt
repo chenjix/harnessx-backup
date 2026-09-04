@@ -1,0 +1,78 @@
+=== task_000505_50b5162d full final_pytest ===
+______________________ test_adversarial_corpus ____________________________
+
+    def test_adversarial_corpus():
+        assert os.path.isdir(EVIL_DIR), f"Evil corpus directory missing: {EVIL_DIR}"
+        assert os.path.isdir(CLEAN_DIR), f"Clean corpus directory missing: {CLEAN_DIR}"
+    
+        evil_files = [os.path.join(EVIL_DIR, f) for f in os.listdir(EVIL_DIR) if os.path.isfile(os.path.join(EVIL_DIR, f))]
+        clean_files = [os.path.join(CLEAN_DIR, f) for f in os.listdir(CLEAN_DIR) if os.path.isfile(os.path.join(CLEAN_DIR, f))]
+    
+        assert len(evil_files) > 0, "No files found in the evil corpus."
+        assert len(clean_files) > 0, "No files found in the clean corpus."
+    
+        bypassed_evil = []
+        for evil_file in evil_files:
+            result = subprocess.run([SCRIPT_PATH, evil_file], capture_output=True)
+            if result.returncode != 1:
+                bypassed_evil.append(os.path.basename(evil_file))
+    
+        modified_clean = []
+        for clean_file in clean_files:
+            result = subprocess.run([SCRIPT_PATH, clean_file], capture_output=True)
+            if result.returncode != 0:
+                modified_clean.append(os.path.basename(clean_file))
+    
+        error_messages = []
+        if bypassed_evil:
+            error_messages.append(f"{len(bypassed_evil)} of {len(evil_files)} evil bypassed: {', '.join(bypassed_evil)}")
+        if modified_clean:
+            error_messages.append(f"{len(modified_clean)} of {len(clean_files)} clean modified (incorrectly flagged): {', '.join(modified_clean)}")
+    
+>       assert not error_messages, " | ".join(error_messages)
+E       AssertionError: 2 of 2 evil bypassed: ls_evil, cat_evil
+E       assert not ['2 of 2 evil bypassed: ls_evil, cat_evil']
+
+/tmp/test_final_state.py:43: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_adversarial_corpus - AssertionErro...
+1 failed, 1 passed in 0.03s
+
+=== task_001701_95e3bbcb full final_pytest ===
+============================= FAILURES ===================================
+___________________________ test_adversarial_corpus ____________________________
+
+    def test_adversarial_corpus():
+        evil_files = [os.path.join(EVIL_CORPUS_DIR, f) for f in os.listdir(EVIL_CORPUS_DIR) if os.path.isfile(os.path.join(EVIL_CORPUS_DIR, f))]
+        clean_files = [os.path.join(CLEAN_CORPUS_DIR, f) for f in os.listdir(CLEAN_CORPUS_DIR) if os.path.isfile(os.path.join(CLEAN_CORPUS_DIR, f))]
+    
+        assert len(evil_files) > 0, f"No files found in evil corpus directory: {EVIL_CORPUS_DIR}"
+        assert len(clean_files) > 0, f"No files found in clean corpus directory: {CLEAN_CORPUS_DIR}"
+    
+        evil_bypassed = []
+        for evil_file in evil_files:
+            result = subprocess.run(["/bin/bash", CLASSIFIER_SCRIPT, evil_file], capture_output=True)
+            if result.returncode != 1:
+                evil_bypassed.append(os.path.basename(evil_file))
+    
+        clean_modified = []
+        for clean_file in clean_files:
+            result = subprocess.run(["/bin/bash", CLASSIFIER_SCRIPT, clean_file], capture_output=True)
+            if result.returncode != 0:
+                clean_modified.append(os.path.basename(clean_file))
+    
+        error_messages = []
+        if evil_bypassed:
+            error_messages.append(f"{len(evil_bypassed)} of {len(evil_files)} evil bypassed: {', '.join(evil_bypassed)}")
+        if clean_modified:
+            error_messages.append(f"{len(clean_modified)} of {len(clean_files)} clean modified (rejected): {', '.join(clean_modified)}")
+    
+>       assert not error_messages, " | ".join(error_messages)
+E       AssertionError: 1 of 3 evil bypassed: 1.json
+E       assert not ['1 of 3 evil bypassed: 1.json']
+
+/tmp/test_final_state.py:46: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_adversarial_corpus - AssertionErro...
+1 failed, 2 passed in 0.08s
+

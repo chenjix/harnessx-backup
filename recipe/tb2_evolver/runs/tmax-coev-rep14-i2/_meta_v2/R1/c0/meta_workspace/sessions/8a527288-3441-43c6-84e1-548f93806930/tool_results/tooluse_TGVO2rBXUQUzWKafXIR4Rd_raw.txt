@@ -1,0 +1,45 @@
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:17:    tool_call_id: str | None = None
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:18:    name: str | None = None
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:19:    tool_calls: tuple = ()  # tuple[ToolCall, ...] — populated for role=assistant with tool calls
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:20:    thinking: str = ""  # reasoning/thinking text (for display/trajectory recording)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:21:    thinking_blocks: tuple = ()  # tuple[dict, ...] — raw provider thinking blocks with signatures
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:22:    # Required for Anthropic multi-turn: blocks must be replayed verbatim
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:23:    # (including "signature") so the API can verify they weren't tampered with.
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:158:    tool_call_id: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:159:    approved: bool = True
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:160:    synthetic_result: str | None = None
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:161:    """When set alongside approved=False, the RunLoop injects this as the
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:162:    ToolResultEvent result instead of sending "Tool call not approved."
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:163:    Processors can use this to intercept tool calls and inject custom results.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:164:    """
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:165:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:166:
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:168:class ToolResultEvent(Event):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:169:    type: str = field(default="tool_result", init=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:170:    tool_name: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:171:    tool_call_id: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:172:    result: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:173:    error: str | None = None
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:174:    duration_ms: float = 0.0
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:175:    content_blocks: tuple = field(default=(), hash=False, compare=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:176:    # Native multimodal blocks (Anthropic content format) from MCP tools.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:177:    # Empty tuple = text-only result; processor chain passes this through unchanged.
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:178:
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:209:    eval_result: EvalResult | None = None
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:210:    success_criteria: str = ""  # from task.success_criteria — used by EvaluationProcessor
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:211:    task_description: str = ""  # from task.description — used by LLMJudgeProcessor
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:212:    final_messages: tuple = field(default_factory=tuple, hash=False, compare=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:213:    # tuple[Message, ...] — full conversation at task end; used by LLMJudgeEvaluator
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:214:    error: str = ""  # exception message when exit_reason == "error"
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:215:    state_snapshot: "dict | None" = field(
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:422:    if m.tool_call_id:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:423:        d["tool_call_id"] = m.tool_call_id
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:424:    if m.name:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:425:        d["name"] = m.name
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:426:    if m.tool_calls:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:427:        d["tool_calls"] = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in m.tool_calls]
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:428:    if m.thinking:

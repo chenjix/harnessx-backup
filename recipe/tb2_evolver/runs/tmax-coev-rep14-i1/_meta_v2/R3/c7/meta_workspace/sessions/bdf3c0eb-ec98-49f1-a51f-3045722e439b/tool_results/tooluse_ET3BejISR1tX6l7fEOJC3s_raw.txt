@@ -1,0 +1,32 @@
+Write-scope gate: Bash write destinations must be absolute paths. Rejected target(s): sed, reusing, the, edit-guard, semantics), and, (2), parses, each, execution, segment;, when, a, segment, EXECUTES, an, agent-authored, deliverable, (`interpreter, script`,, `./script`,, or, written, `*.sh`), whose, file-path, arguments, are, ALL, agent-fabricated, (excluding, this, runs own stdout/redirect
+  outputs) and NONE pre-existing, it flags the call. `on_after_tool` appends a
+  one-shot corrective note ("you tested against a file you fabricated; run
+  against the ORIGINAL on-disk artifacts; cross-check lossy-source values against
+  the real target"). Append-only, non-terminating, content-agnostic (no task
+  ids / paths / literals). Fires <=2x/run.
+- `config.yaml` — register the processor via absolute `file://` path at order 34;
+  rest of the pipeline byte-identical to R0. `system_prompt.txt` sidecar copied
+  unchanged (Control-only change).
+
+### Evidence
+
+- `task_000505_50b5162d` result.json: reward=0, exit_reason=done,
+  finished=no_tool_calls, steps=14; final_pytest `2 of 2 evil bypassed:
+  cat_evil, ls_evil`.
+- messages.json msg 7 (tool result): tesseract emitted
+  `ssh-ed25519 AAAAC3NzaC1IZDIINTESAAAAIOrXQ50Bf4PZU0H9 + |J9tY +X07yG/pA3T2Xb8`
+  (garbled). msg 9 hardcoded it into the script. msg 15/17: created
+  `/tmp/malicious_test.txt` by echoing the same garbled string, ran
+  `detect_trojan.sh /tmp/malicious_test.txt` -> exit 1; msg 19 final-verification
+  ran the script against `/tmp/test_binary` (also fabricated with the derived
+  key). The real evil corpus was never inspected.
+- Detector dry-run over this trajectory: FIRES on the msg-19 fabricated-input run;
+  a synthetic real-input run (`detect_trojan.sh /app/evidence.png`) is correctly
+  SILENT (real_data present).
+- False-positive sweep over all 29 R2 passing tasks: fires on exactly 1
+  (task_000760, reproducibility probe with a self-made `/tmp/test.csv`) — additive
+  note only, cannot break the pass.
+
+### Uncertainty
+
+Partial-yes retroactive check: after the nudge the agents, natural, next, step, is, `strings, binary>

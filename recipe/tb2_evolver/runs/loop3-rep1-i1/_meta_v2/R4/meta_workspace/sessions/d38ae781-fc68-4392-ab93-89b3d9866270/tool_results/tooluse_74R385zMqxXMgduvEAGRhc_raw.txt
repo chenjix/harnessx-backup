@@ -1,0 +1,275 @@
+1	# Evolve journal — loop3-rep1-i1
+2	
+3	## Round 1 — no-op (all failures model/env)
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-10T09:00:00Z
+8	hypothesis_id: h_noop_r1
+9	levers: []
+10	predicted_affected: []
+11	gating_outcome: accepted
+12	gating_attribution: score=22/28; +3/-3 gained=code-from-image,configure-git-webserver,portfolio-optimization lost=headless-terminal,largest-eigenval,query-optimize; score 0.7857 >= incumbent(mean) 0.7857 - tol 0.0667
+13	expected_global_gain: "0 flips; protects the long-passing-task cluster (cobol-modernization 90 steps, build-cython-ext 63 steps, sanitize-git-repo 41 steps) from a speculative loop/step-cap regression"
+14	regression_risk: "none — config is byte-identical to R0"
+15	cost_shift: "0 — no change"
+16	rollback_trigger: "n/a (no-op)"
+17	-->
+18	
+19	### Why
+20	
+21	R0 scored 22/28. The routed evidence attributes **0 defects to the
+22	harness/tool layer**: 5 failures routed to MODEL (SFT), 1 to ENV. The
+23	affordance-gap section confirms recovery was *reachable* in the current
+24	config — errors were surfaced in full and step budget remained — so the
+25	gaps are model capability, not harness mechanism. Per SOUL.md's
+26	evolution philosophy, these are not the harness's job.
+27	
+28	Failure triage (verified against trajectory bodies):
+29	
+30	- `cancel-async-tasks` (MODEL): agent got "Cancellation test PASSED" at
+31	  step 5, then step 6 spun ~2000 tokens of rumination ("let me try /
+32	  actually / OK I've been overthinking this" ×15) and emitted a
+33	  self-authored blocking test (`await asyncio.sleep(10)`) that hit the
+34	  Bash timeout (exit 124); the *next* model request then stalled
+35	  ~11 min until wall-clock interrupt (`input_tokens=0`,
+36	  `stop_reason=interrupted`). Verifier missed only 1/6 edge-case tests.
+37	- `code-from-image` (ENV/MODEL): `tesseract-ocr` unavailable (`E: Unable
+38	  to locate package`), `file` command missing (exit 127); then the next
+39	  model request stalled ~20 min until interrupt. `/app/output.txt` never
+40	  written. Routed ENV.
+41	- `custom-memory-heap-crash` (MODEL): release build SIGSEGVs
+42	  (returncode -11) while debug build passes 5/6 tests; model did not
+43	  diagnose the release-only memory bug.
+44	- `portfolio-optimization` (MODEL): C extension correct but speedup
+45	  1.12x < required 1.2x on N=5000/6000 — an optimization-depth gap.
+46	- `pytorch-model-cli` (MODEL): CLI predicts digit `2` and the agent
+47	  verified thoroughly (37 steps) against the one image present, but the
+48	  verifier uses a different unseen image → wrong prediction. Cannot be
+49	  inferred from the task description.
+50	- `configure-git-webserver` (MODEL): apt 404s + webserver returns 404;
+51	  model did not complete the serving config.
+52	
+53	### Changes
+54	
+55	- `config.yaml` — byte-identical copy of R0 (explicit no-op).
+56	
+57	### Evidence
+58	
+59	- `_ROUTED_EVIDENCE.md`: "attributed to the harness/tool layer (yours): **0**".
+60	- `cancel-async-tasks` episode: step-6 assistant message loops on
+61	  "let me try a different approach ... actually ... OK I've been
+62	  overthinking this"; final tool `(exit 124, no output captured)` then
+63	  `stop_reason: interrupted`, `usage.input_tokens: 0`.
+64	- `code-from-image` result.json: `n_input_tokens: 6064`, agent_execution
+65	  ran 07:53:28→08:13:28 (~20 min) though only 2 productive steps —
+66	  a stalled model request, not a config-addressable loop.
+67	- Passing long-task cluster: `cobol-modernization` 90 steps / `reward=1`,
+68	  `build-cython-ext` 63 steps / `reward=1`, `sanitize-git-repo` 41 steps
+69	  / `reward=1` — any step-cap tightening or loop-breaker to catch the
+70	  rumination in `cancel-async-tasks`/`pytorch-model-cli` would put these
+71	  at direct regression risk.
+72	
+73	### Uncertainty
+74	
+75	The only recurring *harness-adjacent* signal is semantic rumination /
+76	over-verification (`cancel-async-tasks` step 6, `pytorch-model-cli`
+77	37 steps). A mechanical loop-breaker can't distinguish it from
+78	legitimate long work (the 90/63/41-step passers) without high
+79	false-positive risk — so shipping one trades a speculative 1-2 task
+80	flip for a material regression on a larger passing cluster, which the
+81	Pareto rule forbids. The stalled-model-request deaths
+82	(`cancel-async-tasks`, `code-from-image`) are inference-infra, not
+83	config-editable (`request_timeout_sec` lives in agent kwargs). If a
+84	future round observes the rumination pattern recur on >=3 tasks with a
+85	clean separation from passing long tasks, revisit as a Control
+86	candidate (e.g. an `on_step_start` no-progress detector keyed on
+87	repeated identical tool commands, not step count).
+88	
+89	
+90	## Round 2 — no-op (stall=infra, rest=model)
+91	
+92	<!-- journal:frontmatter
+93	round: 2
+94	timestamp: 2026-08-10T09:30:00Z
+95	hypothesis_id: h_noop_r2
+96	levers: []
+97	predicted_affected: []
+98	gating_outcome: accepted
+99	gating_attribution: score=21/28; +2/-3 gained=largest-eigenval,pytorch-model-cli lost=build-cython-ext,cobol-modernization,code-from-image; score 0.7500 >= incumbent(mean) 0.7738 - tol 0.0667
+100	expected_global_gain: "0 flips; protects the passing cluster (portfolio-optimization 1233s, cobol-modernization 842s, build-cython-ext 436s, sanitize-git-repo, configure-git-webserver) from a speculative time-reminder / loop-breaker regression"
+101	regression_risk: "none — config is byte-identical to R1/R0"
+102	cost_shift: "0 — no change"
+103	rollback_trigger: "n/a (no-op)"
+104	-->
+105	
+106	### Why
+107	
+108	Same 6 failures as R1. This round I localized the mechanism precisely
+109	against the episode JSONL timing and confirmed **no failure is
+110	config-addressable with positive expected global gain**:
+111	
+112	- **Stalled-inference cluster (4/6):** `cancel-async-tasks`,
+113	  `custom-memory-heap-crash`, `largest-eigenval`, `headless-terminal`
+114	  all exited `interrupted`. Measured last-productive-tool timestamps:
+115	  cancel-async 231s/900s (26%), largest-eigenval 249s/900s (28%),
+116	  custom-memory-heap 352s/1800s (20%). In each case a single
+117	  `provider.complete()` request then stalled **651-1447s** and ate the
+118	  rest of the wall clock. `request_timeout_sec=600` is set but not
+119	  firing (vLLM at 127.0.0.1:8303 hangs); the run loop
+120	  (`runloop.py:419`) doesn't wrap `complete()` in `wait_for`, and no
+121	  processor hook can abort an in-flight request. -> infra, not
+122	  `config.yaml`-editable. Logged in `NEEDS_FROM_HUMAN.md` #2.
+123	- **Model-capability cluster (2/6):** `pytorch-model-cli` — wrong digit
+124	  prediction on an unseen verifier image (5/6 tests pass;
+125	  uninferrable from the task). `query-optimize` — SQL runtime 0.75x
+126	  golden, an optimization-depth gap (5/6 tests pass). No harness fix.
+127	
+128	I also considered restoring the **dead `TaskTimeReminderProcessor`**
+129	(see below) and rejected it: its retroactive check (Variant A) is
+130	**no** — the stalls occur at 20-28% of budget, so the 70%/90% nudges
+131	would never fire in time; and setting a static `timeout_seconds` risks
+132	a premature "finalize now" nudge on the 1233s passing task
+133	(portfolio-optimization). No evidence of gain + real regression risk =
+134	drop, per the Pareto rule.
+135	
+136	### Discovery (latent bug, not this round's failure cause)
+137	
+138	`TaskTimeReminderProcessor` and `EnvironmentContextInjector` are wired
+139	with `timeout_seconds` **only** on the default-builder path. When an
+140	evolved `config.yaml` is loaded (`agent.py:189-192` uses
+141	`HarnessConfig.from_yaml_file` without re-injecting `task_timeout`),
+142	both deserialize with `timeout_seconds=None`, so `on_step_start`
+143	short-circuits (`harness.py:246`) and the time-budget mechanism is
+144	dead in every evolved run. Fix requires editing `agent.py` — outside
+145	meta-agent write scope; the per-task timeout is not reachable from any
+146	processor event. Logged in `NEEDS_FROM_HUMAN.md` #1. Not urgent for
+147	score (would not have flipped any R2 failure).
+148	
+149	### Changes
+150	
+151	- `config.yaml` — byte-identical copy of R1/R0 (explicit no-op).
+152	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — two harness-layer items
+153	  (stalled `complete()`; dropped `timeout_seconds` on YAML path).
+154	
+155	### Evidence
+156	
+157	- Final-gap sweep (last `raw_tool` -> `episode_end`) across all 28
+158	  tasks: every passing task with a measurable gap is <12s; the three
+159	  interrupted tasks are 651s / 668s / 1447s — clean separation.
+160	- Budget-fraction of last productive tool: 26% / 28% / 20% — a time
+161	  reminder keyed on 0.70/0.90 cannot fire before the stall.
+162	- `largest-eigenval` verifier: 26/27 pass, only `test_speedup[2]`
+163	  (tiny-input edge case) fails — substantially solved before interrupt.
+164	- `query-optimize` verifier: `speedup_solution_vs_golden: 0.746`,
+165	  `test_compare_golden_vs_solution_runtime` FAILED, 5/6 pass.
+166	- `cancel-async-tasks` step-8 assistant (08:53:14): "The test passes.
+167	  All 3 tasks started and their cleanup code ran when the task was
+168	  cancelled." — solved, then over-verified into a stall.
+169	
+170	### Uncertainty
+171	
+172	Until the vLLM stall is fixed at the provider/run-loop layer, no
+173	`config.yaml` change moves this benchmark. If a future round shows the
+174	stall resolved but premature finalize appears, restoring
+175	`TaskTimeReminderProcessor` becomes worth it — but only once `agent.py`
+176	re-injects a per-task `timeout_seconds`, which the meta-agent cannot do.
+177	
+178	
+179	## Round 3 — no-op (variance-dominated; stall confirmed infra)
+180	
+181	<!-- journal:frontmatter
+182	round: 3
+183	timestamp: 2026-08-10T10:30:00Z
+184	hypothesis_id: h_noop_r3
+185	levers: []
+186	predicted_affected: []
+187	gating_outcome: accepted
+188	gating_attribution: score=21/28; +3/-3 gained=build-cython-ext,code-from-image,headless-terminal lost=largest-eigenval,portfolio-optimization,pytorch-model-cli; score 0.7500 >= incumbent(mean) 0.7679 - tol 0.0667
+189	expected_global_gain: "0 flips; protects the passing cluster from a speculative loop-breaker / compaction-tighten / time-reminder regression that the per-task variance shows would be graded against noise"
+190	regression_risk: "none - config is byte-identical to R0/R1/R2 (md5 de40915c...)"
+191	cost_shift: "0 - no change"
+192	rollback_trigger: "n/a (no-op)"
+193	-->
+194	
+195	### Why
+196	
+197	R2 scored 21/28 (repeats 22,22,21 - within spread). Same byte-identical
+198	config (`426fa407196e6210`) across R0/R1/R2 produces **different per-task
+199	outcomes each round**, which is the decisive signal this round:
+200	
+201	- build-cython-ext: T,T,**F** ; cobol-modernization: T,T,**F**
+202	- code-from-image: F,**T**,F ; headless-terminal: T,**F**,F
+203	- largest-eigenval: T,**F**,T ; query-optimize: T,F,F
+204	- pytorch-model-cli: F,F,**T** ; portfolio-optimization: F,T,T
+205	
+206	Tasks flip pass<->fail with no config change. The failures are not a
+207	deterministic, config-addressable property of the harness - they are
+208	run-to-run variance driven by (a) the vLLM stall striking a different
+209	task each run and (b) near-miss model edge cases (5/6 or 10/11 tests).
+210	Any intervention I ship would be graded against this same noise and
+211	either falsely accepted or auto-reverted. Routing agrees for the 3rd
+212	consecutive round: **0 defects attributed to the harness/tool layer.**
+213	
+214	### Stall root cause - verified in run-loop code this round
+215	
+216	Confirmed the prior rounds' "infra, not config-editable" claim against
+217	the source, not just timing:
+218	
+219	- `harnessx/core/runloop.py:419` - `await active_model_provider.complete(...)`
+220	  is **not** wrapped in `asyncio.wait_for`. `before_model` fires before
+221	  line 419 and `after_model` after; **no processor hook exists during
+222	  an in-flight request**, so no `MultiHookProcessor` in the pipeline can
+223	  abort a hung `complete()`.
+224	- `litellm_provider.py:197-214` does pass `request_timeout`/`timeout` to
+225	  litellm, but this lives in the model/provider kwargs, not in the
+226	  behaviour-pipeline `config.yaml` the meta-agent edits - and vLLM hangs
+227	  at a level `request_timeout` isn't catching.
+228	
+229	### Stall is NOT context-size correlated (rules out compaction tune)
+230	
+231	Context at the stall (from `*_state.json`):
+232	- code-from-image: **3,513 tokens**, stalled at step 2 -> tiny context,
+233	  still an 1200s stall.
+234	- cobol-modernization: 94,269 tokens, step 10 (12-min gap 09:31:35 ->
+235	  09:43:24 in the episode jsonl, then interrupt; `/app/program.py`
+236	  never written - task was mid-exploration, budget remained).
+237	- custom-memory-heap-crash: 337,802 tokens, step 13.
+238	
+239	code-from-image stalling at 3.5k tokens definitively rules out "large
+240	context triggers the hang", so tightening CompactionProcessor
+241	(`token_threshold: 140000`) would buy zero stall relief while risking
+242	regressions on the passing long-context tasks. Dropped on the Pareto
+243	rule.
+244	
+245	### Non-stall failures = model/env, per verifier tails
+246	
+247	- build-cython-ext (done, 69 steps): 10/11 pass, 1 AttributeError - model.
+248	- cancel-async-tasks (13 steps): 5/6, edge case test - model.
+249	- headless-terminal (done, 18 steps): 6/7, `mkdir /server` "File exists"
+250	  (non-idempotent code) - model.
+251	- query-optimize (done, 29 steps): SQL 0.75x speedup vs golden bar
+252	  - optimization-depth gap, model.
+253	
+254	### Changes
+255	
+256	- `config.yaml` - byte-identical copy of R2/R1/R0 (explicit no-op),
+257	  md5 `de40915c8013a0a510fe1ee2f9d66661`. canonicalize ok=true.
+258	
+259	### Evidence
+260	
+261	- `history/R0,R1,R2 _per_task.json`: 8 tasks flip pass<->fail under the
+262	  identical config (listed above).
+263	- `_ROUTED_EVIDENCE.md`: "attributed to the harness/tool layer (yours): **0**".
+264	- `runloop.py:419`: unwrapped `complete()`; `state.json` token counts
+265	  (3.5k / 94k / 338k) at the three stalls show no context correlation.
+266	
+267	### Uncertainty
+268	
+269	The benchmark is variance-bound at ~21-22/28 under this config; no
+270	`config.yaml` lever moves it until the vLLM `complete()` stall is fixed
+271	at the provider/run-loop layer (logged in prior rounds'
+272	NEEDS_FROM_HUMAN). If a future round shows the stall resolved and a
+273	*deterministic* config-addressable failure recurs on multiple tasks with
+274	clean separation from the passing cluster, revisit - but shipping now
+275	would trade noise for regression risk, which the Pareto rule forbids.

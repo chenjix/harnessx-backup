@@ -1,0 +1,50 @@
+14:All processor classes are kept in this module so that YAML round-trip
+19:from __future__ import annotations
+21:import dataclasses
+22:import re
+23:import time
+24:import uuid
+26:from harnessx.core.builder import HarnessBuilder
+27:from harnessx.core.harness import HarnessConfig
+28:from harnessx.core.events import (
+39:from harnessx.core.processor import MultiHookProcessor
+40:from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+41:from harnessx.processors.context.strategies.system_prompt.base import (
+44:from harnessx.processors.context.system_prompt import SystemPromptProcessor
+45:from harnessx.processors.control.bg_install_guard import BgInstallGuard
+46:from harnessx.processors.control.compaction import CompactionProcessor
+47:from harnessx.processors.control.parse_retry import ParseRetryProcessor
+48:from harnessx.processors.control.tool_call_correction import ToolCallCorrectionLayer
+49:from harnessx.tools.builtin import bash_tool
+50:from harnessx.tools.inmemory import InMemoryToolRegistry
+52:from .defaults import OUTPUT_LIMIT, WORKSPACE_PATH
+60:def _extract_written_files(cmd: str) -> list[str]:
+=== PostCompaction/CustomSelfVerify ===
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+109:    _singleton_group = "tb2_self_verify"
+110:    _order = 90
+116:    async def on_task_start(self, event: TaskStartEvent):
+121:    async def on_before_model(self, event: BeforeModelEvent):
+133:    async def on_after_model(self, event: ModelResponseEvent):
+147:    async def on_before_tool(self, event: ToolCallEvent):
+153:    async def on_task_end(self, event: TaskEndEvent):
+159:class CustomEditToolProcessor(MultiHookProcessor):
+168:    _singleton_group = "bash_edit_detector"
+169:    _order = 30
+176:    async def on_task_start(self, event: TaskStartEvent):
+181:    async def on_before_tool(self, event: ToolCallEvent):
+188:    async def on_after_tool(self, event: ToolResultEvent):
+202:    async def on_task_end(self, event: TaskEndEvent):
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+227:    _singleton_group = "task_time_reminder"
+228:    _order = 6
+240:    async def on_task_start(self, event: TaskStartEvent):
+245:    async def on_step_start(self, event: StepStartEvent):
+274:    async def on_task_end(self, event: TaskEndEvent):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+293:    _singleton_group = "tb2_post_compaction_refresh"
+294:    _order = 11  # runs after CompactionProcessor (8)
+300:    async def on_task_start(self, event: TaskStartEvent):
+304:    async def on_step_start(self, event: StepStartEvent):
+347:    async def on_task_end(self, event: TaskEndEvent):
+400:class _StaticSystemPromptBuilder(BaseSystemPromptBuilder):

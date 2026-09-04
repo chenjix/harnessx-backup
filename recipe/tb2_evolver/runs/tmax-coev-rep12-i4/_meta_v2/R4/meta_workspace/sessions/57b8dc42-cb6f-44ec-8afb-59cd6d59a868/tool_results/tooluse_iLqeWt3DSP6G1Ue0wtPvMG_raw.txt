@@ -1,0 +1,120 @@
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+from __future__ import annotations
+
+import dataclasses
+import logging
+from typing import Callable, Coroutine, Any
+
+from ...core.events import (
+    StepStartEvent,
+    BeforeModelEvent,
+    BoundaryHint,
+    TaskStartEvent,
+    TaskEndEvent,
+    Message,
+    rough_token_count,
+    _extract_text,
+)
+from ...core.processor import MultiHookProcessor
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Default (no-op) summariser
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_SUMMARY_MAX_MSGS = 15
+_DEFAULT_SUMMARY_MSG_CHARS = 150
+
+
+async def _default_summarize(messages: list[Message]) -> str:
+    """Fallback summariser used when no ``summarize`` sub-harness is registered.
+
+    Takes the most recent ``_DEFAULT_SUMMARY_MAX_MSGS`` of the evicted set
+    (closest to the retention window, therefore most relevant) and truncates
+    each to ``_DEFAULT_SUMMARY_MSG_CHARS`` chars.  This bounds summary size to
+    ~15 × 150 chars regardless of how many messages were evicted, preventing
+    unbounded accumulation across repeated compaction cycles.
+    """
+    tail = messages[-_DEFAULT_SUMMARY_MAX_MSGS:]
+    parts = [f"[{m.role}] {_extract_text(m.content)[:_DEFAULT_SUMMARY_MSG_CHARS]}" for m in tail]
+    return "[Summary of earlier context]\n" + "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# CompactionProcessor
+# ---------------------------------------------------------------------------
+
+
+class CompactionProcessor(MultiHookProcessor):
+    """Dual-trigger, dual-window context compaction.
+
+    Triggers compaction when *either*:
+
+    - ``token_count > token_threshold``, or
+    - ``len(messages) > message_threshold``
+
+    When triggered:
+
+    1. The most recent ``retention_window`` messages are kept intact.
+    2. Of the remaining (older) messages, at most ``eviction_fraction`` are
+       handed to the summariser.
+    3. The summary is prepended as a single synthetic ``user`` message.
+
+    Summarisation runs through a sub-harness (keyed by ``summarize_key``) so
+    the LLM call appears in the trace stream linked to the parent run.
+    If the key is absent from the registry, ``summarize_fn`` is used as a
+    fallback (defaults to a no-op concatenation stub).
+
+    Args:
+        token_threshold:    Token count that triggers compaction (default 140 000).
+        message_threshold:  Message count that triggers compaction (default 100).
+        retention_window:   Number of recent messages never compacted (default 10).
+        eviction_fraction:  Maximum fraction of compactable messages to summarise
+                            per call (default 0.5 — half at a time).
+        summarize_key:      Sub-harnesses registry key for the summarisation model
+                            (default ``"summarize"``).
+        summarize_fn:       Fallback async callable ``(list[Message]) → str``.
+                            Used when ``summarize_key`` is not in the registry.
+                            Defaults to a no-op concatenation stub.
+        summarize_prompt_template:
+                            Optional prompt template for LLM summarisation.
+                            When provided, ``{conversation}`` is replaced with
+                            the compactable message transcript.
+    """
+
+    required_providers: frozenset = frozenset()
+
+    _singleton_group = "compaction"
+    _order = 8  # after context.env (5), before token_budget (10)
+
+    def _bind_model_config(self, model_config: Any) -> None:
+        super()._bind_model_config(model_config)
+        if self._summarize_key not in self._sub_harnesses and model_config is not None:
+            from ...core.harness import Harness as _Harness, HarnessConfig
+            from ...tracing.null_tracer import NullTracer as _NullTracer
+            from ...core.model_config import ModelConfig as _MC
+
+            provider = model_config.get(self._summarize_key)  # falls back to "main" if key absent
+            self._sub_harnesses = {
+                **self._sub_harnesses,
+                self._summarize_key: _Harness(_MC(main=provider), HarnessConfig(tracer=_NullTracer())),
+            }
+
+    def _maybe_rebuild_sub_harness(self) -> None:
+        """Rebuild the summarize sub-harness with a nested HarnessJournal when the parent uses one.
+
+        Called from on_task_start once session_id is known. The child journal is nested at
+        {parent.base_dir}/{session_id}/subharnesses/ mirroring how spawn_subagent nests
+        child agents under {parent.base_dir}/{session_id}/subagents/.
+        """
+        if not self._session_id:
+            return
+        rt = getattr(self, "_harness_runtime", None)
+        if rt is None:
+            return
+        from ...tracing.journal import HarnessJournal as _HJ
+

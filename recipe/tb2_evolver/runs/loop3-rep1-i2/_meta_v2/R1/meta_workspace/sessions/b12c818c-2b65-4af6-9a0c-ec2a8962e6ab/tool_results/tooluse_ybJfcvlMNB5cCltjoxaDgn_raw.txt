@@ -1,0 +1,147 @@
+=== cancel-async-tasks body ===
+---
+task: cancel-async-tasks
+trial: cancel-async-tasks__JSJVr2J
+passed: false
+reward: 0.0
+steps: 7
+tool_calls:
+  Bash: 7
+duration_s: 900.0
+---
+
+## Verifier output (tail)
+```
+        proc.send_signal(signal.SIGINT)
+    
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        finally:
+            proc.kill()
+    
+        stdout = stdout.decode("utf-8")
+    
+        assert stdout.count("Task started.") == 2
+>       assert stdout.count("Cleaned up.") == 2
+E       AssertionError: assert 0 == 2
+E        +  where 0 = <built-in method count of str object at 0x7fa76c6fb5a0>('Cleaned up.')
+E        +    where <built-in method count of str object at 0x7fa76c6fb5a0> = 'Task started.\nTask started.\n'.count
+
+/tests/test_outputs.py:172: AssertionError
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED ../tests/test_outputs.py::test_run_py_file_exists
+PASSED ../tests/test_outputs.py::test_tasks_run_concurrently
+PASSED ../tests/test_outputs.py::test_tasks_obey_max_concurrent
+PASSED ../tests/test_outputs.py::test_tasks_cancel_below_max_concurrent
+PASSED ../tests/test_outputs.py::test_tasks_cancel_at_max_concurrent
+FAILED ../tests/test_outputs.py::test_tasks_cancel_above_max_concurrent - Ass...
+========================= 1 failed, 5 passed in 12.78s =========================
+```
+
+<!-- routing -->
+## Routing verdict
+- fault_side: **MODEL**
+- interaction_edge: `Model-Tool`
+- failure_mode: `visible_error_no_effective_recovery`
+- destination: **model_training**
+- confidence: 0.65
+- **This failure is not addressable by editing the harness config.**
+======================== code-from-image body ===
+---
+task: code-from-image
+trial: code-from-image__EFHom9j
+passed: false
+reward: 0.0
+steps: 9
+tool_calls:
+  Bash: 9
+duration_s: 1200.3
+---
+
+## Verifier output (tail)
+```
+        """
+        output_path = Path("/app/output.txt")
+>       assert output_path.exists(), f"File {output_path} does not exist"
+E       AssertionError: File /app/output.txt does not exist
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/app/output.txt').exists
+
+/tests/test_outputs.py:15: AssertionError
+____________________________ test_output_is_correct ____________________________
+
+    def test_output_is_correct():
+        """
+        Verify the output is correct
+        """
+        output_path = Path("/app/output.txt")
+>       with open(output_path, "r") as f:
+             ^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/app/output.txt'
+
+/tests/test_outputs.py:23: FileNotFoundError
+=========================== short test summary info ============================
+FAILED ../tests/test_outputs.py::test_output_file_exists - AssertionError: Fi...
+FAILED ../tests/test_outputs.py::test_output_is_correct - FileNotFoundError: ...
+============================== 2 failed in 0.03s ===============================
+```
+
+<!-- routing -->
+## Routing verdict
+- fault_side: **ENV**
+- interaction_edge: `Model-LocalEnv`
+- failure_mode: `missing_dependency_or_broken_env`
+- destination: **environment_repair**
+- confidence: 0.85
+- **This failure is not addressable by editing the harness config.**
+======================== fix-code-vulnerability body ===
+---
+task: fix-code-vulnerability
+trial: fix-code-vulnerability__jJ2GkqT
+passed: false
+reward: 0.0
+steps: 12
+tool_calls:
+  Bash: 12
+duration_s: 900.2
+---
+
+## Verifier output (tail)
+```
+            "header\rname",  # carriage return
+            "header\0name",  # null byte
+        ]
+        for error_str in error_cases:
+            try:
+                _hkey(error_str)
+                assert False, f"_hkey('{repr(error_str)}') should raise ValueError"
+            except ValueError:
+                pass  # Expected
+            except Exception as e:
+>               assert False, f"_hkey('{repr(error_str)}') raised unexpected exception: {e}"
+E               AssertionError: _hkey(''header\nname'') raised unexpected exception: _hkey(''header\nname'') should raise ValueError
+E                 assert False
+E               assert False
+
+/tests/test_outputs.py:99: AssertionError
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED ../tests/test_outputs.py::test_hkey_basic_cases
+PASSED ../tests/test_outputs.py::test_hkey_real_world_examples
+FAILED ../tests/test_outputs.py::test_report_file_exists_example - AssertionE...
+FAILED ../tests/test_outputs.py::test_vul_file - FileNotFoundError: [Errno 2]...
+FAILED ../tests/test_outputs.py::test_cwe_id - FileNotFoundError: [Errno 2] N...
+FAILED ../tests/test_outputs.py::test_hkey_error_cases - AssertionError: _hke...
+========================= 4 failed, 2 passed in 0.05s ==========================
+```
+
+<!-- routing -->
+## Routing verdict
+- fault_side: **MODEL**
+- interaction_edge: `-`
+- failure_mode: `premature_stop_or_wrong_solution`
+- destination: **model_training**
+- confidence: 0.60
+- **This failure is not addressable by editing the harness config.**

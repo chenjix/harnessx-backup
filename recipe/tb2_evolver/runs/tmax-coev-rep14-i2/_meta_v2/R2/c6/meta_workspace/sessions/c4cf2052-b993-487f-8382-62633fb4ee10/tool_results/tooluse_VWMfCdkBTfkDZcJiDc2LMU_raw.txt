@@ -1,0 +1,117 @@
+79	_SELF_VERIFY_TOOL = "_tb2_self_verify"
+80	_SELF_VERIFY_ACK = "Verification check initiated. See the message above for instructions."
+81	_SELF_VERIFY_MSG = """\
+82	Before finishing, run through this checklist — do not skip any step even if you already verified:
+83	
+84	1. **Re-read the task description now.** Does your solution address every requirement, including edge cases, accuracy thresholds, and exact output format?
+85	
+86	2. **Check every required output file exists at its exact path:**
+87	```bash
+88	ls -lh /path/to/each/required/output/file
+89	```
+90	A script that ran without errors does NOT guarantee the file was written. Run `ls` explicitly for each required file.
+91	
+92	3. **Inspect the actual file contents** — `cat` or `head` each output file and confirm the values are semantically correct, not just that the file exists or is non-empty.
+93	
+94	4. **Validate your verification method.** Did your test actually exercise the real behavior? Tests that only check syntax, importability, or exit code 0 on a trivial case are NOT valid — they can pass even on a broken implementation.
+95	
+96	5. **For running services:** confirm they are still alive and reachable right now, not just that they started earlier.
+97	
+98	Fix anything that looks wrong before exiting. When all checks pass, end your final message with:
+99	**SUCCESS: task complete. Output files confirmed at [list each required path].**\
+100	"""
+101	
+102	
+103	class CustomSelfVerifyProcessor(MultiHookProcessor):
+104	    """Inject a one-shot verification prompt when the model tries to exit without tool calls.
+105	
+106	    Fires at most once per task run.  On the next no-tool-call turn it stays silent.
+107	    """
+108	
+109	    _singleton_group = "tb2_self_verify"
+110	    _order = 90
+111	
+112	    def __init__(self) -> None:
+113	        self._verified = False
+114	        self._pending_message: str = ""
+115	
+116	    async def on_task_start(self, event: TaskStartEvent):
+117	        self._verified = False
+118	        self._pending_message = ""
+119	        yield event
+120	
+121	    async def on_before_model(self, event: BeforeModelEvent):
+122	        if not self._pending_message:
+123	            yield event
+124	            return
+125	        msg = self._pending_message
+126	        self._pending_message = ""
+127	        # last message is a tool result (role≠user) → append exactly +1 user
+128	        yield dataclasses.replace(
+129	            event,
+130	            messages=event.messages + (Message(role="user", content=msg),),
+131	        )
+132	
+133	    async def on_after_model(self, event: ModelResponseEvent):
+134	        exit_intent = event.finish_reason in ("end_turn", "stop") and not event.tool_calls
+135	        if exit_intent and not self._verified:
+136	            self._verified = True
+137	            self._pending_message = _SELF_VERIFY_MSG
+138	            keepalive = ToolCall(
+139	                id=f"sv-{uuid.uuid4().hex[:8]}",
+140	                name=_SELF_VERIFY_TOOL,
+141	                input={},
+142	            )
+143	            yield dataclasses.replace(event, tool_calls=(keepalive,))
+144	        else:
+145	            yield event
+146	
+147	    async def on_before_tool(self, event: ToolCallEvent):
+148	        if event.tool_name == _SELF_VERIFY_TOOL:
+149	            yield dataclasses.replace(event, approved=False, synthetic_result=_SELF_VERIFY_ACK)
+150	        else:
+151	            yield event
+152	
+153	    async def on_task_end(self, event: TaskEndEvent):
+154	        self._verified = False
+155	        self._pending_message = ""
+156	        yield event
+157	
+158	
+159	class CustomEditToolProcessor(MultiHookProcessor):
+160	    """Detect repeated Bash-based file edits and nudge the model to try a different approach.
+161	
+162	    TB2 only exposes Bash, so write operations are detected via command patterns
+163	    (redirects, sed -i, tee).  When the same file is edited more than
+164	    ``threshold`` times, a warning is appended to the tool result and the
+165	    per-file counter is reset.
+166	    """
+167	
+168	    _singleton_group = "bash_edit_detector"
+169	    _order = 30
+170	
+171	    def __init__(self, threshold: int = 7) -> None:
+172	        self.threshold = threshold
+173	        self._edit_counts: dict[str, int] = {}
+174	        self._pending: dict[str, list[str]] = {}
+175	
+176	    async def on_task_start(self, event: TaskStartEvent):
+177	        self._edit_counts.clear()
+178	        self._pending.clear()
+179	        yield event
+180	
+181	    async def on_before_tool(self, event: ToolCallEvent):
+182	        if event.tool_name == "Bash":
+183	            paths = _extract_written_files(event.tool_input.get("command", ""))
+184	            if paths:
+185	                self._pending[event.tool_call_id] = paths
+186	        yield event
+187	
+188	    async def on_after_tool(self, event: ToolResultEvent):
+189	        paths = self._pending.pop(event.tool_call_id, [])
+190	        injections: list[str] = []
+191	        for path in paths:
+192	            count = self._edit_counts.get(path, 0) + 1
+193	            self._edit_counts[path] = count
+
+[Showing lines 79–193 of 466 total. Use offset=193 to read the next section.]

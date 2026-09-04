@@ -1,0 +1,14 @@
+# Round-by-round history
+
+Scores are pass counts on the same task set, measured once per round.
+The same config measured twice can differ by several tasks — treat a
+difference smaller than the spread of `repeats` as noise, not signal.
+
+| Round | Config | Score | Repeats of this config | Gate | Changed |
+|------:|--------|------:|-----------------------|------|---------|
+| R0 | `56db078eb6e975ee` | 30/50 | 30 | accept | yes |
+| R1 | `2cc833b866d82b07` | 29/50 | 29, 31 | accept | no |
+| R2 | `2cc833b866d82b07` | 31/50 | 29, 31 | accept | yes |
+| R3 | `e9bbf05eb88a7a5b` | 30/50 | 30 | accept | yes |
+
+Incumbent: R2 (gate compares against the MEAN of its repeats, not its best single draw).

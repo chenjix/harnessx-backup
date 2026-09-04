@@ -1,0 +1,37 @@
+--- R1
++++ R2
+@@ -14,2 +14,12 @@
+ # runaway generation cannot burn an hour of wall-clock on one task.
++#
++# R2 (meta): the R1 config header claimed a full survey/plan/verify workflow
++# prompt, but the system_prompt.txt actually shipped beside R1's config was the
++# bare 5-line default. R2 deploys the intended general workflow via the sibling
++# system_prompt.txt (SiblingSystemPromptBuilder loads it), centered on a
++# round-trip / verbatim-diff self-check discipline (catch confident-but-wrong
++# answers) and a preserve-partial-credit rule (bank completed deliverables
++# instead of burning the whole budget on one doomed subgoal). Strategy-only:
++# no task ids, answers, constants, or per-task code. Processor pipeline copied
++# byte-for-byte from R1.
+ 
+@@ -21,8 +31,2 @@
+ processors:
+-# R4: system-prompt sidecar (system_prompt.txt beside this YAML) revised from
+-# the 5-line default to an explicit general workflow — survey, plan, diagnose
+-# before retry, budget awareness, verify deliverables the way an external
+-# checker would (real HTTP client not raw socket; exact output path/format),
+-# keep required services alive, avoid polluting the verifier's working dir.
+-# Strategy-only; no task-specific literals. SiblingSystemPromptBuilder loads it.
+ - _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+@@ -57,8 +61,6 @@
+ # LengthTruncationRecoveryProcessor (which only handles finish_reason=length /
+-# no tool call). Here the model DOES emit a well-formed Bash call every turn but
+-# re-issues the byte-for-byte same command 10-33x in a row until the step budget
+-# is exhausted (9/11 R0 budget_exceeded tasks). Bash-only fingerprinting so
+-# internal tools like _tb2_self_verify (22 consecutive calls in a PASSING task)
+-# never trip it; warn at 3, intercept-and-redirect at 6. Every R0 passing task
+-# had max consecutive identical-Bash run = 1, so regression surface is ~nil.
++# no tool call). Kept from R1 (accepted). NOTE for R3: post-hoc analysis shows
++# the model frequently IGNORES the BLOCKED redirect and re-emits the identical
++# command many times; the R2 system prompt reinforces "don't burn budget on a
++# doomed subgoal" to help the model act on this signal rather than ignore it.
+ - _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i4/_meta_v2/R1/processors/bash_loop_breaker.py::BashLoopBreakerProcessor

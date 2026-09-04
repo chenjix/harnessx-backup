@@ -1,0 +1,81 @@
+                "ToolFailureLimitError",
+                "ContextLengthExceeded",
+                "GenerationAborted",
+            ):
+                raise
+            _logger.warning(
+                "processor crashed, skipping: processor=%s hook=%s event=%s error=%s: %s",
+                type(self).__name__,
+                method_name,
+                type(event).__name__,
+                exc_name,
+                exc,
+            )
+            _logger.debug("processor crash traceback:", exc_info=True)
+            yield event
+
+    # Default no-op handlers — override as needed
+
+    async def on_task_start(self, event: TaskStartEvent) -> AsyncIterator[Event]:
+        """Once per task. Allowed: modify ``system_prompt``. No ``messages`` field on this event."""
+        yield event
+
+    async def on_step_start(self, event: StepStartEvent) -> AsyncIterator[Event]:
+        """Start of each step. Structural history edits OK (system stays at [0]). Forbidden: last-user-only substitution without a structural change."""
+        yield event
+
+    async def on_before_model(self, event: BeforeModelEvent) -> AsyncIterator[Event]:
+        """Just before the LLM call. last=user → may edit last user content only; last≠user → may append exactly +1 user. History window is frozen."""
+        yield event
+
+    async def on_after_model(self, event: ModelResponseEvent) -> AsyncIterator[Event]:
+        """After model responds. Allowed: modify ``content`` / ``tool_calls``. ``ModelResponseEvent`` carries no ``messages`` field — history is structurally inaccessible."""
+        yield event
+
+    async def on_before_tool(self, event: ToolCallEvent) -> AsyncIterator[Event]:
+        """Before a tool executes. Allowed: modify ``tool_input``, set ``approved=False``. ``ToolCallEvent`` carries no ``messages`` field — history is structurally inaccessible."""
+        yield event
+
+    async def on_after_tool(self, event: ToolResultEvent) -> AsyncIterator[Event]:
+        """After a tool returns. Allowed: modify ``result``. ``ToolResultEvent`` carries no ``messages`` field — history is structurally inaccessible."""
+        yield event
+
+    async def on_step_end(self, event: StepEndEvent) -> AsyncIterator[Event]:
+        """Step complete. Read-only pass-through; no ``messages`` field. Aggregate cost/token data available."""
+        yield event
+
+    async def on_task_end(self, event: TaskEndEvent) -> AsyncIterator[Event]:
+        """Task complete. Read-only pass-through; no ``messages`` field. Final cost/exit info available."""
+        yield event
+
+
+async def pipe(
+    event: Event,
+    processors: "list[Processor]",
+    tracer: "object | None" = None,
+    hook: str = "",
+) -> "Event | None":
+    """Pass event through processors sequentially.  Returns the last yielded event, or
+    ``None`` if any processor intercepted (yielded nothing).
+
+    Use ``pipe_all`` when the processor chain may yield heterogeneous event types
+    (e.g. ``ModelResponseEvent`` + ``SpawnSubAgentEvent`` from ``after_model``).
+    """
+    chain = ProcessorChain(*processors)
+    result = None
+    async for ev in chain.process(event, tracer=tracer, hook=hook):
+        result = ev
+    return result
+
+
+async def pipe_all(
+    event: Event,
+    processors: "list[Processor]",
+    tracer: "object | None" = None,
+    hook: str = "",
+) -> "list[Event]":
+    """Pass *event* through processors; return **every** yielded event.
+
+    Unlike ``pipe()``, no intermediate events are discarded.  Necessary when a
+    hook point may produce heterogeneous output — for example when a custom
+    ``after_model`` processor yields a ``ModelResponseEvent`` plus one or more

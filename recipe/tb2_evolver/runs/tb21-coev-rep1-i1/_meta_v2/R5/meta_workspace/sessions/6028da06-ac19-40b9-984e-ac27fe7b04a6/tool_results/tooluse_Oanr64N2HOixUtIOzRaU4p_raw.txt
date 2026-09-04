@@ -1,0 +1,236 @@
+1	# Evolution Journal — tb21-coev-rep1-i1
+2	
+3	## Round 1 — bound runaway context
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_context_overflow_guard_v1
+9	levers: [control]
+10	predicted_affected: [regex-log, overfull-hbox, configure-git-webserver, large-scale-text-editing, protein-assembly, sam-cell-seg, llm-inference-batching-scheduler]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=3/18; +1/-1 gained=configure-git-webserver lost=headless-terminal; score 0.1667 >= incumbent(mean) 0.1667 - tol 0.0400
+14	expected_global_gain: "Unblocks a 7+ task cluster that dies at step ~0/1 with exit_reason=error from an uncaught provider 400 (context overflow); any non-error continuation is strictly better than the current instant death"
+15	regression_risk: "Very low — char caps (per-msg 120k, total 280k) sit far above every message seen on the 3 passing tasks (<=~5.4k chars); truncation preserves message count/roles/tool_call_id so track invariants hold"
+16	cost_shift: "Neutral-to-down — previously-instant-death tasks now run (more tokens) but runaway 170k-344k-char turns are bounded, shrinking the request that actually leaves the harness"
+17	rollback_trigger: "If R2 shows these 7 tasks still exit_reason=error at step ~0/1, the char budget is still above the server's real limit — lower total_char_budget/per_message_char_cap before abandoning the mechanism"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 3/18 (16.7%). A per-task trace scan (`.jsonl`, biggest-string per
+23	line) found a 1:1 correlation: every `exit_reason=error` task has a single
+24	`raw_assistant` message whose `/message/content` is a runaway 170k–344k-char
+25	string. Model `Qwen/Qwen3.5-9B` rejects inputs over ~65536 tokens with a
+26	400 BadRequest; the run loop does not wrap the provider call in try/except, so
+27	that 400 propagates to `exit_reason=error` and kills the task at step ~0/1 —
+28	before it does any recoverable work. The stock `CompactionProcessor` can't
+29	help: its token counter (`rough_token_count`, cl100k_base) undercounts this
+30	model's real tokenizer, and it summarises OLD messages while leaving the single
+31	oversized recent turn intact. This is a harness deficiency (a missing size-
+32	bounding mechanism), not a model-knowledge gap.
+33	
+34	### Changes
+35	
+36	- `processors/context_overflow_guard.py` — new `ContextOverflowGuard`
+37	  (`MultiHookProcessor`, `on_step_start`, `_order=9` right after compaction).
+38	  Char-based (not token-based, since the token counter undercounts): head/tail-
+39	  truncates any message whose text `content` exceeds `per_message_char_cap`,
+40	  then shrinks the largest older messages until the transcript fits
+41	  `total_char_budget`. Truncation is in place — message count, roles, ordering,
+42	  and `tool_call_id` links preserved.
+43	- `config.yaml` — register `ContextOverflowGuard` via `file://` target
+44	  (`per_message_char_cap=120000`, `total_char_budget=280000`, `keep_recent=4`,
+45	  `min_message_chars=2000`), positioned after `CompactionProcessor`.
+46	
+47	### Evidence
+48	
+49	- regex-log: 6-line trace; line 4 `type=raw_assistant` `/message/content` =
+50	  343,954 chars; trajectory frontmatter `steps: null` (never completed a step),
+51	  `passed: false`.
+52	- overfull-hbox: assistant content 218,307 chars, `exit=error`.
+53	- configure-git-webserver: 249,882, `exit=error`.
+54	- large-scale-text-editing: 207,337, `exit=error`.
+55	- protein-assembly: 205,709, `exit=error`.
+56	- sam-cell-seg: 175,527, `exit=error`.
+57	- llm-inference-batching-scheduler: 172,511, `exit=error`.
+58	- Passing tasks git-leak-recovery / headless-terminal / kv-store-grpc: max
+59	  message content <= ~5.4k chars, `exit=done` — well below the caps, so
+60	  structurally unaffected.
+61	
+62	### Uncertainty
+63	
+64	The char→token ratio is estimated (regex-log's 343,954 chars ≈ 65,536 tokens →
+65	~5.25 chars/token); if the real ratio is lower, 280k chars could still exceed
+66	the limit and the cluster stays red — rollback trigger above covers this by
+67	lowering the budget. Also unresolved this round: write-compressor's malformed-
+68	tool-call loop (`bash_tool() missing ... 'command'`) despite
+69	`ParseRetryProcessor.max_consecutive_errors: 1` — different mechanism, deferred.
+70	
+71	### needs_from_human
+72	
+73	- Ideal fix would also wrap the provider `.complete()` call in the run loop
+74	  with try/except to translate a 400 into a graceful `exit_reason` instead of
+75	  `error`, but `harnessx/**` is read-only from this harness. Noting for a
+76	  human: `runloop.py` ~line 419 provider call is unguarded against
+77	  BadRequestError.
+78	
+79	## Round 2 — repeatable act-loop keepalive
+80	
+81	<!-- journal:frontmatter
+82	round: 2
+83	timestamp: 2026-08-24T10:00:00Z
+84	hypothesis_id: h_act_loop_keepalive_v1
+85	levers: [control]
+86	predicted_affected: [regex-log, large-scale-text-editing, db-wal-recovery, feal-linear-cryptanalysis, filter-js-from-html, adaptive-rejection-sampler, sam-cell-seg, train-fasttext, write-compressor, overfull-hbox, llm-inference-batching-scheduler]
+87	cited_candidates: [C-002]
+88	gating_outcome: accepted
+89	gating_attribution: score=4/18; +1/-0 gained=count-dataset-tokens; score 0.2222 >= incumbent(mean) 0.1667 - tol 0.0400
+90	expected_global_gain: "Converts the dominant terminal failure signature (episode ends on a large text-only assistant turn with no tool call) into a bounded continuation, giving the model up to 6 more chances to actually produce the required output file via Bash across ~10 of 15 failing tasks"
+91	regression_risk: "The 3 passing tasks never hit the stall branch (their turns carry tool calls), so untouched; worst case a genuinely-finished prose turn gets extra nudges before stopping — cost only, mitigated by the SUCCESS sentinel escape hatch"
+92	cost_shift: "Up modestly on previously-early-dying tasks (they now run more steps toward a real solution); bounded by max_reprompts=6 and existing max_steps/budget guards"
+93	rollback_trigger: "If R3 shows these stall tasks still passed:false and now hit max_steps/budget_exceeded with repeated nudges but no filesystem progress, it's a capability gap — lower max_reprompts to 2 or revert; revert immediately if any previously-passing task regresses"
+94	-->
+95	
+96	### Why
+97	
+98	R1's context-overflow guard fully resolved the `exit_reason=error` instant-death
+99	cluster — every previously-dying task now runs many steps — yet the score stayed
+100	3/18. A frontmatter + episode-JSONL sweep of R1 trajectories found a new dominant
+101	terminal signature: failing tasks end on a **large text-only assistant turn with
+102	no tool call** (94k–254k chars). The model rambles / plans in prose instead of
+103	executing Bash, and the run loop treats that as "done". The stock
+104	`CustomSelfVerifyProcessor` intercepts the first such turn — but only once per
+105	task — so the second ramble ends the run with the required output file never
+106	written. This is a harness give-up-after-one-nudge deficiency, not a
+107	domain-knowledge gap.
+108	
+109	### Changes
+110	
+111	- `processors/act_loop_keepalive.py` — new `ActLoopKeepalive` (`MultiHookProcessor`,
+112	  `_order=91`, right after the stock self-verify at 90). On `on_after_model`,
+113	  detects a no-tool-call stall with non-empty content and, while `max_reprompts`
+114	  budget remains, injects a synthetic keepalive tool call so the loop does not
+115	  `break`, and queues a short generic user nudge ("act via Bash, or emit
+116	  `SUCCESS: task complete.` to finish") delivered on the next `on_before_model`.
+117	  Completion-sentinel escape hatch lets a genuinely-finished agent stop. Budget
+118	  exhausted → yields unchanged so the loop terminates. Keepalive tool swallowed in
+119	  `on_before_tool` (`approved=False` + `synthetic_result`), mirroring the stock
+120	  keepalive contract.
+121	- `config.yaml` — register `ActLoopKeepalive` via `file://` after
+122	  `CustomSelfVerifyProcessor` (`max_reprompts=6`, `completion_marker=SUCCESS`,
+123	  `min_content_chars=1`).
+124	
+125	### Evidence
+126	
+127	- regex-log (5 steps): episode ends on a 90,105-char text-only turn (no tool
+128	  call); verifier got 4 of 9 expected dates. `passed:false`.
+129	- large-scale-text-editing (2 steps, `n_output_tokens:0`): ends on a 254,265-char
+130	  text-only turn; `apply_macros.vim` never written → FileNotFoundError.
+131	- db-wal-recovery (13 steps): ends on a 104,933-char text-only turn;
+132	  `/app/recovered.json` never written.
+133	- feal (149k), filter-js-from-html (125k), adaptive-rejection-sampler (97k),
+134	  sam-cell-seg (175k), train-fasttext (212k), write-compressor (214k),
+135	  overfull-hbox (97k), llm-inference-batching (94k): biggest assistant turn
+136	  carries NO tool call (`toolInMax=False`).
+137	- Passing tasks configure-git-webserver (max 1.5k), git-leak-recovery (879),
+138	  kv-store-grpc (659): every biggest turn carries a tool call (`toolInMax=True`).
+139	- Root cause: `harnessx/core/runloop.py` ~L745 breaks on `finish_reason in
+140	  ("end_turn","stop")` + no tool calls; `CustomSelfVerifyProcessor` docstring:
+141	  "Fires at most once per task run. On the next no-tool-call turn it stays silent."
+142	
+143	### Uncertainty
+144	
+145	If the model rambles because it genuinely cannot solve the task (capability gap),
+146	extra nudges just burn steps without flipping the task — detectable next round as
+147	these tasks moving from `done` to `max_steps`/`budget_exceeded` with no filesystem
+148	progress. Rollback trigger covers this. The keepalive/nudge mechanism itself is a
+149	byte-for-byte reuse of the stock self-verify contract, validated by contract +
+150	dry_fire + a standalone async unit exercise.
+151	
+152	## Round 3 — output-artifact-aware keepalive
+153	
+154	<!-- journal:frontmatter
+155	round: 3
+156	timestamp: 2026-08-25T00:00:00Z
+157	hypothesis_id: h_output_artifact_keepalive_v1
+158	levers: [control]
+159	predicted_affected: [regex-log, large-scale-text-editing, vulnerable-secret, feal-linear-cryptanalysis, protein-assembly, sam-cell-seg]
+160	cited_candidates: [C-003]
+161	gating_outcome: reverted
+162	gating_attribution: score=2/18; +0/-2 lost=configure-git-webserver,count-dataset-tokens; score 0.1111 < incumbent(mean) 0.2222 - tol 0.0400 -> revert to R2
+163	expected_global_gain: "Closes the largest R2 failing cluster — 6 tasks whose verifier fails its FIRST precondition (declared /app/<X> output file does not exist) — by re-surfacing the task's own declared output path(s) at the terminal-stall step so the agent commits its worked-out answer to the exact file instead of ending mid-prose"
+164	regression_risk: "Low — strict superset of the accepted R2 keepalive; the 4 passing tasks never hit the terminal-stall branch (winning turns carry tool calls) so the nudge never fires for them; when no output path is extracted the nudge degrades byte-for-byte to R2's generic text, so behaviour is never worse than R2; SUCCESS completion escape hatch preserved"
+165	cost_shift: "Neutral-to-slightly-down — same bounded max_reprompts=6 as R2; a specific 'write to /app/regex.txt now' nudge tends to end the loop sooner (agent commits the file, then legitimately SUCCEEDs) rather than adding turns"
+166	rollback_trigger: "If R4 shows these 6 tasks still passed:false AND their verifier still fails on file-exists (FileNotFoundError) despite the targeted nudge, the agent is not acting on the nudge (capability/formatting gap, not a context gap) — revert to R2's ActLoopKeepalive; also revert immediately if any of the 4 R2-passing tasks regresses"
+167	-->
+168	
+169	### Why
+170	
+171	R1's context-overflow guard and R2's repeatable act-loop keepalive both landed
+172	and are load-bearing: previously instant-dying / one-prose-stall tasks now run
+173	20-100 Bash steps (R2 = 4/18, up from 3/18). A full R2 trajectory sweep found
+174	the NEW dominant terminal signature is neither instant death nor a single prose
+175	stall — it is that **the output file the task explicitly names is never written
+176	to its exact path**. Six of the fourteen failing tasks fail the verifier's very
+177	first check ("output file exists") with a `FileNotFoundError` on a `/app/<X>`
+178	path that the task description told the agent to create. The agent visibly loses
+179	track of the deliverable mid-run. This is a harness deficiency: the R2 keepalive
+180	nudges generically ("act via Bash, verify outputs"), but the specific required
+181	path is dynamic per-task context the agent stops tracking — a Control hook can
+182	extract it once at task start and re-inject it at the decisive step.
+183	
+184	### Changes
+185	
+186	- `processors/output_aware_keepalive.py` — new `OutputAwareKeepalive`
+187	  (`MultiHookProcessor`, `_order=91`, same slot R2 occupied). Strict superset of
+188	  R2's `ActLoopKeepalive`: identical repeatable-bounded keepalive contract
+189	  (synthetic keepalive tool call on a no-tool-call terminal stall; one queued
+190	  user nudge on next `on_before_model`; swallow synthetic call in
+191	  `on_before_tool`; SUCCESS escape hatch; budget exhausted → yield unchanged).
+192	  The one addition: `on_task_start` parses `task_description` for output paths
+193	  adjacent (<=40 chars) to a produce-verb (save/write/create/output/produce/
+194	  store/generate/place/put/emit), and the stall nudge names those exact paths
+195	  ("You have not confirmed these required output files exist yet: /app/regex.txt.
+196	  Write your current best result to that exact path via Bash now, then `ls -l`").
+197	  When no path extracts, the nudge is byte-for-byte R2's generic text.
+198	- `config.yaml` — replace the R2 `ActLoopKeepalive` file:// target with the R3
+199	  `OutputAwareKeepalive` (same kwargs: max_reprompts=6, completion_marker=SUCCESS,
+200	  min_content_chars=1). One-for-one swap keeps a single stall-interceptor and
+201	  preserves the +1 message-insertion contract.
+202	
+203	### Evidence
+204	
+205	- regex-log: final segment `raw_assistant` turn = 113,297 chars of prose
+206	  ("Let me think about this more carefully: 1. For the date pattern: ...") with
+207	  `tool_calls=0`; `/app/regex.txt` never created; task text "Save your regex in
+208	  /app/regex.txt"; grep count of that path in the episode = 14 (agent knew it,
+209	  never wrote it). Verifier: `assert regex_file.exists()` fails.
+210	- vulnerable-secret: L50 = 45,298-char text-only turn, L51 = 184-char
+211	  "previous response was cut off ... XORing with 0x42", then `exit_reason=error`;
+212	  `/app/results.txt` never written (`FileNotFoundError`).
+213	- large-scale-text-editing: 5 steps then `FileNotFoundError: '/app/apply_macros.vim'`;
+214	  path named explicitly in task text.
+215	- feal-linear-cryptanalysis: ends `done` on an 11,377-char summary of a failed
+216	  brute-force; the required `/app/plaintexts.txt` is never referenced in the
+217	  whole trajectory (agent drifted onto /app/pairs.txt, /app/feal.c, /app/attack.c).
+218	- protein-assembly (79 steps) / sam-cell-seg (50 steps): both end without the
+219	  declared `/app/gblock.txt` / `/app/test_output.csv`; verifier fails file-exists
+220	  first. (protein-assembly also hit a network wall for a PDB lookup — capability
+221	  gap on correctness; the nudge may still yield a best-effort file.)
+222	- Passing tasks configure-git-webserver / count-dataset-tokens / git-leak-recovery
+223	  / kv-store-grpc: winning turns carry tool calls (R2 journal `toolInMax=True`),
+224	  never enter the stall branch → nudge never fires.
+225	
+226	### Uncertainty
+227	
+228	If the agent rambles because it genuinely cannot solve the task (feal
+229	cryptanalysis, protein PDB lookup behind blocked network), a targeted nudge
+230	still produces no *correct* file — detectable next round as these tasks moving
+231	to `FileNotFoundError`-cleared but content-assertion failures, or staying red
+232	with no file. The three "answer-in-reasoning-but-uncommitted" tasks (regex-log,
+233	large-scale-text-editing, vulnerable-secret) are the higher-confidence flips.
+234	Extraction over-inclusion risk (listing an input path as an output to verify) is
+235	benign — the nudge asks to confirm existence, and existing inputs pass that
+236	check without being overwritten. Rollback trigger covers the capability-gap case.

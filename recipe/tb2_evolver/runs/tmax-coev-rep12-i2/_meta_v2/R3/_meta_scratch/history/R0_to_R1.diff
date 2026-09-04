@@ -1,0 +1,23 @@
+--- R0
++++ R1
+@@ -76,9 +76,13 @@
+   _hook_: '*'
+-# Ensure common verifier test-deps (HTTP client / config parser) are importable
+-# in the container Python before the agent exits. TB2 verifiers frequently
+-# `import requests` to probe a running HTTP server; when the base image lacks
+-# it the verifier aborts at pytest collection time (ModuleNotFoundError) and a
+-# correct solution scores 0. Fires at most once per run, only on exit-intent,
+-# and is a no-op when the module is already present.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/R0/assets/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
++# R1 (meta): ensure common verifier test-deps (HTTP client / image-video frame
++# reader / numeric+data libs / config parser) are importable in the container
++# Python. TB2 verifiers frequently `import requests` / `import imageio` / etc.
++# to probe a running server or inspect output; when the base image lacks the
++# module the verifier aborts at pytest collection time (ModuleNotFoundError)
++# and a correct solution scores 0. Revised from the prior exit-only guard:
++# it now fires ONCE EARLY (first model response) instead of only on clean
++# exit, closing the gap where tasks ending via budget_exceeded/error never
++# triggered the install. No-op when modules already present; single Bash
++# round-trip; no task-specific literals.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R1/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+   _hook_: '*'

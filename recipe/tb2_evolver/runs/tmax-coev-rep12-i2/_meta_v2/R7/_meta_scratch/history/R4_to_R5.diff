@@ -1,0 +1,75 @@
+--- R4
++++ R5
+@@ -21,17 +21,23 @@
+ processors:
+-# R4 (meta): the ONLY change this round is the system-prompt sidecar
+-# (system_prompt.txt beside this YAML). Prior rounds' config comments claimed a
+-# general-workflow prompt existed, but the shipped sidecar was still the 5-line
+-# default stub — this round actually installs the intended prompt. It is
+-# strategy-only (no task-specific literals): survey the environment and confirm
+-# exact input/output paths before coding; restate concrete deliverables and
+-# format before implementing; diagnose before retrying instead of re-running the
+-# same command; verify every required output exists at its EXACT path in the
+-# correct format the way the external checker will (exercise servers with a real
+-# client, compute expected values independently); keep required background
+-# services alive and the checker's dirs clean; always write a best-effort partial
+-# to the required path rather than leaving it empty. SiblingSystemPromptBuilder
+-# loads it. The processor pipeline is carried forward byte-for-byte from R3
+-# (file:// paths repointed to R3-local copies) so this round isolates the
+-# instruction-lever effect.
++# R5 (meta): the ONLY change this round is a single Configuration knob —
++# LengthTruncationRecoveryProcessor.repeat_threshold lowered 2 -> 1 (see below).
++# Evidence: max_tokens truncation ("finish_reason=length, no tool_calls") is a
++# near-perfect FAIL discriminator on this benchmark. R4 messages.json grep of the
++# run-loop's "cut off by the token limit / continue" nudge shows 2-18 events on
++# EACH failing truncation-loop task (task_000730=18, task_000032=16, task_000796=15,
++# task_001016=8, task_001028=7) but ~0 on passing tasks (only task_000267=1, still
++# passed). Two of these (task_000730, task_001028) fail solely because the required
++# output file was never created — the agent burned its step budget re-generating
++# truncated analysis and reached the cap empty-handed. Firing the existing hard
++# escalation nudge ("STOP … one SHORT Bash call that writes the required output
++# file(s) to the path named in the task") on the FIRST truncation instead of the
++# second pulls the file-write directive one action turn earlier — the cheapest shot
++# at landing a best-effort partial before budget_exceeded. Near-zero regression:
++# the nudge only fires on length-truncation, which passing tasks never hit. The
++# command/content-repetition guards were deliberately left untouched: passing
++# iterative tasks reach 5-6 identical full-command repeats (task_000197=6,
++# task_000716=5), overlapping the failing loops, so tightening them carries real
++# regression risk that the truncation signal does not. All processors carried
++# forward from R4 byte-for-byte (meta file:// paths repointed to R5-local copies);
++# system_prompt.txt sidecar copied into R5/.
+ - _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+@@ -59,4 +65,11 @@
+ # Without this, one stuck task can block an entire evolve round.
++# R5 (meta): repeat_threshold lowered 2 -> 1 so the hard escalation nudge
++# (which directs the model to write the required output file to its exact path
++# with ONE short Bash call) fires on the FIRST truncation rather than the second.
++# Rationale + evidence in the pipeline header above. Gated strictly on
++# finish_reason=length & no tool_calls, a condition ~absent on passing tasks, so
++# regression risk is minimal; targets tasks that reach the step cap empty-handed
++# (task_000730, task_001028 both fail on a missing required output file).
+ - _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+-  repeat_threshold: 2
++  repeat_threshold: 1
+   head_chars: 1200
+@@ -68,4 +81,4 @@
+ # nudge. Mutates messages by at most +1 user turn per chain; no task-specific
+-# literals. Carried forward byte-for-byte (repointed to R4-local copy).
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
++# literals. Carried forward byte-for-byte (repointed to R5-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R5/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
+   repeat_threshold: 3
+@@ -78,4 +91,4 @@
+ # injects an escalating nudge. +1 user turn per armed streak; no task-specific
+-# literals. Carried forward byte-for-byte (repointed to R4-local copy).
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
++# literals. Carried forward byte-for-byte (repointed to R5-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R5/processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
+   repeat_threshold: 4
+@@ -110,4 +123,4 @@
+ # present; single Bash round-trip; no task-specific literals. Carried forward
+-# byte-for-byte (repointed to R4-local copy).
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
++# byte-for-byte (repointed to R5-local copy).
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R5/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+   _hook_: '*'

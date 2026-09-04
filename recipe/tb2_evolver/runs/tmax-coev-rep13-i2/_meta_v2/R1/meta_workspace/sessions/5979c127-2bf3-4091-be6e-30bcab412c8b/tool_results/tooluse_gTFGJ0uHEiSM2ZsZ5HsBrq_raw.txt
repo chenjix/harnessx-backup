@@ -1,0 +1,25 @@
+CMD: {"command": "head -20 /app/events.txt"}
+CMD: {"command": "ls -la /app/dashcam.mp4 && which ffmpeg"}
+CMD: {"command": "cat > /app/server.py << 'EOF'\n#!/usr/bin/env python3\nimport hashlib\nimport json\nimport re\nfrom http.server import HTTPServer, BaseHTTPRequestHandler\nfrom urllib.parse import urlpars
+CMD: {"command": "python3 /app/server.py &\nsleep 2\necho \"Server started\"", "timeout": 10000}
+CMD: {"command": "sed -i 's/duplicated_events/deduplicated_events/g' /app/server.py"}
+CMD: {"command": "pkill -f \"python3 /app/server.py\" 2>/dev/null || true\nsleep 1\npython3 /app/server.py &\nsleep 2\necho \"Server started\"", "timeout": 10000}
+CMD: {"command": "python3 /app/server.py &\nsleep 2\ncurl -s \"http://127.0.0.1:8000/query?t=0\"", "timeout": 15000}
+CMD: {"command": "grep -n \"dededuplicated\" /app/server.py"}
+CMD: {"command": "sed -i 's/dededuplicated_events/deduplicated_events/g' /app/server.py"}
+CMD: {"command": "grep -n \"deduplicated\" /app/server.py | head -5"}
+CMD: {"command": "pkill -f \"python3 /app/server.py\" 2>/dev/null || true\nsleep 1\npython3 /app/server.py &\nsleep 2\necho \"Server started\"", "timeout": 10000}
+CMD: {"command": "python3 /app/server.py &\nsleep 2\necho \"Server started\"", "timeout": 10000}
+CMD: {"command": "python3 -c \"\nimport urllib.request\nimport json\n\n# Test query for t=0\nreq = urllib.request.urlopen('http://127.0.0.1:8000/query?t=0')\nprint('Response for t=0:')\nprint(req.read().de
+CMD: {"command": "python3 -c \"\nimport urllib.request\nimport json\n\n# Test query for t=2\nreq = urllib.request.urlopen('http://127.0.0.1:8000/query?t=2')\nprint('Response for t=2:')\nprint(req.read().de
+CMD: {"command": "python3 -c \"\nimport urllib.request\nimport urllib.error\n\n# Test query for t=-1 (should return 404)\ntry:\n    req = urllib.request.urlopen('http://127.0.0.1:8000/query?t=-1')\n    pri
+CMD: {"command": "cat /app/events.txt"}
+CMD: {"command": "python3 -c \"\nimport urllib.request\n\n# Test query for t=3 (should match offset 2, not 3 since 3 is a duplicate)\nreq = urllib.request.urlopen('http://127.0.0.1:8000/query?t=3')\nprint(
+CMD: {"command": "python3 -c \"\nimport urllib.request\n\n# Test query for t=6 (should match offset 5, not 6 since 6 is a duplicate)\nreq = urllib.request.urlopen('http://127.0.0.1:8000/query?t=6')\nprint(
+CMD: {"command": "python3 -c \"\nimport urllib.request\n\n# Test query for t=8 (should match offset 8)\nreq = urllib.request.urlopen('http://127.0.0.1:8000/query?t=8')\nprint('Response for t=8:')\nprint(re
+CMD: {"command": "ps aux | grep python"}
+CMD: {"command": "python3 -c \"\nimport urllib.request\nimport urllib.error\nimport json\n\nprint('=== Testing HTTP Server ===')\nprint()\n\n# Test 1: t=0 (first event)\nprint('Test 1: t=0')\nreq = urllib.
+CMD: {"command": "ps aux | grep \"python3 /app/server.py\" | grep -v grep"}
+CMD: {}
+CMD: {"command": "# Check server is still running\nps aux | grep \"python3 /app/server.py\" | grep -v grep"}
+CMD: {"command": "python3 -c \"\nimport urllib.request\nimport json\n\n# Final test\nreq = urllib.request.urlopen('http://127.0.0.1:8000/query?t=5')\ndata = json.loads(req.read().decode())\nprint('Final te

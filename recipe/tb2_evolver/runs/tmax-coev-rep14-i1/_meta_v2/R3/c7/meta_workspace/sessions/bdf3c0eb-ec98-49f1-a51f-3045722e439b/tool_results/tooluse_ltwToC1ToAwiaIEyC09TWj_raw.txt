@@ -1,0 +1,72 @@
+109	        self._flag.clear()
+110	        yield event
+111	
+112	    def _run_targets_and_args(self, cmd: str):
+113	        """Return (is_run, referenced_path_tokens) for a command.
+114	
+115	        is_run  -> command invokes a script/program (interpreter, ./x).
+116	        tokens  -> file-path-looking argument tokens (contain '/' or '.').
+117	        """
+118	        is_run = bool(_INTERP_RE.search(cmd) or _EXEC_LOCAL_RE.search(cmd))
+119	        if not is_run:
+120	            return False, []
+121	        tokens: list[str] = []
+122	        # Split on shell separators; inspect each simple command segment.
+123	        for seg in re.split(r"[;&|]{1,2}|\n", cmd):
+124	            seg = seg.strip()
+125	            if not seg:
+126	                continue
+127	            try:
+128	                parts = shlex.split(seg)
+129	            except ValueError:
+130	                parts = seg.split()
+131	            for tok in parts:
+132	                if tok.startswith("-"):
+133	                    continue
+134	                # path-looking: has a slash or a dotted filename
+135	                if "/" in tok or re.search(r"\.\w{1,5}$", tok):
+136	                    tokens.append(tok)
+137	        return is_run, tokens
+138	
+139	    async def on_before_tool(self, event: ToolCallEvent):
+140	        if event.tool_name != "Bash":
+141	            yield event
+142	            return
+143	        cmd = event.tool_input.get("command", "") or ""
+144	
+145	        # 1) record fabricated paths from any writes in this command
+146	        for p in _looks_written(cmd):
+147	            self._written.add(p)
+148	            self._written_base.add(_basename(p))
+149	
+150	        # 2) detect a run that references only fabricated inputs
+151	        if self._fires < self.max_fires and len(self._written) >= self.min_writes:
+152	            is_run, tokens = self._run_targets_and_args(cmd)
+153	            # Paths this same command writes to (stdout/log redirect targets,
+154	            # tee, sed -i) are OUTPUTS of the run, not fabricated INPUTS fed
+155	            # to the deliverable — never count them as a self-fabricated input.
+156	            cur_outputs = _looks_written(cmd)
+157	            cur_output_base = {_basename(o) for o in cur_outputs}
+158	            if is_run and tokens:
+159	                # separate the executable target(s) from the data args:
+160	                # a fabricated input is a referenced path that matches a
+161	                # path we wrote to (full or basename), but is NOT the
+162	                # deliverable being executed.
+163	                fab_hits: set[str] = set()
+164	                real_hits: set[str] = set()
+165	                for tok in tokens:
+166	                    base = _basename(tok)
+167	                    # skip tokens that are this command's own output targets
+168	                    if tok in cur_outputs or base in cur_output_base:
+169	                        continue
+170	                    is_fab = tok in self._written or base in self._written_base
+171	                    if is_fab:
+172	                        fab_hits.add(tok)
+173	                    else:
+174	                        real_hits.add(tok)
+175	                # Fire only when at least one fabricated INPUT is used AND
+176	                # no pre-existing (non-fabricated, non-deliverable) input
+177	                # is referenced. The deliverable script is itself fabricated,
+178	                # so require >=2 fabricated hits (script + input) OR one
+
+[Showing lines 109–178 of 202 total. Use offset=178 to read the next section.]

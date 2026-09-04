@@ -1,0 +1,25 @@
+--- R1
++++ R2
+@@ -60,2 +60,22 @@
+   _hook_: '*'
++# R2: warn-only escalating breaker for IDENTICAL-command repetition loops. R1's
++# de-prime broke the pure-narration (finish_reason=length) loop, but the same
++# budget_exceeded cluster then re-manifested as the model re-issuing the EXACT
++# same Bash command turn after turn (958=33/33 identical, 1818=27/29, 1032=25/29,
++# 264=21 consecutive identical `cat > /tmp/test.sql` writes) while never producing
++# the required deliverables. The stock LengthLoopDeprime doesn't fire (these turns
++# aren't length-truncated) and CustomEditToolProcessor's generic "try something
++# different" warning fired 3x on 264 and was ignored. This processor gives an
++# ESCALATING, deliverable-grounded directive (verify/produce the required output
++# artifacts, don't re-run the same command). It is deliberately WARN-ONLY (never
++# raises LoopDetectedError): two currently-PASSING tasks (536, 1089) issue 27
++# consecutive identical commands and still pass — a hard raise would regress them.
++# Contract-safe: only appends to the current ToolResultEvent.result in
++# on_after_tool; never touches messages/history/system prompt.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R2/processors/repeated_command_breaker.py::RepeatedCommandBreakerProcessor
++  warn_at: 3
++  escalate_at: 5
++  window_size: 12
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

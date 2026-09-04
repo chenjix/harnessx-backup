@@ -1,0 +1,58 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	from __future__ import annotations
+4	
+5	import dataclasses
+6	import re
+7	
+8	from ...core.events import ToolCallEvent
+9	from ...core.processor import MultiHookProcessor
+10	
+11	# Matches installation/build commands that end up backgrounded:
+12	#   apt-get install ... &
+13	#   pip install ... &
+14	#   npm install ... &
+15	#   make ... &  /  cargo build ... &
+16	# Looks for the pattern anywhere in the command (multiline shell scripts too).
+17	#
+18	# The trailing & must be a *standalone* background operator, not:
+19	#   - &&  (logical AND)  — excluded by (?!&) lookahead
+20	#   - >&  or  2>&1       — excluded by (?<![>0-9]) lookbehind
+21	_BG_INSTALL_RE = re.compile(
+22	    r"(?:apt(?:-get)?|pip3?|npm|yarn|pnpm|make|cargo|mvn|gradle|cmake)\b"
+23	    r"[^\n]*(?<![&>0-9])&(?!&)\s*(?:#[^\n]*)?\n?",
+24	)
+25	
+26	_WARNING = (
+27	    "[BgInstallGuard] This command has an unpredictable runtime — do not run it in the background. "
+28	    "Either (a) remove the '&' and run it synchronously, or "
+29	    "(b) if you must background it, wrap it with an explicit timeout: `timeout <N> <cmd> &`. "
+30	    "Backgrounding commands without a timeout can leave them running after your session ends, "
+31	    "which will interfere with the verifier."
+32	)
+33	
+34	
+35	class BgInstallGuard(MultiHookProcessor):
+36	    """Intercept Bash calls that run package installation/build in the background.
+37	
+38	    When detected, the tool call is blocked and a corrective message is injected
+39	    as the tool result so the model retries without the ``&``.
+40	    """
+41	
+42	    _singleton_group = "bg_install_guard"
+43	    _order = 15  # run early, before tools execute
+44	
+45	    async def on_before_tool(self, event: ToolCallEvent):
+46	        if event.tool_name != "Bash":
+47	            yield event
+48	            return
+49	
+50	        command = event.tool_input.get("command", "")
+51	        if _BG_INSTALL_RE.search(command):
+52	            yield dataclasses.replace(
+53	                event,
+54	                approved=False,
+55	                synthetic_result=_WARNING,
+56	            )
+57	        else:
+58	            yield event

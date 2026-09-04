@@ -1,0 +1,80 @@
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""ComputeCrossCheckReminder — a TB2 Control-lever processor.
+
+Problem it addresses
+--------------------
+On computational tasks (regression, bootstrap/CI, clustering/centroids,
+matrix/DP recurrences, optimisation search, Monte-Carlo simulation, …) the
+agent frequently writes ONE implementation, runs it ONCE, sees a
+plausible-looking number, and exits after a *format-only* self-verification.
+The committed value is self-consistent but numerically wrong (deterministic
+computation bug, off-by-one, seed/draw-order, parsing, precision). The stock
+``CustomSelfVerifyProcessor`` checklist nudges "confirm the values are
+semantically correct" but never asks the agent to *re-derive the key result
+with an independent method* — the one discipline that would surface a
+deterministic computation bug (e.g. an OLS slope that any second correct
+implementation would disagree with).
+
+Mechanism
+---------
+This processor rides on top of the existing self-verify mechanism instead of
+competing with it for exit-intent. When the ``_tb2_self_verify`` synthetic
+ACK tool-result flows through ``on_after_tool`` on an *armed* task, it appends
+one extra cross-validation directive to that result string and disarms.
+
+Contract-safety: it mutates ONLY the tool-result ``result`` string (same shape
+as ``CustomEditToolProcessor``); it inserts no messages, touches no system
+prompt, and fires at most once per task. Arming is by generic
+numeric-computation keywords in the task description — no task-specific
+literals, ids, constants, paths, or code.
+
+Retroactive intent: corrective. On a deterministic computation (OLS slope,
+DP-matrix value, centroid) an *independent* recompute disagrees with the buggy
+committed value, giving the agent a concrete reason to look for the bug before
+exiting rather than declaring "the values make sense".
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import re
+
+from harnessx.core.events import (
+    TaskEndEvent,
+    TaskStartEvent,
+    ToolResultEvent,
+)
+from harnessx.core.processor import MultiHookProcessor
+
+# The synthetic self-verify tool name used by CustomSelfVerifyProcessor.
+_SELF_VERIFY_TOOL = "_tb2_self_verify"
+
+# Generic signals that the task commits a *computed numeric result*. Kept
+# deliberately broad-but-numeric so pure text/formatting tasks are not armed.
+# No task-specific literals — these are domain-agnostic computation terms.
+_COMPUTE_TERMS = (
+    "regression",
+    "least squares",
+    "ols",
+    "slope",
+    "coefficient",
+    "bootstrap",
+    "confidence interval",
+    "percentile",
+    "quantile",
+    "monte carlo",
+    "monte-carlo",
+    "resample",
+    "simulation",
+    "simulate",
+    "integrat",          # integrate / integrator / integration
+    "residual",
+    "centroid",
+    "cluster",
+    "k-means",
+    "kmeans",
+    "distance metric",
+    "similarity",
+    "eigen",
+    "gradient",

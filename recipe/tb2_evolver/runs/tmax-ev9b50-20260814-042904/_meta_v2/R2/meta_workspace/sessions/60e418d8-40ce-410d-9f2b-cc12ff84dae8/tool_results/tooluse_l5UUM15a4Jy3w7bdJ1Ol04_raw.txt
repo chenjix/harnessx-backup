@@ -1,0 +1,412 @@
+1	#!/usr/bin/env python3
+2	"""Evaluate a model on Tmax taxonomy tasks (train-on-test for tmax_only200).
+3	
+4	Does NOT use Terminal-Bench / Harbor. Pipeline per task:
+5	
+6	  1. Singularity container_def → Docker image (cached)
+7	  2. Start container, optional pytest test_initial_state
+8	  3. Agent loop (vLLM + Bash tool) with taxonomy ``description``
+9	  4. pytest test_final_state → reward 0/1
+10	
+11	Usage (vLLM already up, or via scripts/evaluate_tmax.sh)::
+12	
+13	  python -m recipe.tmax_eval.run_eval \\
+14	    --tasks-json recipe/tb2_evolver/tasks_tmax_only200.json \\
+15	    --job-name tmax-base9b \\
+16	    --api-base http://127.0.0.1:8300/v1 \\
+17	    --model Qwen/Qwen3.5-9B
+18	"""
+19	from __future__ import annotations
+20	
+21	import argparse
+22	import json
+23	import os
+24	import sys
+25	import threading
+26	import time
+27	import traceback
+28	from concurrent.futures import ThreadPoolExecutor, as_completed
+29	from pathlib import Path
+30	from typing import Any
+31	
+32	from . import agent_loop, docker_env
+33	
+34	ROOT = Path(__file__).resolve().parents[2]
+35	DEFAULT_ENVS = (
+36	    ROOT
+37	    / "recipe/tb2_sft/data/qwen35_9b_tmax_only200/eval_task_set_with_envs.jsonl"
+38	)
+39	DEFAULT_TASKS = ROOT / "recipe/tb2_evolver/tasks_tmax_only200.json"
+40	
+41	
+42	def _load_task_ids(path: Path) -> list[str]:
+43	    obj = json.loads(path.read_text())
+44	    if isinstance(obj, list):
+45	        return [str(x) for x in obj]
+46	    if isinstance(obj, dict):
+47	        if "task_ids" in obj:
+48	            return [str(x) for x in obj["task_ids"]]
+49	        if "tasks" in obj and obj["tasks"] and isinstance(obj["tasks"][0], str):
+50	            return [str(x) for x in obj["tasks"]]
+51	        if "tasks" in obj and obj["tasks"] and isinstance(obj["tasks"][0], dict):
+52	            return [str(t["task_id"]) for t in obj["tasks"]]
+53	    raise SystemExit(f"unrecognized tasks json shape: {path}")
+54	
+55	
+56	def _load_envs(path: Path) -> dict[str, dict[str, Any]]:
+57	    out: dict[str, dict[str, Any]] = {}
+58	    with path.open() as f:
+59	        for line in f:
+60	            if not line.strip():
+61	                continue
+62	            row = json.loads(line)
+63	            out[str(row["task_id"])] = row
+64	    return out
+65	
+66	
+67	def _endpoints(args: argparse.Namespace) -> list[str]:
+68	    if args.endpoints_file:
+69	        eps = json.loads(Path(args.endpoints_file).read_text())
+70	        return [str(e) for e in eps]
+71	    env_file = os.environ.get("TB2_ENDPOINTS_FILE")
+72	    if env_file and Path(env_file).is_file():
+73	        return [str(e) for e in json.loads(Path(env_file).read_text())]
+74	    base = args.api_base or os.environ.get("TB2_API_BASE")
+75	    if not base:
+76	        raise SystemExit("need --api-base or --endpoints-file or TB2_ENDPOINTS_FILE")
+77	    return [base]
+78	
+79	
+80	def _model_name(args: argparse.Namespace) -> str:
+81	    return args.model or os.environ.get("TB2_MODEL") or os.environ.get("MODEL") or ""
+82	
+83	
+84	def _resolve_system_prompt(
+85	    harness_config: Path | None,
+86	    system_prompt_file: Path | None,
+87	) -> str | None:
+88	    """Resolve Tmax agent system prompt for an evolve round.
+89	
+90	    Preference order:
+91	      1. --system-prompt-file
+92	      2. system_prompt.txt next to harness config (MetaAgent can write this)
+93	      3. templates/*.j2 under the harness config directory
+94	      4. None → agent_loop default
+95	    """
+96	    if system_prompt_file is not None and system_prompt_file.is_file():
+97	        return system_prompt_file.read_text(encoding="utf-8")
+98	    if harness_config is not None:
+99	        cfg = Path(harness_config).resolve()
+100	        sibling = cfg.parent / "system_prompt.txt"
+101	        if sibling.is_file():
+102	            return sibling.read_text(encoding="utf-8")
+103	        templates = cfg.parent / "templates"
+104	        if templates.is_dir():
+105	            j2s = sorted(templates.glob("*.j2"))
+106	            if j2s:
+107	                return j2s[0].read_text(encoding="utf-8")
+108	    env_prompt = (os.environ.get("TMAX_SYSTEM_PROMPT_FILE") or "").strip()
+109	    if env_prompt and Path(env_prompt).is_file():
+110	        return Path(env_prompt).read_text(encoding="utf-8")
+111	    return None
+112	
+113	
+114	def run_one(
+115	    task: dict[str, Any],
+116	    *,
+117	    api_base: str,
+118	    model: str,
+119	    work_root: Path,
+120	    out_dir: Path,
+121	    max_steps: int,
+122	    temperature: float,
+123	    rebuild: bool,
+124	    skip_initial: bool,
+125	    keep_container: bool,
+126	    network: str,
+127	    system_prompt: str | None = None,
+128	) -> dict[str, Any]:
+129	    tid = task["task_id"]
+130	    t0 = time.time()
+131	    result: dict[str, Any] = {
+132	        "task_id": tid,
+133	        "domain": task.get("domain"),
+134	        "reward": 0,
+135	        "status": "error",
+136	        "elapsed_s": 0,
+137	        "api_base": api_base,
+138	        "model": model,
+139	    }
+140	    container = None
+141	    try:
+142	        image = docker_env.build_image(
+143	            tid, task["container_def"], work_root, rebuild=rebuild
+144	        )
+145	        result["image"] = image
+146	        container = docker_env.start_container(tid, image, network=network)
+147	        result["container"] = container
+148	
+149	        if not skip_initial and task.get("test_initial_state"):
+150	            init = docker_env.run_pytest(
+151	                container,
+152	                task["test_initial_state"],
+153	                dest="/tmp/test_initial_state.py",
+154	            )
+155	            result["initial_pytest"] = {
+156	                "passed": init["passed"],
+157	                "rc": init["rc"],
+158	                "output_tail": init["output"][-1500:],
+159	            }
+160	            if not init["passed"]:
+161	                # Still continue — some fixtures are agent-facing checks; but
+162	                # record the failure for diagnosis.
+163	                result["initial_pytest_failed"] = True
+164	
+165	        def _exec(cmd: str, timeout: float) -> tuple[int, str]:
+166	            return docker_env.exec_in(container, cmd, timeout=timeout)
+167	
+168	        agent = agent_loop.run_agent(
+169	            api_base=api_base,
+170	            model=model,
+171	            instruction=str(task["description"]),
+172	            exec_fn=_exec,
+173	            max_steps=max_steps,
+174	            temperature=temperature,
+175	            api_key=os.environ.get("TB2_API_KEY", "EMPTY"),
+176	            system_prompt=system_prompt,
+177	        )
+178	        result["agent"] = {
+179	            "steps": agent.steps,
+180	            "finished": agent.finished,
+181	            "error": agent.error,
+182	        }
+183	        # Persist transcript (truncate tool outputs already capped).
+184	        (out_dir / f"{tid}.messages.json").write_text(
+185	            json.dumps(agent.messages, indent=2, ensure_ascii=False) + "\n"
+186	        )
+187	
+188	        final = docker_env.run_pytest(
+189	            container,
+190	            task["test_final_state"],
+191	            dest="/tmp/test_final_state.py",
+192	        )
+193	        result["final_pytest"] = {
+194	            "passed": final["passed"],
+195	            "rc": final["rc"],
+196	            "output_tail": final["output"][-2000:],
+197	        }
+198	        result["reward"] = 1 if final["passed"] else 0
+199	        result["status"] = "ok" if agent.error is None else "agent_error"
+200	    except Exception as e:
+201	        result["status"] = "error"
+202	        result["error"] = f"{type(e).__name__}: {e}"
+203	        result["traceback"] = traceback.format_exc()[-3000:]
+204	    finally:
+205	        if container and not keep_container:
+206	            try:
+207	                docker_env.stop_container(container)
+208	            except Exception:
+209	                pass
+210	        result["elapsed_s"] = round(time.time() - t0, 1)
+211	        (out_dir / f"{tid}.result.json").write_text(
+212	            json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+213	        )
+214	        # Trial-dir layout expected by harness evolve (read_per_task_results).
+215	        trial = out_dir / tid
+216	        trial.mkdir(parents=True, exist_ok=True)
+217	        tb2_shaped = {
+218	            "task_name": tid,
+219	            "task_id": tid,
+220	            "verifier_result": {"rewards": {"reward": float(result.get("reward") or 0)}},
+221	            "reward": result.get("reward"),
+222	            "status": result.get("status"),
+223	            "elapsed_s": result.get("elapsed_s"),
+224	            "error": result.get("error"),
+225	            "agent": result.get("agent"),
+226	            "final_pytest": result.get("final_pytest"),
+227	            "model": model,
+228	        }
+229	        (trial / "result.json").write_text(
+230	            json.dumps(tb2_shaped, indent=2, ensure_ascii=False) + "\n"
+231	        )
+232	        msg_src = out_dir / f"{tid}.messages.json"
+233	        if msg_src.is_file():
+234	            (trial / "messages.json").write_text(msg_src.read_text())
+235	    return result
+236	
+237	
+238	def main(argv: list[str] | None = None) -> int:
+239	    ap = argparse.ArgumentParser(description=__doc__)
+240	    ap.add_argument("--tasks-json", type=Path, default=DEFAULT_TASKS)
+241	    ap.add_argument("--envs-jsonl", type=Path, default=DEFAULT_ENVS)
+242	    ap.add_argument("--job-name", required=True)
+243	    ap.add_argument("--jobs-dir", type=Path, default=ROOT / ".benchmarks/tmax")
+244	    ap.add_argument("--work-root", type=Path, default=ROOT / ".tmax_eval_work")
+245	    ap.add_argument("--api-base", default=None)
+246	    ap.add_argument("--endpoints-file", default=None)
+247	    ap.add_argument("--model", default=None)
+248	    ap.add_argument("--max-steps", type=int, default=int(os.environ.get("TMAX_MAX_STEPS", "80")))
+249	    ap.add_argument("--temperature", type=float, default=float(os.environ.get("TB2_TEMPERATURE", "0")))
+250	    ap.add_argument("--concurrent", type=int, default=int(os.environ.get("TMAX_CONCURRENT", "1")))
+251	    ap.add_argument("--limit", type=int, default=0, help="only first N tasks (debug)")
+252	    ap.add_argument("--task-id", action="append", default=[], help="run only these task ids")
+253	    ap.add_argument("--rebuild-images", action="store_true")
+254	    ap.add_argument("--skip-initial", action="store_true")
+255	    ap.add_argument("--keep-container", action="store_true")
+256	    ap.add_argument("--network", default=os.environ.get("TMAX_DOCKER_NETWORK", "bridge"))
+257	    ap.add_argument("--resume", action="store_true", help="skip tasks with existing result.json")
+258	    ap.add_argument(
+259	        "--harness-config",
+260	        type=Path,
+261	        default=None,
+262	        help="Optional HarnessConfig YAML; Tmax agent uses sibling system_prompt.txt if present",
+263	    )
+264	    ap.add_argument(
+265	        "--system-prompt-file",
+266	        type=Path,
+267	        default=None,
+268	        help="Override system prompt text file for the Tmax Bash agent",
+269	    )
+270	    args = ap.parse_args(argv)
+271	
+272	    model = _model_name(args)
+273	    if not model:
+274	        raise SystemExit("model name required (--model or TB2_MODEL)")
+275	    endpoints = _endpoints(args)
+276	    task_ids = _load_task_ids(args.tasks_json)
+277	    if args.task_id:
+278	        want = set(args.task_id)
+279	        task_ids = [t for t in task_ids if t in want]
+280	    if args.limit and args.limit > 0:
+281	        task_ids = task_ids[: args.limit]
+282	
+283	    envs = _load_envs(args.envs_jsonl)
+284	    missing = [t for t in task_ids if t not in envs]
+285	    if missing:
+286	        raise SystemExit(
+287	            f"{len(missing)} task ids missing from {args.envs_jsonl}: {missing[:5]}"
+288	        )
+289	
+290	    system_prompt = _resolve_system_prompt(args.harness_config, args.system_prompt_file)
+291	
+292	    out_dir = args.jobs_dir / args.job_name
+293	    out_dir.mkdir(parents=True, exist_ok=True)
+294	    args.work_root.mkdir(parents=True, exist_ok=True)
+295	
+296	    # Claim queue with round-robin endpoints.
+297	    lock = threading.Lock()
+298	    results: list[dict[str, Any]] = []
+299	    pending = []
+300	    for i, tid in enumerate(task_ids):
+301	        rpath = out_dir / f"{tid}.result.json"
+302	        if args.resume and rpath.is_file():
+303	            try:
+304	                prev = json.loads(rpath.read_text())
+305	                if prev.get("status") in ("ok", "agent_error") and "reward" in prev:
+306	                    results.append(prev)
+307	                    print(f"[skip] {tid} (resume reward={prev.get('reward')})")
+308	                    continue
+309	            except Exception:
+310	                pass
+311	        pending.append((tid, endpoints[i % len(endpoints)]))
+312	
+313	    print(
+314	        f"[tmax_eval] job={args.job_name} model={model} tasks={len(pending)} "
+315	        f"(resume_kept={len(results)}) endpoints={len(endpoints)} "
+316	        f"concurrent={args.concurrent}"
+317	    )
+318	
+319	    def _worker(item: tuple[str, str]) -> dict[str, Any]:
+320	        tid, api_base = item
+321	        print(f"[start] {tid} @ {api_base}")
+322	        res = run_one(
+323	            envs[tid],
+324	            api_base=api_base,
+325	            model=model,
+326	            work_root=args.work_root,
+327	            out_dir=out_dir,
+328	            max_steps=args.max_steps,
+329	            temperature=args.temperature,
+330	            rebuild=args.rebuild_images,
+331	            skip_initial=args.skip_initial,
+332	            keep_container=args.keep_container,
+333	            network=args.network,
+334	            system_prompt=system_prompt,
+335	        )
+336	        print(
+337	            f"[done]  {tid} reward={res.get('reward')} status={res.get('status')} "
+338	            f"in {res.get('elapsed_s')}s"
+339	        )
+340	        return res
+341	
+342	    if args.concurrent <= 1:
+343	        for item in pending:
+344	            results.append(_worker(item))
+345	    else:
+346	        with ThreadPoolExecutor(max_workers=args.concurrent) as ex:
+347	            futs = [ex.submit(_worker, item) for item in pending]
+348	            for fut in as_completed(futs):
+349	                with lock:
+350	                    results.append(fut.result())
+351	
+352	    # Summary
+353	    by_id = {r["task_id"]: r for r in results}
+354	    ordered = [by_id[t] for t in task_ids if t in by_id]
+355	    passed = sum(1 for r in ordered if r.get("reward") == 1)
+356	    total = len(ordered)
+357	    summary = {
+358	        "job_name": args.job_name,
+359	        "model": model,
+360	        "n_tasks": total,
+361	        "n_passed": passed,
+362	        "pass_rate": (passed / total) if total else 0.0,
+363	        "tasks_json": str(args.tasks_json),
+364	        "envs_jsonl": str(args.envs_jsonl),
+365	        "by_domain": {},
+366	        "results": [
+367	            {
+368	                "task_id": r["task_id"],
+369	                "reward": r.get("reward"),
+370	                "status": r.get("status"),
+371	                "domain": r.get("domain"),
+372	                "elapsed_s": r.get("elapsed_s"),
+373	                "error": r.get("error"),
+374	            }
+375	            for r in ordered
+376	        ],
+377	    }
+378	    from collections import defaultdict
+379	
+380	    dom: dict[str, list[int]] = defaultdict(list)
+381	    for r in ordered:
+382	        dom[str(r.get("domain") or "?")].append(int(r.get("reward") or 0))
+383	    summary["by_domain"] = {
+384	        d: {"passed": sum(v), "total": len(v)} for d, v in sorted(dom.items())
+385	    }
+386	    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+387	    # Aggregate result.json in the shape TB2RoundAdapter.read_round_score expects.
+388	    (out_dir / "result.json").write_text(
+389	        json.dumps(
+390	            {
+391	                "stats": {
+392	                    "metrics": [{"mean": summary["pass_rate"]}],
+393	                    "n_passed": passed,
+394	                    "n_tasks": total,
+395	                }
+396	            },
+397	            indent=2,
+398	        )
+399	        + "\n"
+400	    )
+401	    print(
+402	        f"\n===== {args.job_name}: {passed}/{total} "
+403	        f"({100*summary['pass_rate']:.1f}%) ====="
+404	    )
+405	    for d, s in summary["by_domain"].items():
+406	        print(f"  {d:24s} {s['passed']}/{s['total']}")
+407	    print(f"summary: {out_dir / 'summary.json'}")
+408	    return 0
+409	
+410	
+411	if __name__ == "__main__":
+412	    sys.exit(main())

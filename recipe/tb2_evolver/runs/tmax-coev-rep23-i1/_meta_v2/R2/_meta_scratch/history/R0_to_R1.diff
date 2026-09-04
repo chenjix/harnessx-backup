@@ -1,0 +1,16 @@
+--- R0
++++ R1
+@@ -49,2 +49,13 @@
+   _hook_: '*'
++# Break degenerate "same command -> same output" tool-call loops (agent DOES
++# emit tool calls, but byte-identical ones with identical results, e.g.
++# repeating `kill -9 ...` on unkillable zombies dozens of times). The
++# LengthTruncationRecovery above only covers finish_reason=length with NO tool
++# call, so it never fires on these. This processor injects a corrective,
++# benchmark-agnostic nudge after 4 consecutive identical (command,result)
++# pairs and NEVER terminates the run, so it cannot kill a late-recovering task.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep23-i1/_meta_v2/R1/c4/processors/repeat_command_breaker.py::RepeatCommandBreakerProcessor
++  repeat_threshold: 4
++  tool_name: Bash
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor

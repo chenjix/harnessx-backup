@@ -1,0 +1,47 @@
+381	                output_tokens = chunk.usage.completion_tokens or 0
+382	
+383	            if not chunk.choices:
+384	                continue
+385	            delta = chunk.choices[0].delta
+386	            if chunk.choices[0].finish_reason:
+387	                finish_reason = chunk.choices[0].finish_reason
+388	
+389	            if delta.content:
+390	                content_parts.append(delta.content)
+391	
+392	            if delta.tool_calls:
+393	                for tc_delta in delta.tool_calls:
+394	                    idx = tc_delta.index
+395	                    if idx not in tc_accum:
+396	                        tc_accum[idx] = {"id": "", "name": "", "arguments_parts": []}
+397	                    if tc_delta.id:
+398	                        tc_accum[idx]["id"] = tc_delta.id
+399	                    if tc_delta.function:
+400	                        if tc_delta.function.name:
+401	                            tc_accum[idx]["name"] = tc_delta.function.name
+402	                        if tc_delta.function.arguments:
+403	                            tc_accum[idx]["arguments_parts"].append(tc_delta.function.arguments)
+404	
+405	        full_content = "".join(content_parts)
+406	
+407	        # Strip <think>...</think> blocks (QwQ-32B reasoning) → move to thinking field
+408	        thinking = ""
+409	        think_match = _re.search(r"<think>(.*?)</think>", full_content, _re.DOTALL)
+410	        if think_match:
+411	            thinking = think_match.group(1).strip()
+412	            full_content = _re.sub(r"<think>.*?</think>", "", full_content, flags=_re.DOTALL).strip()
+413	
+414	        # Build tool calls from accumulated deltas
+415	        from ..core.events import ToolCall
+416	
+417	        tool_calls = []
+418	        for idx in sorted(tc_accum):
+419	            tc = tc_accum[idx]
+420	            args_str = "".join(tc["arguments_parts"])
+421	            try:
+422	                args = _json.loads(args_str) if args_str else {}
+423	            except _json.JSONDecodeError:
+424	                args = {"raw": args_str}
+425	            tool_calls.append(ToolCall(id=tc["id"], name=tc["name"], input=args))
+
+[Showing lines 381–425 of 446 total. Use offset=425 to read the next section.]

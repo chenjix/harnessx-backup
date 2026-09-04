@@ -1,0 +1,92 @@
+1	"""Docker build / run / exec helpers for one Tmax taxonomy task."""
+2	from __future__ import annotations
+3	
+4	import hashlib
+5	import os
+6	import subprocess
+7	import time
+8	from pathlib import Path
+9	from typing import Any
+10	
+11	from .singularity_to_dockerfile import materialize_build_context
+12	
+13	
+14	def _run(
+15	    cmd: list[str],
+16	    *,
+17	    timeout: float | None = None,
+18	    cwd: Path | None = None,
+19	) -> subprocess.CompletedProcess[str]:
+20	    return subprocess.run(
+21	        cmd,
+22	        text=True,
+23	        capture_output=True,
+24	        timeout=timeout,
+25	        cwd=str(cwd) if cwd else None,
+26	    )
+27	
+28	
+29	def image_tag(task_id: str, container_def: str) -> str:
+30	    h = hashlib.sha1(container_def.encode()).hexdigest()[:12]
+31	    safe = task_id.replace("/", "_")
+32	    return f"tmax-eval:{safe}-{h}"
+33	
+34	
+35	_SHARED_BASE_OK: bool | None = None
+36	
+37	
+38	def _shared_base_tag() -> str | None:
+39	    """Tag of an image holding the preamble every taxonomy def repeats, if usable.
+40	
+41	    Set ``TMAX_SHARED_BASE_TAG`` (see scripts/tmax/prebuild_tmax_images.sh
+42	    SHARED_BASE=1) to rebase task images onto it. Every taxonomy container_def is
+43	    ``FROM ubuntu:22.04`` plus a %post that reinstalls python3/pip/pytest, and the
+44	    whole %post becomes one layer — so without this each task image carries its
+45	    own ~0.4G copy of the same interpreter. Rebasing keeps the per-task layer down
+46	    to what the task itself adds, which is the difference between ~60G and ~15G
+47	    for a 152-task set. The image TAG is unchanged either way.
+48	    """
+49	    global _SHARED_BASE_OK
+50	    tag = (os.environ.get("TMAX_SHARED_BASE_TAG") or "").strip()
+51	    if not tag:
+52	        return None
+53	    if _SHARED_BASE_OK is None:
+54	        _SHARED_BASE_OK = _run(["docker", "image", "inspect", tag], timeout=30).returncode == 0
+55	    return tag if _SHARED_BASE_OK else None
+56	
+57	
+58	def _maybe_rebase(dockerfile: Path) -> None:
+59	    """Point a materialized Dockerfile at the shared base, when there is one."""
+60	    tag = _shared_base_tag()
+61	    if tag is None:
+62	        return
+63	    text = dockerfile.read_text(encoding="utf-8")
+64	    # Only ubuntu:22.04 defs — do not silently swap someone else's base out.
+65	    if not text.startswith("FROM ubuntu:22.04\n"):
+66	        return
+67	    dockerfile.write_text(
+68	        text.replace("FROM ubuntu:22.04\n", f"FROM {tag}\n", 1), encoding="utf-8"
+69	    )
+70	
+71	
+72	def build_image(
+73	    task_id: str,
+74	    container_def: str,
+75	    work_root: Path,
+76	    *,
+77	    rebuild: bool = False,
+78	    build_timeout: float = 1800,
+79	) -> str:
+80	    tag = image_tag(task_id, container_def)
+81	    if not rebuild:
+82	        probe = _run(["docker", "image", "inspect", tag], timeout=30)
+83	        if probe.returncode == 0:
+84	            return tag
+85	    ctx = work_root / "build" / task_id
+86	    ctx.mkdir(parents=True, exist_ok=True)
+87	    for p in ctx.iterdir():
+88	        if p.is_file():
+89	            p.unlink()
+90	    _maybe_rebase(materialize_build_context(container_def, ctx))
+
+[Showing lines 1–90 of 195 total. Use offset=90 to read the next section.]

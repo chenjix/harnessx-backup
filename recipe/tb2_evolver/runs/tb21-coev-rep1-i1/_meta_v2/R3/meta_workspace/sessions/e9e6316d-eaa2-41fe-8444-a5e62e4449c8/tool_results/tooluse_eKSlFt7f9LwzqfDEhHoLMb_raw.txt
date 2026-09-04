@@ -1,0 +1,93 @@
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
+
+from .events import (
+    BeforeModelEvent,
+    Event,
+    ModelResponseEvent,
+    ProcessorTriggerEvent,
+    StepEndEvent,
+    StepStartEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+
+_logger = logging.getLogger(__name__)
+_contract_logger = logging.getLogger("harnessx.contract")
+
+# ─── Hook Contract Enforcement ────────────────────────────────────────────────
+
+
+class ContractViolationError(Exception):
+    """Raised when a processor violates the hook-contract spec.
+
+    Attributes:
+        processor:      Class name of the violating processor.
+        hook:           Hook where the violation occurred.
+        violation_type: One of the _VT_* constants below.
+        step_id:        Step at which the violation occurred.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        processor: str = "",
+        hook: str = "",
+        violation_type: str = "",
+        step_id: int = -1,
+    ) -> None:
+        super().__init__(message)
+        self.processor = processor
+        self.hook = hook
+        self.violation_type = violation_type
+        self.step_id = step_id
+
+
+# Canonical violation type labels
+_VT_WINDOW_OUT_OF_SCOPE = "window_out_of_scope"
+_VT_FORBIDDEN_ROLE_MUTATION = "forbidden_role_mutation"
+_VT_CROSS_TOOL_MUTATION = "cross_tool_mutation"
+_VT_LENGTH_EXCEEDED = "length_exceeded"
+_VT_EMPTY_MESSAGES = "empty_messages"
+_VT_SYSTEM_MUTATED = "system_mutated"
+_VT_LAST_MSG_ONLY = "last_msg_only_mutated"
+
+
+def _contract_mode() -> str:
+    """Return ``'strict'`` or ``'warn'`` based on ``HARNESSX_CONTRACT_MODE`` env var.
+
+    ``strict``: violations raise :class:`ContractViolationError` (阶段 B).
+    ``warn``  : violations are logged as warnings only (阶段 A, default).
+    """
+    return os.environ.get("HARNESSX_CONTRACT_MODE", "warn").lower()
+
+
+def _handle_violation(
+    msg: str,
+    *,
+    processor: str = "",
+    hook: str = "",
+    violation_type: str = "",
+    step_id: int = -1,
+=== events ===
+75:class Event:
+86:class TaskStartEvent(Event):
+115:class StepStartEvent(Event):
+131:class BeforeModelEvent(Event):
+141:class ModelResponseEvent(Event):
+154:class ToolCallEvent(Event):
+168:class ToolResultEvent(Event):
+181:class StepEndEvent(Event):
+198:class TaskEndEvent(Event):
+221:class SegmentBoundaryEvent(Event):
+270:class SpawnSubAgentEvent(Event):
+302:class ProcessorTriggerEvent(Event):

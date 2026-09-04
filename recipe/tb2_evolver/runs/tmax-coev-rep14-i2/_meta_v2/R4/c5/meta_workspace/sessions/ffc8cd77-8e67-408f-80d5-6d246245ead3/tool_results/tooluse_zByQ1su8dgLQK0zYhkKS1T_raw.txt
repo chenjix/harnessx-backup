@@ -1,0 +1,601 @@
+1	---
+2	name: analyze
+3	description: How to read trajectories and extract useful experience — from successes and failures alike — into candidates for the 4 HarnessConfig levers. Covers the trajectory frontmatter schema (behaviour / eval / judge), the two axes of reflection (lens × lever), the three-variant retroactive check, and when to delegate batch reading to spawn_reflect_worker. Read at Step 3 of the loop.
+4	---
+5	
+6	# Analyze — reading trajectories, extracting experience
+7	
+8	Your input is a directory of `<task_id>.md` files, one per task in
+9	this round. No pre-computed summaries, no cluster files — you
+10	investigate the markdown directly. Your output is a set of candidate
+11	hypotheses, each naming a concrete **pattern** (either a gap to
+12	close or a habit to preserve / generalize) and the lever you'd pull.
+13	
+14	Passing and failing trajectories are treated as equal evidence
+15	sources. A passing cluster can teach you a habit worth locking in
+16	or worth lifting into the template for the failing cluster; a
+17	failing cluster can teach you a blocker worth closing. Both feed
+18	the same candidate pipeline — same template, same retroactive
+19	check, same global-first ordering. The bias to read only failures
+20	is the single biggest cause of "right diagnosis, still-net-
+21	negative round": fixes land but previously-working habits silently
+22	regress because no candidate preserved them.
+23	
+24	## Trajectory file shape
+25	
+26	YAML frontmatter + markdown body. `Read <path> limit=30` returns the
+27	frontmatter plus the first few body lines — usually enough to
+28	classify the task. When the frontmatter hints at a deeper cause,
+29	read the last ~40 lines of the body to see what the agent actually
+30	had in context at its decisive step.
+31	
+32	### Frontmatter tiers (render order)
+33	
+34	**Behaviour — always present**
+35	
+36	- `exit_reason` — `done` / `max_steps` / `budget_exceeded` /
+37	  `loop_detected` / `error`
+38	- `steps`, `total_tokens`, `cost_usd`, `elapsed_s`
+39	- `tool_call_counts` — `{tool_name: n}`
+40	- `tool_error_counts` — `{tool_name: n}`
+41	- `error_count`, `pivotal_tool`
+42	- `final_output_length`
+43	
+44	**Eval — always present, authoritative**
+45	
+46	- `eval_passed` (bool) — the external pipeline evaluator's verdict
+47	- `eval_score` (float) — numeric score (0.0 / 1.0 for exact-match)
+48	
+49	`eval_*` is the ground-truth *correctness signal*. When Eval and
+50	Judge disagree, believe Eval. The dataset's expected answer text
+51	is intentionally withheld from the frontmatter, and so is the
+52	evaluator's textual reason — you see only pass/fail and score,
+53	never the target string. Evolve on correctness signals, not on a
+54	known target. For the *why* behind a failure, read the
+55	trajectory body and the optional `judge_*` fields below.
+56	
+57	**Judge — optional**
+58	
+59	Present only when `LLMJudgeProcessor` ran. An LLM's opinion, not
+60	ground truth. Useful for *why* a task failed, not *whether*.
+61	
+62	- `judge_verdict` — `plausible` / `unsupported` / `hedging` /
+63	  `format_wrong` / `refused` / `no_answer` / `judge_error`
+64	- `judge_cause`, `judge_missing`, `judge_lesson` — one-line strings
+65	- `judge_missing_capability` — `{present: bool, summary: "..."}`;
+66	  primary signal for Action-lever decisions
+67	- `extracted_answer` — what the agent actually committed (the
+68	  expected answer text is never exposed; do not try to reconstruct
+69	  it)
+70	
+71	`judge_error` is the judge failing (timeout, bad JSON), not the
+72	agent. Treat as "no opinion" and lean on behaviour + body.
+73	
+74	## The two axes of reflection
+75	
+76	Every candidate hypothesis is pinned on two axes. Keep them
+77	independent — don't collapse the lens into the lever.
+78	
+79	### Axis A — Lens (what is the pattern?)
+80	
+81	Three reading passes over the same batch, not three buckets. A
+82	single trajectory can answer more than one question — you are
+83	sweeping for signals, not assigning labels. Every pass anchors on
+84	the authoritative `eval_passed` field; behaviour / judge signals
+85	describe the *shape*, never the verdict.
+86	
+87	| Lens | Question | Signals (primary first) |
+88	|---|---|---|
+89	| **Failure** | What blocker kept this cluster from finishing? | `eval_passed=False` identifies the cluster; then read `exit_reason ∈ {budget_exceeded, error, loop_detected}`, high `tool_error_counts`, `judge_verdict ∈ {unsupported, hedging, format_wrong, refused, no_answer}` for the failure shape |
+90	| **Capability gap** | What did the agent try but couldn't do? | Non-empty `judge_missing_capability` / `judge_missing`; sentinel strings in tool output (`[SEARCH UNAVAILABLE]`, `ModuleNotFoundError`, redirect-HTML, raw bytes). Cuts across `eval_passed` — the agent sometimes works around the wall and still passes; don't pre-filter by Failure |
+91	| **Success** | What habit made this cluster finish cleanly? | `eval_passed=True` identifies the cluster; then `exit_reason=done` with short step count relative to the task class, consistent tool sequence across the passing cluster, non-empty `judge_lesson` for transferable insight |
+92	
+93	`exit_reason=done` alone is not evidence of success — the agent
+94	merely called `end_turn`. Always gate on `eval_passed` before
+95	reading a trajectory as a positive example.
+96	
+97	The three lenses feed the **same** candidate pipeline. A Success-
+98	lens observation turns into a candidate in one of two shapes:
+99	- **Lock-in** — encode the habit as Configuration / Control /
+100	  Instruction so a future round's edit cannot silently regress
+101	  it. Justification: the cited passing tasks would fail if the
+102	  habit were removed.
+103	- **Transfer** — lift the habit into a rule applied to a failing
+104	  cluster. Justification: the cited failing tasks would pass if
+105	  the habit were applied.
+106	
+107	Failure and Capability-gap lenses produce **corrective**
+108	candidates (close a gap). Both polarities go through the
+109	same retroactive check, same global-first ordering, same
+110	`candidates.md` schema. What changes is which variant of the
+111	retroactive check the candidate has to answer.
+112	
+113	Rushing to Failure and skipping the other two leaves Capability-gap
+114	bets (blocked-but-sometimes-recoverable shapes) and Success-pattern
+115	lessons (what to preserve or generalise) on the table.
+116	
+117	### Axis B — Lever (where does the fix belong?)
+118	
+119	| Lever | What lives here | Pick it when |
+120	|---|---|---|
+121	| **Configuration** | Kwargs on existing processors | An existing component's tuning is off (loop-detection too tight, sliding window too small, a builtin's `max_usd` too stingy) |
+122	| **Control** | New `MultiHookProcessor` — mechanical hooks around the loop | A mechanical step misfires or is missing: tool output needs parsing, input needs sanitising, the same guard needs to fire across tasks, final output needs reformatting |
+123	| **Action** | New `@tool` — expands the agent's action space | The agent has no way to take a class of action; or an existing tool fires but returns data the caller has no reasonable way to use |
+124	| **Instruction** | Jinja template edit, SOUL.md edit, or a new skill file | Capability and control are fine, but the agent does not know *when / in what order / under what condition* to use them |
+125	
+126	The axes are orthogonal. A Failure symptom can be fixed at any of
+127	the four levers. A Capability-gap lens does not always mean a new
+128	tool — if the existing tool fires but returns unusable data, the
+129	lever is often Control (an `on_after_tool` processor that parses),
+130	not Action.
+131	
+132	### Worked examples — lens × lever × intent
+133	
+134	The three axes cover 3 × 4 × 3 combinations; most are rare. Below
+135	are representative shapes you'll actually see. Use them to
+136	pressure-test your own candidate — if yours doesn't resemble any
+137	row here, either you've found something genuinely new or the lens
+138	/ lever / intent tag is wrong.
+139	
+140	| Lens | Lever | Intent | Shape |
+141	|---|---|---|---|
+142	| Failure | Configuration | corrective | `exit_reason=budget_exceeded` recurs while agent still making progress → raise `CostGuardProcessor.max_usd`. |
+143	| Failure | Control | corrective | Tool returns raw bytes on PDF tasks; agent paraphrases and fails → `on_after_tool` processor that pipes bytes through a text extractor. |
+144	| Failure | Instruction | corrective | Reasoning correct but `judge_verdict=format_wrong` across tasks → add explicit `FINAL ANSWER:` rule to the template. |
+145	| Capability-gap | Action | corrective | `judge_missing_capability.summary` names "JS-rendered browser" on 3+ tasks; `WebFetch` returns redirect HTML → new `browser(...)` tool. |
+146	| Capability-gap | Control | corrective | Tool *does* fetch the data but returns it in an unusable shape (binary / redirect chain) → normalising `on_after_tool` hook, not a parallel fetch tool. |
+147	| Success | Instruction | preservative-lock | Passing cluster all emit `## Plan` block; if removed the habit evaporates under a future prompt edit → encode "emit plan block before first tool call" as an explicit template rule. |
+148	| Success | Instruction | preservative-transfer | Passing cluster plans, failing cluster thrashes → lift the plan-block rule into the template applied to all tasks. |
+149	| Success | Control | preservative-lock | Passing cluster consistently retries 3× on 5xx; removing the retry loop would lose these passes → harden with a `tool_failure_guard`-style retry policy. |
+150	
+151	Rows omitted on purpose: `Capability-gap / Instruction` is almost
+152	always wrong (if the capability isn't there, no prompt rule
+153	conjures it — covered in "Action vs Instruction" below); `Success
+154	/ Configuration` is rare because knob values don't encode a habit;
+155	`Success / Action` is rare because authoring a new tool is not a
+156	natural way to preserve a habit the existing tools already enable.
+157	
+158	If your candidate lands in an omitted cell, that's a signal to
+159	challenge the lens / lever / intent tag before the retroactive
+160	check.
+161	
+162	## Read strategy
+163	
+164	Your output is labelled clusters with cited evidence, not a fixed
+165	procedure run. The trajectories live under `_meta_scratch/traj/`
+166	as `<task_id>.md` files. Available tools: `Read` / `Grep` for
+167	direct inspection, `spawn_reflect_worker(kind="trajectory-
+168	digester", files=[...])` for batching when the task count would
+169	blow the token budget from `TASK.md`. Pacing — how many
+170	frontmatters to scan before clustering, how many representatives
+171	to body-read per cluster, when delegation is worth it — is your
+172	judgement call. Record the reasoning in `candidates.md`.
+173	
+174	Two constraints are non-negotiable:
+175	
+176	- **Systemic vs idiosyncratic.** A cluster (failing OR passing)
+177	  earns a config change only when the same shape recurs across
+178	  at least two distinct tasks with different inputs. One-off
+179	  observations — however obvious the fix or however clean the
+180	  habit feels — go to `NEEDS_FROM_HUMAN` and are skipped. Two
+181	  tasks that look different but share the same root cause still
+182	  count as one "gap" (test: if you fix one, does the other
+183	  follow?); two tasks with coincidentally similar frontmatter but
+184	  different mechanisms do not count as a cluster.
+185	- **Frontmatter shows the ceiling shape; the body shows what
+186	  actually happened at the decisive step.** Don't propose Action
+187	  or Control on frontmatter signals alone — for failure
+188	  candidates a body must name the actual failure mode (raw bytes,
+189	  empty results, redirect HTML, cycling URL, silent parse
+190	  failure); for success candidates a body must show the habit
+191	  actually firing (the `## Plan` block, the retry loop, the tool
+192	  sequence) rather than just inferring it from short step count.
+193	  A candidate whose evidence cites only a worker digest, with no
+194	  trajectory body quoted, is not grounded.
+195	
+196	## The retroactive check — three variants, one per candidate intent
+197	
+198	Before writing any code, for each candidate, ask the variant that
+199	matches the candidate's **intent**. A candidate has exactly one
+200	intent; one that seems to need more than one variant is two
+201	candidates glued together — split them.
+202	
+203	### Variant A — Corrective (Failure / Capability-gap lens)
+204	
+205	> If this fix had already been in place on the cited failing
+206	> trajectories, would the task have succeeded?
+207	
+208	- A commit-nudge requires an answer to commit.
+209	- A template rule requires data to apply.
+210	- A tighter loop detector requires the loop to be the actual
+211	  blocker, not the consequence of the real blocker.
+212	- A new tool requires the task to have needed that tool's output
+213	  shape, not just the tool's topic.
+214	
+215	When the answer is "no — the agent would still have failed", the
+216	symptom is downstream of an earlier failure. Trace one step back:
+217	what did the agent *lack*, not what did it fail to *do*? That
+218	upstream gap is the real lever. Drop or re-scope.
+219	
+220	### Variant B — Preservative, lock-in (Success lens)
+221	
+222	> If this pattern were **removed** from the current config, would
+223	> the cited passing trajectories have failed?
+224	
+225	- A habit that's already reliable "by accident" of the current
+226	  prompt / tool / model combo is not worth encoding — it costs
+227	  complexity and pays nothing. Drop.
+228	- A habit that was visibly load-bearing (the body shows the
+229	  failing task in an adjacent cluster *not* doing this habit
+230	  and breaking) earns a lock-in candidate — typically Instruction
+231	  (promote the habit to an explicit rule) or Control (a guard
+232	  that enforces it). Regression-probe candidates live here.
+233	
+234	### Variant C — Preservative, transfer (Success → failing cluster)
+235	
+236	> If this pattern had been **applied** to the cited failing
+237	> trajectories, would they have passed?
+238	
+239	- The generalization must pass both ends: the passing cluster's
+240	  body must show the habit firing, AND the failing cluster's
+241	  body must show the habit *absent at a moment where applying
+242	  it would have unblocked the decisive step*.
+243	- If only the first end is grounded, the habit is domain-specific
+244	  — you're about to force a passing-cluster quirk onto tasks it
+245	  won't help. Drop or re-scope.
+246	
+247	### Why the variants matter
+248	
+249	The single-question form ("would the fix have worked") silently
+250	excludes Success-lens candidates — they can't "work" on the tasks
+251	they came from, because those tasks already passed. Without
+252	Variant B/C, Success-lens evidence has no path into
+253	`candidates.md`, and the round ships fixes while quietly
+254	regressing what was already working.
+255	
+256	## Disambiguating adjacent levers
+257	
+258	The Axis B table tells you what each lever *is*; the sections
+259	below help when two lever choices could explain the same evidence.
+260	
+261	### The first question — tool layer or caller?
+262	
+263	Before disambiguating adjacent levers, ask where the blame sits:
+264	on the **tool layer's return** or on the **caller's use of the
+265	return**. This single split collapses most lever choices.
+266	
+267	**Points at the tool layer** (Action or Control territory —
+268	weigh together, no single signal decisive):
+269	- `tool_error_counts[T]` recurs across distinct tasks on tool `T`.
+270	- `judge_missing` / `judge_missing_capability` keeps naming the
+271	  same shape (missing client, absent parser, no fallback).
+272	- An existing tool fires successfully but returns data the caller
+273	  has no reasonable way to use (raw bytes, truncated page,
+274	  aggregated when itemized is needed, unparseable response).
+275	
+276	**Points at the caller** (Instruction or Configuration territory):
+277	- Tool returned correct data; agent misread, didn't reach for it,
+278	  or committed before using it.
+279	- Failure reads as budget / commitment / loop behaviour rather
+280	  than data availability.
+281	
+282	Once you know which side is to blame, the two sections below
+283	disambiguate within that side. Configuration vs Instruction rarely
+284	cross-contaminate and don't need a section; they split naturally
+285	(existing-knob tune vs prompt-level rule).
+286	
+287	**Perceived difficulty gradient isn't real.** Template < processor
+288	< tool feels true but once you've written one of each, all three
+289	are "write one file, wire it into config, verify". Pick by
+290	evidence, not by ease.
+291	
+292	### Action vs Instruction — when the gap is capability, not knowledge
+293	
+294	Signals that a missing **capability** (not a missing prompt rule)
+295	is the gap:
+296	
+297	- `judge_missing_capability.summary` keeps naming the same shape
+298	  across distinct tasks.
+299	- Recurring cross-task `tool_error_counts` on the same tool.
+300	- An existing tool fires but returns data the caller has no
+301	  reasonable way to use (raw bytes, truncated page, unparseable
+302	  response).
+303	- Your own failure-bucket phrasing becomes "can't access X",
+304	  "can't parse Y", "doesn't reach Z" for a recurring input shape.
+305	
+306	In this regime, reaching for another template rule is usually
+307	wrong — instruction patches around a tool that returns nothing
+308	useful tend to compound into more failure. Prefer Action. For the
+309	authoring mechanics (`TOOL_SPEC.md`, `@tool` signature, scoping a
+310	tool to a class of tasks) see the `reference` skill — come back
+311	here for lever choice, go there for how to build it.
+312	
+313	Counter-case — when Instruction is still right:
+314	
+315	- Evidence shows the capability is actually present (the answer was
+316	  in a tool result the agent ignored, or judge is confused).
+317	- Failure reads as commitment / format / timing, not data
+318	  availability (e.g. `judge_verdict=format_wrong` on tasks whose
+319	  reasoning was otherwise correct).
+320	
+321	Document *why not Action* in the journal so the next round can
+322	reuse the reasoning.
+323	
+324	### Control vs Action — when post-processing beats a new tool
+325	
+326	Tool fires and returns correct data, but in a shape the caller
+327	can't use directly (binary bytes instead of parsed text, raw HTML
+328	after a redirect chain, unstructured JSON blob). An
+329	`on_after_tool` processor that normalises the return is usually
+330	stronger than a new tool that does the same fetch-and-parse —
+331	duplicating the fetch loses the existing tool's robustness and
+332	budget accounting.
+333	
+334	Control also covers input sanitisation (`on_before_tool`) and
+335	cross-task guards (`on_step_start` / `on_before_model`) that must
+336	fire uniformly across every task — shapes a per-call tool can't
+337	express at all.
+338	
+339	Counter-case — when Control isn't enough: if the tool's fetch
+340	itself is wrong (wrong endpoint, missing auth, truncates before
+341	returning), no post-processor recovers what was never retrieved.
+342	Quick test: *can the information the agent needs be reconstructed
+343	from what the tool currently returns?* Yes → Control. No → Action.
+344	
+345	## When a prior round failed the replay gate
+346	
+347	If the last round was rejected by the replay gate
+348	(`_meta_scratch/REPLAY.md` exists with `ok: false`), treat it as
+349	evidence not punishment. The JSON lists which tasks tripped (exit
+350	reason, first failing step, brief traceback). Before re-proposing
+351	anything:
+352	
+353	- If the failure was structural (`exit_reason=error`, tool
+354	  ImportError, Jinja render error) — the previous round's code
+355	  was wrong, not its reasoning. The *hypothesis* may still be
+356	  sound; re-scope the candidate and fix the implementation.
+357	- If the failure was semantic (candidate ran cleanly but didn't
+358	  flip the target task) — the retroactive check returned `yes`
+359	  on paper but the real run disagreed. Treat the retroactive
+360	  check as having failed retrospectively; don't re-ship the
+361	  same shape without new body evidence.
+362	- If the failure was a regression on a previously-passing task
+363	  you didn't predict — that's a preservative-lock signal the
+364	  prior round missed. Consider a Variant-B candidate next round
+365	  to lock in whatever got disrupted.
+366	
+367	The replay gate report is the highest-quality signal in the
+368	journal — it's from an actual run, not a judge opinion.
+369	
+370	## Cross-round signals
+371	
+372	The journal CONTEXT.md renders a lever scoreboard. Use it as a
+373	prior on what's worth trying, not as a rule:
+374	
+375	- A lever that has landed consistently is worth revisiting.
+376	- A lever that has been tried repeatedly on the same cluster
+377	  without flipping any task is a signal to look elsewhere, not a
+378	  reason to try again harder.
+379	- A reverted `hypothesis_id` cannot be re-proposed in the same
+380	  shape without new evidence; different shape at a different lever
+381	  is fair game.
+382	
+383	## Candidate ordering: global first, local second
+384	
+385	Before choosing what to ship, rank candidates by global net value,
+386	not by the most dramatic local anecdote.
+387	
+388	Apply this ordering:
+389	
+390	1. **Global gain first**: prefer candidates that plausibly flip a
+391	   recurring failing cluster (>=2 tasks) or that prevent a
+392	   likely regression on a currently-passing cluster of similar
+393	   size. A preservative-lock candidate with a plausible 2-task
+394	   regression saved beats a corrective candidate with a 1-task
+395	   speculative flip.
+396	2. **Regression surface second**: demote candidates with
+397	   meaningful risk to already-passing or unrelated clusters
+398	   unless evidence is unusually strong. (Preservative-lock
+399	   candidates are specifically *reducing* this risk — they
+400	   should be weighted accordingly, not dismissed as "no flips".)
+401	3. **Cost shift third**: among similar gain/risk profiles, prefer
+402	   lower expected token/cost inflation.
+403	
+404	Every shipped candidate should make the tradeoff explicit:
+405	- `expected_global_gain`
+406	- `regression_risk`
+407	- `cost_shift`
+408	
+409	If a candidate helps one target task but likely harms global pass-rate,
+410	drop it or re-scope it.
+411	
+412	## Multi-lever rounds
+413	
+414	A round can ship several independent changes when the evidence
+415	warrants — one per distinct pattern (gap or habit). "Independent"
+416	means each change works on its own; no same-round dependency
+417	chains. Ship the number the evidence supports, not a target.
+418	Breadth without focus regresses pass_rate; depth without breadth
+419	misses cheap wins. A good round typically pairs 1-2 corrective
+420	candidates (closing gaps) with 0-1 preservative candidates
+421	(locking in or generalizing habits) — the exact mix is evidence-
+422	driven, not a quota.
+423	
+424	## `_meta_scratch/candidates.md` — required when the config changes
+425	
+426	Before writing the config, draft your candidates in
+427	``_meta_scratch/candidates.md``. Each candidate is a section with a
+428	stable **ID** (``C-001``, ``C-002``, …) that the journal entry's
+429	``cited_candidates`` frontmatter will reference.
+430	
+431	**Header format** — the orchestrator parses `^## Candidate C-\d+`
+432	headers, so every section header must match this shape. Anything
+433	else (numbered bullets, "Candidate 1", etc.) is invisible to the
+434	evidence gate and the round is rejected.
+435	
+436	**Required fields per candidate** — each candidate must include all
+437	of the fields below. A candidate missing any of them is treated as
+438	under-grounded; the lever choice will be challenged and the round
+439	may be rejected at review even if the header format parses.
+440	
+441	| Field | Why it's required |
+442	|---|---|
+443	| `[lens: ... \| lever: ... \| intent: ...]` tag | Pins the candidate on all three axes so the journal's scoreboard can attribute outcomes. `intent ∈ {corrective, preservative-lock, preservative-transfer}`; it selects which retroactive-check variant the candidate answers. |
+444	| One-line description | Forces the change to fit in one sentence; unclusterable changes are usually two candidates glued together. Phrase it as the encoding, not the observation (e.g. "promote `## Plan` block to an explicit template rule", not "passing tasks wrote `## Plan` blocks"). |
+445	| `Signal` | Names the concrete frontmatter field or log shape that identifies the cluster. |
+446	| `Verified` (body-quoted) | At least one body excerpt per cited task. Frontmatter alone doesn't satisfy this — structural levers need the body, not the ceiling. For preservative-transfer candidates, body excerpts are required from **both ends**: the passing cluster (habit firing) and the failing cluster (habit absent at the decisive step). |
+447	| **`Why <chosen lever> not <adjacent lever>`** | Required on every candidate. Action candidates must argue against Instruction; Control against Action; Instruction against Action (or Control when post-processing was viable). Configuration candidates must argue why a bigger lever wasn't warranted. Preservative candidates still owe this: locking in a habit as Instruction vs. Control is a real choice. |
+448	| **`Retroactive check`** | `yes` / `no` + a one-line justification against the variant selected by `intent` (A / B / C — see the retroactive-check section). A `no` means the cited evidence is downstream of the real pattern — either re-scope the candidate or drop it. |
+449	| `Tasks affected` | For corrective candidates: >=2 distinct failing task_ids with the same mechanism. For preservative-lock: >=2 distinct passing task_ids where the habit fired. For preservative-transfer: >=2 passing + >=2 failing task_ids (two distinct ends). Single-task observations hit the idiosyncratic filter and belong in `NEEDS_FROM_HUMAN.md`. |
+450	| `expected_global_gain` / `regression_risk` / `cost_shift` | Forces Pareto-style global reasoning: do not ship a candidate that is locally good but globally harmful. For preservative-lock, `expected_global_gain` can legitimately be "0 flips; prevents N expected regressions" — that's still a positive Pareto move when regression risk elsewhere is material. |
+451	
+452	```markdown
+453	# Candidates
+454	
+455	## Candidate C-001
+456	[lens: capability-gap | lever: control | intent: corrective]
+457	
+458	One-line fix description.
+459	
+460	- Tasks affected: task-011, task-042, task-108
+461	- Signal: `judge_missing` names output-parsing capability on all three
+462	  tasks; `tool_error_counts[fetch_tool]=0` (fetch is fine — shape is
+463	  not).
+464	- Verified (Read): task-011 step 7 — tool returned raw unstructured
+465	  output, agent described content vaguely. task-042 step
+466	  5 — same shape. task-108 step 9 — same shape.
+467	- Why Control not Action: the tool already fetches the data —
+468	  the gap is processing, not capability. A parallel fetch
+469	  tool would duplicate the existing tool.
+470	- Retroactive check (A-corrective): yes — if parsed output had been
+471	  in context at the decisive step, the agent had enough to answer.
+472	
+473	## Candidate C-002
+474	[lens: failure | lever: instruction | intent: corrective]
+475	
+476	One-line fix description.
+477	
+478	- Tasks affected: task-017, task-033
+479	- Signal: `judge_verdict=format_wrong` on both; reasoning in the
+480	  body is otherwise correct.
+481	- Verified: task-017 step 15 body ends mid-paragraph with no
+482	  answer marker. task-033 step 12 — same shape.
+483	- Why Instruction not Control: the reasoning was correct — the
+484	  agent just didn't know to emit the marker. A mechanical
+485	  post-hook can't extract the answer from narrative prose, and
+486	  there's no tool output to post-process.
+487	- Retroactive check (A-corrective): yes — an explicit format rule
+488	  produces the correct commit path.
+489	
+490	## Candidate C-003
+491	[lens: success | lever: instruction | intent: preservative-transfer]
+492	
+493	Promote the "emit a `## Plan` block before the first tool call"
+494	habit from an implicit pattern to an explicit template rule.
+495	
+496	- Tasks affected:
+497	  - passing (habit fired): task-024, task-055, task-071
+498	  - failing (habit absent at decisive step): task-038, task-093
+499	- Signal: all three passing tasks write a `## Plan` block in step
+500	  1-2 and keep tool calls under 6 (short `tool_call_counts`); the
+501	  two failing tasks skip the plan, fan out to 14-18 tool calls,
+502	  and `exit_reason=budget_exceeded`.
+503	- Verified: task-024 step 1 body quotes the `## Plan` block;
+504	  task-055 step 2 — same shape; task-071 step 1 — same shape.
+505	  task-038 steps 1-3 — no planning block, tool calls thrash on
+506	  adjacent queries; task-093 step 1 — same shape.
+507	- Why Instruction not Control: a Control hook would inject the
+508	  plan mechanically, bypassing the agent's own scoping — the
+509	  planning *content* is what made the passing cluster short, not
+510	  the presence of a header string. An Instruction rule keeps
+511	  the scoping agent-side.
+512	- Retroactive check (C-preservative-transfer): yes — task-038 and
+513	  task-093's thrashing begins before step 4; a planning rule
+514	  applied up-front would have forced query scoping and kept the
+515	  step count under budget.
+516	```
+517	
+518	### The "Why X not Y" field is the main failure mode to avoid
+519	
+520	A candidate that skips this field almost always picks the
+521	lowest-friction lever (usually Instruction — "add a rule to the
+522	prompt") on evidence that points at a heavier lever (Action /
+523	Control). Writing the "Why X not Y" line forces you to argue
+524	against the adjacent alternative, not just in favour of the one
+525	you picked. Examples of the mistake this catches:
+526	
+527	- Capability-gap signal, Instruction lever, no "Why not Action"
+528	  → usually means the agent has no way to do the thing, but the
+529	  author defaulted to a prompt patch because it was easier to
+530	  write. Re-pick as Action unless the counter-case in "Action vs
+531	  Instruction" applies *and you can write it out*.
+532	- Control-shaped signal (tool returns unusable data), Action
+533	  lever, no "Why not Control" → usually means an `on_after_tool`
+534	  normaliser would have been the narrower fix.
+535	- Success habit, Instruction lever, no "Why not Control" → a
+536	  Control hook mechanically injecting the habit is tempting
+537	  ("always write a `## Plan` block") but bypasses the agent's
+538	  own scoping; argue why the habit needs to stay agent-authored.
+539	  Or the opposite: a Control lever with no "Why not Instruction"
+540	  → you're hard-coding a habit the agent could have learned to
+541	  apply selectively.
+542	
+543	If you can't write the "Why X not Y" in one sentence, the lever
+544	choice isn't ready and the candidate needs more investigation.
+545	
+546	Concrete, benchmark-specific examples (e.g. answer-format markers,
+547	role-play protocols, verifier scripts, domain-specific tool specs)
+548	live in the `<bench>-playbook` skill, not here — this skill is
+549	benchmark-agnostic.
+550	
+551	Rank candidates by ``evidence strength × expected leverage``. Ship
+552	the ones you actually implement — a candidate that isn't implemented
+553	shouldn't appear in ``cited_candidates`` on the journal entry.
+554	
+555	### Cross-reference in the journal
+556	
+557	When this round's config changes, the latest journal entry's
+558	frontmatter must cite at least one of the candidate IDs:
+559	
+560	```yaml
+561	cited_candidates: [C-001, C-002]
+562	```
+563	
+564	See ``journal`` skill for the full frontmatter schema. The evidence
+565	gate rejects any non-noop round where:
+566	
+567	- ``candidates.md`` is missing, OR
+568	- it has no ``## Candidate C-N`` sections, OR
+569	- ``cited_candidates`` is empty or missing, OR
+570	- a cited ID doesn't have a section in ``candidates.md``.
+571	
+572	Noop rounds (``cp current_config output/config.yaml``) don't need
+573	``candidates.md`` — the orchestrator only enforces evidence when the
+574	structural diff is non-empty.
+575	
+576	## Pitfalls
+577	
+578	- **Jumping to an encoding before the retroactive check.** The
+579	  first plausible story is often downstream of the real pattern
+580	  — whether you're closing a gap (Variant A) or transferring a
+581	  habit (Variant C).
+582	- **Reading only failures.** Shipping fixes while the successes
+583	  that made the baseline work silently regress is the most
+584	  common way a round lands net-negative. Sweep passing clusters
+585	  with the same seriousness as failing ones.
+586	- **Confusing judge signal with eval signal.** The judge is an
+587	  opinion; when `eval_passed` disagrees, believe `eval_passed`.
+588	- **Single-task optimisation.** Idiosyncratic observations —
+589	  failing OR passing — shouldn't shape the config. Log them
+590	  under `NEEDS_FROM_HUMAN` in the journal and move on.
+591	- **Generic tool replacement.** New tools should close a specific
+592	  class; a "better WebFetch" competes with WebFetch in the general
+593	  case and loses. Scope to the cluster.
+594	- **Layer-by-lens reflex.** "Failure → prompt fix", "capability gap
+595	  → new tool", "success → new processor". All three are often
+596	  wrong. Always re-check the lever against the evidence.
+597	- **Encoding a habit that was already free.** A preservative-lock
+598	  candidate whose Variant-B check returns `no` (the passing tasks
+599	  would still pass with the habit removed) is dead weight — it
+600	  adds config surface area without paying for it. Drop, don't
+601	  ship "to be safe".

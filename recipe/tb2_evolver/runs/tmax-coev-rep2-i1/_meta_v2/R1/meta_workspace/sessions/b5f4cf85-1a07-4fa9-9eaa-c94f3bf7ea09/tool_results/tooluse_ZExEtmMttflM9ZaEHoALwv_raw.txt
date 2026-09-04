@@ -1,0 +1,257 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""Run a Tmax task through the real HarnessX pipeline (prompt + processors + tools).
+4	
+5	This replaces the thin OpenAI+Bash-only loop when a HarnessConfig YAML is
+6	provided. Docker lifecycle stays in ``run_eval`` / ``docker_env``; this module
+7	only drives the agent inside an already-started container.
+8	"""
+9	from __future__ import annotations
+10	
+11	import asyncio
+12	import json
+13	import os
+14	import traceback
+15	from dataclasses import dataclass, field
+16	from pathlib import Path
+17	from typing import Any
+18	
+19	from harnessx.core.events import Message, ToolCall
+20	from harnessx.core.harness import BaseTask, HarnessConfig
+21	from harnessx.core.model_config import ModelConfig
+22	from harnessx.providers.openai_provider import OpenAIProvider
+23	from harnessx.tracing.journal import HarnessJournal
+24	
+25	from .docker_sandbox import TmaxDockerSandboxProvider
+26	
+27	
+28	@dataclass
+29	class HarnessAgentResult:
+30	    steps: int
+31	    finished: str  # no_tool_calls | max_steps | error | interrupted | loop_detected | ...
+32	    messages: list[dict[str, Any]]
+33	    error: str | None = None
+34	    exit_reason: str | None = None
+35	    log: list[dict[str, Any]] = field(default_factory=list)
+36	
+37	
+38	def _message_to_openai(m: Message) -> dict[str, Any]:
+39	    out: dict[str, Any] = {"role": m.role, "content": m.content if m.content is not None else ""}
+40	    if m.tool_call_id:
+41	        out["tool_call_id"] = m.tool_call_id
+42	    if m.name:
+43	        out["name"] = m.name
+44	    if m.tool_calls:
+45	        tcs = []
+46	        for tc in m.tool_calls:
+47	            if isinstance(tc, ToolCall):
+48	                tcs.append(
+49	                    {
+50	                        "id": tc.id,
+51	                        "type": "function",
+52	                        "function": {
+53	                            "name": tc.name,
+54	                            "arguments": json.dumps(tc.input, ensure_ascii=False),
+55	                        },
+56	                    }
+57	                )
+58	            elif isinstance(tc, dict):
+59	                tcs.append(tc)
+60	        if tcs:
+61	            out["tool_calls"] = tcs
+62	    return out
+63	
+64	
+65	def _messages_from_state(state: Any) -> list[dict[str, Any]]:
+66	    raw = getattr(state, "raw_messages", None) or getattr(state, "messages", None) or []
+67	    out: list[dict[str, Any]] = []
+68	    for m in raw:
+69	        if isinstance(m, Message):
+70	            out.append(_message_to_openai(m))
+71	        elif isinstance(m, dict):
+72	            out.append(m)
+73	    return out
+74	
+75	
+76	def _finished_from_result(result: Any) -> tuple[str, str | None, str | None]:
+77	    """Map HarnessResult → (finished, exit_reason, error)."""
+78	    exit_reason = getattr(result, "exit_reason", None)
+79	    if exit_reason is None:
+80	        task_end = getattr(result, "task_end", None)
+81	        exit_reason = getattr(task_end, "exit_reason", None) if task_end is not None else None
+82	    err = None
+83	    if getattr(result, "is_interrupted", False):
+84	        return "interrupted", exit_reason or "interrupted", None
+85	    reason = str(exit_reason or "")
+86	    if reason in ("loop_detected", "LoopDetectedError"):
+87	        return "loop_detected", reason, None
+88	    if reason in ("max_steps", "step_limit", "budget"):
+89	        return "max_steps", reason, None
+90	    if reason in ("completed", "success", "no_tool_calls", "done", ""):
+91	        # Default successful stop when model stops calling tools.
+92	        return "no_tool_calls", reason or "completed", None
+93	    if reason in ("error", "failed"):
+94	        return "error", reason, reason
+95	    return (reason or "no_tool_calls"), reason or None, err
+96	
+97	
+98	def _prefer_sibling_prompt_builder(config: HarnessConfig, cfg_path: Path) -> HarnessConfig:
+99	    """If ``system_prompt.txt`` sits beside the YAML, make sure it is used.
+100	
+101	    Older evolved configs still point ``SystemPromptProcessor`` at TB2's
+102	    ``_StaticSystemPromptBuilder`` (inert under the old thin Tmax loop). With the
+103	    full HarnessX path those would ignore the sidecar MetaAgent actually edited.
+104	    Prefer ``SiblingSystemPromptBuilder`` whenever the sidecar exists, unless the
+105	    YAML already wires that builder.
+106	    """
+107	    sibling = cfg_path.parent / "system_prompt.txt"
+108	    if not sibling.is_file():
+109	        return config
+110	    new_procs: list[Any] = []
+111	    changed = False
+112	    sibling_target = "recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder"
+113	    for proc in config.processors or []:
+114	        if not isinstance(proc, dict):
+115	            new_procs.append(proc)
+116	            continue
+117	        target = str(proc.get("_target_", ""))
+118	        if "system_prompt.SystemPromptProcessor" not in target:
+119	            new_procs.append(proc)
+120	            continue
+121	        builder = proc.get("system_builder") or {}
+122	        builder_target = ""
+123	        if isinstance(builder, dict):
+124	            builder_target = str(builder.get("_target_", ""))
+125	        if sibling_target in builder_target:
+126	            new_procs.append(proc)
+127	            continue
+128	        patched = dict(proc)
+129	        patched["system_builder"] = {"_target_": sibling_target}
+130	        new_procs.append(patched)
+131	        changed = True
+132	    if not changed:
+133	        return config
+134	    return config.copy(processors=new_procs)
+135	
+136	
+137	async def _run_async(
+138	    *,
+139	    harness_config: Path,
+140	    container: str,
+141	    instruction: str,
+142	    api_base: str,
+143	    model: str,
+144	    max_steps: int,
+145	    temperature: float,
+146	    api_key: str,
+147	    journal_dir: Path | None,
+148	    workspace_path: str = "/home/user",
+149	) -> HarnessAgentResult:
+150	    cfg_path = Path(harness_config).resolve()
+151	    if not cfg_path.is_file():
+152	        raise FileNotFoundError(f"harness config not found: {cfg_path}")
+153	
+154	    # SiblingSystemPromptBuilder + promote paths resolve via this env.
+155	    os.environ["TB2_HARNESS_CONFIG"] = str(cfg_path)
+156	    os.environ["TMAX_HARNESS_CONFIG"] = str(cfg_path)
+157	    sibling_prompt = cfg_path.parent / "system_prompt.txt"
+158	    if sibling_prompt.is_file():
+159	        os.environ["TMAX_SYSTEM_PROMPT_FILE"] = str(sibling_prompt)
+160	
+161	    base_config = _prefer_sibling_prompt_builder(
+162	        HarnessConfig.from_yaml_file(str(cfg_path)), cfg_path
+163	    )
+164	    tracer = None
+165	    if journal_dir is not None:
+166	        journal_dir.mkdir(parents=True, exist_ok=True)
+167	        tracer = HarnessJournal(base_dir=str(journal_dir), export_jsonl=True)
+168	
+169	    harness_config_rt = base_config.copy(
+170	        sandbox_provider=TmaxDockerSandboxProvider(
+171	            container,
+172	            workspace_path=workspace_path,
+173	        ),
+174	        tracer=tracer,
+175	    )
+176	
+177	    provider_kwargs: dict[str, Any] = {
+178	        "base_url": api_base.rstrip("/"),
+179	        "api_key": api_key or "EMPTY",
+180	    }
+181	    if temperature is not None:
+182	        provider_kwargs["temperature"] = float(temperature)
+183	    # Cap per-call generation. Unbounded max_tokens lets a single degenerate
+184	    # repetition loop emit 100k+ tokens and stall an evolve round for hours.
+185	    # Override with TMAX_MAX_TOKENS (set 0 / negative to disable the cap).
+186	    raw_max = (os.environ.get("TMAX_MAX_TOKENS") or "4096").strip()
+187	    try:
+188	        max_tokens = int(raw_max)
+189	    except ValueError:
+190	        max_tokens = 4096
+191	    if max_tokens > 0:
+192	        provider_kwargs["max_tokens"] = max_tokens
+193	    provider = OpenAIProvider(model=model, **provider_kwargs)
+194	    harness = ModelConfig(main=provider).agentic(harness_config_rt)
+195	    task = BaseTask(description=instruction, max_steps=max_steps)
+196	
+197	    try:
+198	        result = await harness.run(task)
+199	    except Exception as e:
+200	        return HarnessAgentResult(
+201	            steps=0,
+202	            finished="error",
+203	            messages=[],
+204	            error=f"{type(e).__name__}: {e}",
+205	            exit_reason="error",
+206	            log=[{"traceback": traceback.format_exc()[-3000:]}],
+207	        )
+208	
+209	    state = getattr(result, "resume_state", None)
+210	    messages = _messages_from_state(state) if state is not None else []
+211	    finished, exit_reason, err = _finished_from_result(result)
+212	    steps = 0
+213	    if state is not None:
+214	        steps = int(getattr(state, "step", 0) or 0)
+215	    if steps <= 0:
+216	        # Fall back to counting assistant turns.
+217	        steps = sum(1 for m in messages if m.get("role") == "assistant")
+218	    return HarnessAgentResult(
+219	        steps=steps,
+220	        finished=finished,
+221	        messages=messages,
+222	        error=err,
+223	        exit_reason=exit_reason,
+224	    )
+225	
+226	
+227	def run_harness_agent(
+228	    *,
+229	    harness_config: Path,
+230	    container: str,
+231	    instruction: str,
+232	    api_base: str,
+233	    model: str,
+234	    max_steps: int = 80,
+235	    temperature: float = 0.0,
+236	    api_key: str = "EMPTY",
+237	    journal_dir: Path | None = None,
+238	    workspace_path: str = "/home/user",
+239	) -> HarnessAgentResult:
+240	    """Sync wrapper for thread-pool workers in ``run_eval``."""
+241	    return asyncio.run(
+242	        _run_async(
+243	            harness_config=harness_config,
+244	            container=container,
+245	            instruction=instruction,
+246	            api_base=api_base,
+247	            model=model,
+248	            max_steps=max_steps,
+249	            temperature=temperature,
+250	            api_key=api_key,
+251	            journal_dir=journal_dir,
+252	            workspace_path=workspace_path,
+253	        )
+254	    )
+255	
+256	
+257	__all__ = ["HarnessAgentResult", "run_harness_agent"]

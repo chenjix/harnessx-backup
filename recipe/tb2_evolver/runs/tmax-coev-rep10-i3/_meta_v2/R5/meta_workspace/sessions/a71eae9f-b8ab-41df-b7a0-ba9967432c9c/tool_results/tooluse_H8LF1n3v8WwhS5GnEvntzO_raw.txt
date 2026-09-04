@@ -1,0 +1,31 @@
+=== result.json keys ===
+['task_id', 'domain', 'reward', 'status', 'elapsed_s', 'api_base', 'model', 'image', 'container', 'initial_pytest', 'agent', 'final_pytest']
+=== full ===
+{
+  "task_id": "task_000264_ab8c7253",
+  "domain": "data_querying",
+  "reward": 0,
+  "status": "ok",
+  "elapsed_s": 74.5,
+  "api_base": "http://127.0.0.1:8301/v1",
+  "model": "qwen35-9b-tmax-coev-r10",
+  "image": "tmax-eval:task_000264_ab8c7253-3c1408f96875",
+  "container": "3f601d5214d4c019234291f766d7ecbc781cc1dee98683cbcc0199b60ec19190",
+  "initial_pytest": {
+    "passed": true,
+    "rc": 0,
+    "output_tail": "...                                                                      [100%]\n3 passed in 0.01s\n"
+  },
+  "agent": {
+    "steps": 11,
+    "finished": "no_tool_calls",
+    "error": null,
+    "exit_reason": "done",
+    "backend": "harnessx"
+  },
+  "final_pytest": {
+    "passed": false,
+    "rc": 1,
+    "output_tail": "pected. Found: ['Eve (Eng),6', 'Frank (Eng),6', 'Heidi (Sales),6', 'Ivan (Sales),6', 'Judy (Sales),6', 'Mallory (Eng),6', 'David (Dir Eng),3', 'Grace (Dir Sales),3']\nE       assert ['Eve (Eng),6...(Eng),6', ...] == ['Alice (CEO)...Dir Sales),3']\nE         \nE         At index 0 diff: 'Eve (Eng),6' != 'Alice (CEO),11'\nE         Left contains 3 more items, first extra item: 'Mallory (Eng),6'\nE         Use -v to get more diff\n\n/tmp/test_final_state.py:51: AssertionError\n____________________________ test_query_plan_output ____________________________\n\n    def test_query_plan_output():\n        \"\"\"Check if the query plan file exists and indicates index usage for the employees table.\"\"\"\n        assert os.path.isfile(PLAN_PATH), f\"Query plan file missing at {PLAN_PATH}\"\n    \n        with open(PLAN_PATH, \"r\") as f:\n            content = f.read().upper()\n    \n        # The output of EXPLAIN QUERY PLAN might vary slightly depending on sqlite version,\n        # but it should contain SEARCH (or SEARCH TABLE) and USING INDEX.\n        # We check that it doesn't do a SCAN on the employees table for the recursive part,\n        # or at least that it uses an index on employees.\n    \n>       assert \"USING INDEX\" in content, \"The query plan does not indicate that an index was used (missing 'USING INDEX').\"\nE       AssertionError: The query plan does not indicate that an index was used (missing 'USING INDEX').\nE       assert 'USING INDEX' in 'QUERY PLAN\\n|--MATERIALIZE SUBORDINATES\\n|  |--SETUP\\n|  |  `--SCAN EMPLOYEES USING COVERING INDEX IDX_EMPLOYEES_MANA...GER_ID (MANAGER_ID=?)\\n|--SCAN E\\n|--SEARCH S USING AUTOMATIC COVERING INDEX (ID=?)\\n`--USE TEMP B-TREE FOR ORDER BY\\n'\n\n/tmp/test_final_state.py:65: AssertionError\n=========================== short test summary info ============================\nFAILED ../../tmp/test_final_state.py::test_csv_output - AssertionError: CSV o...\nFAILED ../../tmp/test_final_state.py::test_query_plan_output - AssertionError...\n2 failed, 1 passed in 0.02s\n"
+  }
+}

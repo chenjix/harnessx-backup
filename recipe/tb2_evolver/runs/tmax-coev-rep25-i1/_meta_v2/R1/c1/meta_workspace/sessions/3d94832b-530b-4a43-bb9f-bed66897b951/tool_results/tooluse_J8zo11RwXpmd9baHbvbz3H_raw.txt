@@ -1,0 +1,213 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	from __future__ import annotations
+4	
+5	import dataclasses
+6	import hashlib
+7	from collections import deque
+8	
+9	import json
+10	
+11	from ...core.events import (
+12	    StepStartEvent,
+13	    TaskEndEvent,
+14	    TaskStartEvent,
+15	    ToolCallEvent,
+16	    ToolResultEvent,
+17	)
+18	from ...core.processor import MultiHookProcessor
+19	from ...core.runloop import LoopDetectedError
+20	
+21	
+22	_WARN_TEMPLATE = (
+23	    "\n\n[LoopDetection] ⚠️  The exact same tool call(s) have been issued {count} times "
+24	    "in a row ({tools}). You are stuck in a loop. Stop and reconsider your approach: "
+25	    "re-read the task, check what you have already tried, and try something fundamentally "
+26	    "different."
+27	)
+28	
+29	_NAME_WARN_TEMPLATE = (
+30	    "\n\n[LoopDetection] ⚠️  You have called `{tool}` {count} times consecutively with "
+31	    "different arguments. This suggests you are stuck in a repetitive pattern "
+32	    "({pattern}). Stop and ask yourself: is this work actually necessary, or are "
+33	    "you going in circles? Re-read the task requirements and consider a completely "
+34	    "different approach — or simply finish if the task is already done."
+35	)
+36	
+37	
+38	class LoopDetectionProcessor(MultiHookProcessor):
+39	    """Detect repeating step patterns using two parallel fingerprint strategies.
+40	
+41	    **Strategy 1 — exact** (name + inputs): high-precision, two-phase
+42	    (warn then raise).  Catches identical tool calls repeated verbatim.
+43	
+44	    **Strategy 2 — name-only** (tool names, inputs ignored): catches semantic
+45	    loops where the agent repeatedly calls the same *type* of tool with varying
+46	    arguments (document-generation loops, infinite analysis sampling, etc.).
+47	    Warn-only — never raises, because name-only matching is noisier and
+48	    terminating on a loose signal would cause false-positive task failures.
+49	
+50	    Both strategies use the **consecutive run length** at the tail of their
+51	    respective sliding windows, so interleaved steps break the count and avoid
+52	    false positives on legitimate exploration.
+53	
+54	    **Compaction awareness**: fingerprint windows are cleared when a
+55	    message-count drop of ≥ ``compaction_drop_threshold`` is detected in
+56	    ``on_step_start``, preventing stale pre-compaction fingerprints from
+57	    contributing to spurious loop counts.
+58	
+59	    Args:
+60	        window_size:               Sliding window size for both strategies
+61	                                   (default 12).
+62	        warn_threshold:            Strategy 1 consecutive-repeat count that
+63	                                   injects a warning (default 3).
+64	        threshold:                 Strategy 1 consecutive-repeat count that
+65	                                   raises :exc:`LoopDetectedError` (default 5).
+66	        name_warn_threshold:       Strategy 2 consecutive-repeat count that
+67	                                   injects a warning (default 8).  No raise.
+68	        compaction_drop_threshold: Message-count drop that signals compaction
+69	                                   and triggers a fingerprint reset (default 5).
+70	    """
+71	
+72	    _singleton_group = "loop_detection"
+73	    _order = 20
+74	
+75	    def __init__(
+76	        self,
+77	        window_size: int = 12,
+78	        warn_threshold: int = 3,
+79	        threshold: int = 5,
+80	        name_warn_threshold: int = 8,
+81	        compaction_drop_threshold: int = 5,
+82	    ):
+83	        self.window_size = window_size
+84	        self.warn_threshold = warn_threshold
+85	        self.threshold = threshold
+86	        self.name_warn_threshold = name_warn_threshold
+87	        self.compaction_drop_threshold = compaction_drop_threshold
+88	
+89	        self._fingerprints: deque[str] = deque(maxlen=window_size)
+90	        self._name_fingerprints: deque[str] = deque(maxlen=window_size)
+91	        self._current_run_id: str = ""
+92	        self._prev_message_count: int = 0
+93	        # Maps tool_call_id → exact fingerprint (captured in on_before_tool,
+94	        # consumed in on_after_tool to avoid a separate staging step).
+95	        self._pending_fp: dict[str, str] = {}
+96	
+97	    # ------------------------------------------------------------------
+98	    # Helpers
+99	    # ------------------------------------------------------------------
+100	
+101	    def _compute_fingerprint(self, tool_call_summary: str) -> str:
+102	        """sha256 of tool_call_summary; empty string if no tool calls."""
+103	        if not tool_call_summary:
+104	            return ""
+105	        return hashlib.sha256(tool_call_summary.encode()).hexdigest()[:16]
+106	
+107	    @staticmethod
+108	    def _consecutive_tail(window: deque, fp: str) -> int:
+109	        """Count how many entries at the *tail* of *window* equal *fp*."""
+110	        count = 0
+111	        for past in reversed(window):
+112	            if past == fp:
+113	                count += 1
+114	            else:
+115	                break
+116	        return count
+117	
+118	    def _reset(self) -> None:
+119	        self._fingerprints.clear()
+120	        self._name_fingerprints.clear()
+121	        self._prev_message_count = 0
+122	        self._pending_fp.clear()
+123	
+124	    # ------------------------------------------------------------------
+125	    # Hooks
+126	    # ------------------------------------------------------------------
+127	
+128	    async def on_task_start(self, event: TaskStartEvent):
+129	        """Reset all per-task state at the beginning of each task."""
+130	        self._reset()
+131	        self._current_run_id = event.run_id
+132	        yield event
+133	
+134	    async def on_step_start(self, event: StepStartEvent):
+135	        """Detect compaction-driven message drops; clear stale fingerprints if needed."""
+136	        if event.run_id != self._current_run_id:
+137	            self._reset()
+138	            self._current_run_id = event.run_id
+139	
+140	        # CompactionProcessor (order=8) runs before us (order=20) so
+141	        # event.messages already reflects any eviction done this step.
+142	        current_count = len(event.messages)
+143	        if self._prev_message_count > 0 and self._prev_message_count - current_count >= self.compaction_drop_threshold:
+144	            self._fingerprints.clear()
+145	            self._name_fingerprints.clear()
+146	            self._pending_fp.clear()
+147	        self._prev_message_count = current_count
+148	        yield event
+149	
+150	    async def on_before_tool(self, event: ToolCallEvent):
+151	        """Capture the exact fingerprint (name + serialised inputs) for this call.
+152	
+153	        Stored by tool_call_id so on_after_tool can look it up without needing
+154	        the inputs again — ToolResultEvent does not carry them.
+155	        """
+156	        try:
+157	            input_str = json.dumps(event.tool_input, sort_keys=True, ensure_ascii=False)
+158	        except Exception:
+159	            input_str = repr(event.tool_input)
+160	        self._pending_fp[event.tool_call_id] = self._compute_fingerprint(f"{event.tool_name}\x00{input_str}")
+161	        yield event
+162	
+163	    async def on_after_tool(self, event: ToolResultEvent):
+164	        """Detect loop and inject warning directly into this tool result if needed.
+165	
+166	        Both strategies are evaluated here, so no staging step is required.
+167	        The warning is appended to the result content so the system prompt is
+168	        never touched by this processor.
+169	        """
+170	        fp = self._pending_fp.pop(event.tool_call_id, None)
+171	
+172	        # Steps with no fingerprint (e.g. on_before_tool not seen) break the run.
+173	        if not fp:
+174	            self._fingerprints.append("")
+175	            self._name_fingerprints.append("")
+176	            yield event
+177	            return
+178	
+179	        # ── Strategy 1: exact fingerprint (name + inputs) ──────────────
+180	        s1_run = self._consecutive_tail(self._fingerprints, fp) + 1
+181	        self._fingerprints.append(fp)
+182	
+183	        if s1_run >= self.threshold:
+184	            raise LoopDetectedError(
+185	                f"Loop detected: identical tool call '{event.tool_name}' repeated {s1_run} times consecutively"
+186	            )
+187	
+188	        warning = ""
+189	        if s1_run >= self.warn_threshold:
+190	            warning = _WARN_TEMPLATE.format(
+191	                count=s1_run,
+192	                tools=f"`{event.tool_name}`",
+193	            )
+194	
+195	        # ── Strategy 2: name-only fingerprint (warn-only, no raise) ────
+196	        s2_run = self._consecutive_tail(self._name_fingerprints, event.tool_name) + 1
+197	        self._name_fingerprints.append(event.tool_name)
+198	
+199	        if not warning and s2_run >= self.name_warn_threshold:
+200	            warning = _NAME_WARN_TEMPLATE.format(
+201	                tool=event.tool_name,
+202	                count=s2_run,
+203	                pattern=event.tool_name,
+204	            )
+205	
+206	        if warning:
+207	            yield dataclasses.replace(event, result=(event.result or "") + "\n\n" + warning)
+208	        else:
+209	            yield event
+210	
+211	    async def on_task_end(self, event: TaskEndEvent):
+212	        self._reset()
+213	        yield event

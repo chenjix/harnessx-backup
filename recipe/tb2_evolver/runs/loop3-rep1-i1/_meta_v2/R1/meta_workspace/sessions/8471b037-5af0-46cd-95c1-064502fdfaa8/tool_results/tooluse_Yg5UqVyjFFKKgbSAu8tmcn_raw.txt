@@ -1,0 +1,122 @@
+1	# Routed evidence for this round
+2	
+3	Every failure in this round was attributed to a responsible side before you were shown it. **Only the defects listed under "Editable defects" are yours to fix.** The rest are listed as counts so you know what the score contains, but editing the harness cannot address them — do not write prompt text aimed at them.
+4	
+5	- trajectories: **28**  (6 failed, 22 passed)
+6	- attributed to the harness/tool layer (yours): **0**
+7	- attributed to the model (goes to SFT, not to you): **5**
+8	- environment / benchmark / unattributable (nobody's to fix here): **1**
+9	
+10	## Editable defects
+11	
+12	Grouped across trajectories: `count` is how many trials exhibited the same defect, so a count of 20 is one bug, not twenty.
+13	
+14	### 1. [CONTESTED] `visible_error_no_effective_recovery` — on `cat <path>`  (count=1, tasks=1)
+15	- interaction edge: `Model-Tool`
+16	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+17	- affected tasks: cancel-async-tasks
+18	- evidence:
+19	  - `cancel-async-tasks` step 2: action `cat /app/run.py`
+20	    observation: `import asyncio from typing import Callable, Awaitable   async def run_tasks(tasks: list[Callable[[], Awaitable[None]]], max_concurrent: int) -> None:     """Run async tasks with a concurrency limit, handling keyboard int`
+21	    trial: `cancel-async-tasks__N5UaeGN`
+22	
+23	### 2. [CONTESTED] `visible_error_no_effective_recovery` — on ` tail -<n>`  (count=1, tasks=1)
+24	- interaction edge: `Model-Tool`
+25	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+26	- affected tasks: configure-git-webserver
+27	- evidence:
+28	  - `configure-git-webserver` step 3: action `apt-get install -y git python3 2>&1 | tail -5`
+29	    observation: `E: Failed to fetch http://security.ubuntu.com/ubuntu/pool/main/p/perl/libperl5.38t64_5.38.2-3.2ubuntu0.2_amd64.deb  404  Not Found [IP: 91.189.92.24 80] E: Failed to fetch http://security.ubuntu.com/ubuntu/pool/main/p/pe`
+30	    trial: `configure-git-webserver__zC6XSUN`
+31	
+32	### 3. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && .<path> <n>>&<n>`  (count=1, tasks=1)
+33	- interaction edge: `Model-Tool`
+34	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+35	- affected tasks: custom-memory-heap-crash
+36	- evidence:
+37	  - `custom-memory-heap-crash` step 2: action `cd /app && ./debug 2>&1`
+38	    observation: `=== Monte Carlo π Estimation Application ===  === Running Monte Carlo Simulation ===  Estimating π using Monte Carlo method... Samples: 1000000 Estimated π: 3.142428 Actual π: 3.141593 Error: 0.000835 Accuracy: 99.97%  =`
+39	    trial: `custom-memory-heap-crash__QE7r8yp`
+40	
+41	### 4. [CONTESTED] `visible_error_no_effective_recovery` — on `cd <path> && python3 benchmark.py <n>>&<n>`  (count=1, tasks=1)
+42	- interaction edge: `Model-Tool`
+43	- ⚠️ primary attribution is `MODEL`; harness is the alternative hypothesis at p=0.35. Treat this as a lead to verify against the trajectory, not as an established defect.
+44	- affected tasks: portfolio-optimization
+45	- evidence:
+46	  - `portfolio-optimization` step 10: action `cd /app && python3 benchmark.py 2>&1`
+47	    observation: `Portfolio Optimization Benchmark ========================================  Testing portfolio size: 5000 assets ------------------------------ Python baseline time: 1529.1 ms Risk - Python: 0.022532625110, C: 0.0225326251`
+48	    trial: `portfolio-optimization__hjT4cru`
+49	
+50	## Not actionable by a harness edit
+51	
+52	- `missing_dependency_or_broken_env`: 1
+53	
+54	These are excluded from the editable list on purpose. If the score looks low, some of it is these — that is not a signal about your config.
+55	
+56	## Affordance gaps (harness-actionable, derived by contrast)
+57	
+58	Each entry pairs an error **our** model failed to recover from with recoveries a stronger model achieved on the **same error class** (mined from the Tmax success corpus — a different model on a different harness). The Tmax half is **not evidence of a defect here**; it is a demonstration that a recovery exists. Your question for each: *given the current config, is that recovery reachable?* Concretely — is the error surfaced in full rather than truncated, does any tool description or prompt line make the probe an obvious next move, is there a step budget left to attempt it?
+59	
+60	### A1. `generic_error` — our model failed to recover 2x
+61	- our failure modes: `visible_error_no_effective_recovery`x2
+62	- affected tasks: cancel-async-tasks, custom-memory-heap-crash
+63	- what our model did:
+64	  - `cancel-async-tasks`: ran `cat /app/run.py`
+65	    got: `import asyncio from typing import Callable, Awaitable   async def run_tasks(tasks: list[Callable[[], Awaitable[None]]], max_concurrent: int) -> None:     """Run async tasks with a concurrency limit, handling keyboard interrupts gracefully. `
+66	  - `custom-memory-heap-crash`: ran `cd /app && ./debug 2>&1`
+67	    got: `=== Monte Carlo π Estimation Application ===  === Running Monte Carlo Simulation ===  Estimating π using Monte Carlo method... Samples: 1000000 Estimated π: 3.142428 Actual π: 3.141593 Error: 0.000835 Accuracy: 99.97%  === Computation compl`
+68	- what a successful recovery looks like on this error class:
+69	  - after `echo "=== hardened_daemon.cpp ==="
+70	cat /home/user/hardened_daemon.cpp
+71	echo ""
+72	echo "=== start_daemon.exp ==="
+73	` failed, recovered with **`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`** (1 turns to success)
+74	  - after `cd /home/user/sim && go build -o sim main.go && ./sim` failed, recovered with **`sed -n '38,45p' /home/user/sim/main.go`** (5 turns to success)
+75	  - after `cd /home/user/sim && go build -o sim main.go && echo "Build successful"` failed, recovered with **`cd /home/user/sim && nl -ba main.go | sed -n '65,85p'`** (6 turns to success)
+76	
+77	### A2. `package_install_failed` — our model failed to recover 2x
+78	- our failure modes: `visible_error_no_effective_recovery`x2
+79	- affected tasks: configure-git-webserver, portfolio-optimization
+80	- what our model did:
+81	  - `configure-git-webserver`: ran `apt-get install -y git python3 2>&1 | tail -5`
+82	    got: `E: Failed to fetch http://security.ubuntu.com/ubuntu/pool/main/p/perl/libperl5.38t64_5.38.2-3.2ubuntu0.2_amd64.deb  404  Not Found [IP: 91.189.92.24 80] E: Failed to fetch http://security.ubuntu.com/ubuntu/pool/main/p/perl/perl_5.38.2-3.2ub`
+83	  - `portfolio-optimization`: ran `cd /app && python3 benchmark.py 2>&1`
+84	    got: `Portfolio Optimization Benchmark ========================================  Testing portfolio size: 5000 assets ------------------------------ Python baseline time: 1529.1 ms Risk - Python: 0.022532625110, C: 0.022532625110, diff: 1.39e-17 R`
+85	- what a successful recovery looks like on this error class:
+86	  - after `cat /home/user/lu_solver.c` failed, recovered with **`cat /home/user/input_matrix.csv`** (7 turns to success)
+87	  - after `date && echo "---" && echo $TZ && echo "---" && python3 -c "
+88	import os, time
+89	print('os.environ TZ:', os.enviro` failed, recovered with **`sed -i 's/TZ=America\/New_York/TZ=UTC/' /home/user/app/config.env && cat /home/user/app/config.env`** (8 turns to success)
+90	  - after `timeout 5 /usr/bin/expect /home/user/start_daemon.exp; echo "Expect exit code: $?"` failed, recovered with **`rm -f /home/user/heartbeat.log /home/user/monitor.log && /home/user/monitor.sh &
+91	echo "Monitor PID: $!"
+92	sleep 3
+93	echo "--- After 3 seconds ---"
+94	echo "H`** (8 turns to success)
+95	
+96	### A3. `module_not_found` — our model failed to recover 1x
+97	- our failure modes: `ignored_visible_error_repeated_action`x1
+98	- affected tasks: pytorch-model-cli
+99	- what our model did:
+100	  - `pytorch-model-cli`: ran `cd /app && python3 -c "
+101	import torch
+102	state_dict = torch.load('model.pth', map_location='cpu')
+103	for k, v in state_dict.items():
+104	    print(f'{k}: shape={v.shape}, dtype={v.dtype}')
+105	"`
+106	    got: `Traceback (most recent call last):   File "<string>", line 2, in <module>     import torch ModuleNotFoundError: No module named 'torch'  (exit 1)`
+107	- what a successful recovery looks like on this error class:
+108	  - after `python3 -c "import matplotlib" 2>&1 || pip install matplotlib` failed, recovered with **`cd /home/user/workspace && python3 mcmc.py`** (5 turns to success)
+109	  - after `python3 << 'PYEOF'
+110	import numpy as np
+111	import cv2
+112	import os
+113	
+114	# Create a synthetic experiment video - 50 frames ` failed, recovered with **`pip install opencv-python-headless 2>&1 | tail -5`** (6 turns to success)
+115	  - after `ls -la /home/user/workspace/libcustom_math.so && python3 -c "import matplotlib; print('matplotlib available')"` failed, recovered with **`pip install matplotlib -q`** (6 turns to success)
+116	
+117	## Model-side failures (routed to SFT, not to you)
+118	
+119	- `visible_error_no_effective_recovery`: 4
+120	- `ignored_visible_error_repeated_action`: 1
+121	
+122	The model saw the error and did not recover. A harness edit can sometimes help here (by making recovery easier to reach — see the affordance gaps above), but the primary fix is training data, which is already being collected.

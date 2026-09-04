@@ -1,0 +1,49 @@
+num msgs 70
+=== task ===
+You are a Database Reliability Engineer managing a complex backup infrastructure. The metadata for all backups (Full and Incremental) across hundreds of databases is stored in a SQLite database located at `/home/user/backup_catalog.db`. 
+
+Your task is to implement a C++ HTTP microservice that answers specific analytical queries about the backup state. You must also optimize the database schema to ensure these queries perform efficiently.
+
+The SQLite database has the following table:
+`CREATE TABLE backups (id INTEGER PRIMARY KEY, db_name TEXT, backup_type TEXT, parent_id INTEGER, size_bytes INTEGER, status TEXT, created_at DATETIME);`
+`backup_type` is either 'FULL' or 'INC'. If it's 'INC', `parent_id` points to the immediately preceding backup in the chain (which could be an 'INC' or 'FULL' backup). If 'FULL', `parent_id` is NULL.
+
+Write a C++ HTTP server listening exactly on `127.0.0.1:9090`. You may download and use the header-only `cpp-httplib` library for the HTTP server, and link against `sqlite3`. 
+
+Your service must implement the following REST endpoints. All endpoints must require an `Authorization` header containing exactly `Bearer dbre-token-xyz123`. Return HTTP 401 Unauthorized if missing or incorrect.
+
+1. **`GET /chain?id=<id>`**
+   * **Goal:** Trace the lineage of an incremental backup back to its root Full backup.
+   * **Implementation:** Use a Recursive CTE to traverse the `parent_id` relationships upwards until `parent_id` is NULL.
+   * **Output Format:** A JSO
+=== last few assistant cmds ===
+[2] sqlite3 backup_catalog.db "WITH RECURSIVE chain AS (SELECT id, parent_id, size_bytes FROM backups WHERE parent_id IS NOT NULL UNION ALL SELECT b.id, b
+[4] sqlite3 backup_catalog.db "WITH RECURSIVE chain AS (SELECT id, parent_id, size_bytes, backup_type FROM backups WHERE parent_id IS NOT NULL UNION ALL S
+[6] cat > /home/user/server.cpp << 'EOF' #include "httplib.h" #include <sqlite3.h> #include <iostream> #include <string> #include <vector> #include <map> 
+[9] pkill -f "./server" && sleep 1 && cd /home/user && g++ -std=c++17 -o server server.cpp httplib.h -lsqlite3 -pthread 2>&1 && ./server &
+[11] sleep 2 && ps aux | grep server
+[13] pkill -9 -f "./server" && sleep 1 && cd /home/user && g++ -std=c++17 -o server server.cpp httplib.h -lsqlite3 -pthread 2>&1 && ./server &
+[15] sleep 2 && ps aux | grep server
+[17] kill -9 404 2>/dev/null; sleep 1; ps aux | grep server
+[19] fuser -k 9090/tcp 2>/dev/null; sleep 1; ps aux | grep server
+[21] kill -9 403 2>/dev/null; sleep 1; ps aux | grep server
+[23] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[25] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[27] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[29] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[31] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[33] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[35] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[37] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[39] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[41] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[43] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[45] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[47] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[49] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[51] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[53] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep server
+[58] kill -9 403 404 2>/dev/null; sleep 1; ps aux | grep -E "server|defunct"
+[60] kill -9 403 2>/dev/null; sleep 1; ps aux | grep -E "server|defunct"
+[64] kill -9 403 2>/dev/null; sleep 1; ps aux | grep -E "server|defunct"
+[68] kill -9 403 2>/dev/null; sleep 1; ps aux | grep -E "server|defunct"

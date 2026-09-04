@@ -1,0 +1,71 @@
+1	# Evolve Journal — tmax-coev-rep24-i1
+2	
+3	## Round 1 — guard self-sabotaging exits
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-05-14T00:00:00Z
+8	hypothesis_id: h_unmet_requirement_exit_guard_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=24/50; +1/-8 gained=task_001321_658ce4a8 lost=task_000684_1a33ef37,task_000760_76ba653c,task_000912_770802f8,task_001088_6f566806; score 0.4800 < incumbent(mean) 0.6200 - tol 0.0400 but unique solves task_001321_658ce4a8 — keep as pivot, incumbent unchanged
+14	expected_global_gain: "Recovers no_tool_calls exits where the agent solved the task but shipped the deliverable at the wrong path/name/form after a secondary obstacle (TB2 'correct logic, wrong path' class)."
+15	regression_risk: "Content-gated + one-shot; silent on clean exits and cannot loop. Worst case one extra model turn on a truly-complete task that happened to use blocker-like phrasing."
+16	cost_shift: "Negligible aggregate; +~1 model turn only on the subset of exits containing acknowledged-blocker phrasing."
+17	rollback_trigger: "If R2 shows pass_rate flat/down AND new T->F regressions on tasks that previously exited cleanly, revert the processor."
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000010_644ab1c2` failed `test_operator_script_exists`:
+23	`/home/user/operator.py` did not exist at exit. The agent had in fact built a
+24	correct, tested pipeline (backup tarball created, port-forward up, manifests
+25	applied — `api_success.log` confirms), but the required filename `operator.py`
+26	shadows the stdlib `operator` module, so `python3 /home/user/operator.py`
+27	crashed on the transitive `import operator`. The agent diagnosed the shadow,
+28	concluded (wrongly) that the *only* fix was to rename the file, and left the
+29	deliverable at `k8s_operator.py`. The existing `CustomSelfVerifyProcessor`
+30	fired its one-shot checklist and the agent complied — but confirmed the
+31	*wrong* file, because it had already accepted the wrong path. It then exited
+32	verbalising the unmet requirement: "The only issue is that the script can't be
+33	named `operator.py` ... The task is complete." This is the TB2 "correct logic,
+34	wrong path" hard-failure mode: a mechanical exit-gate gap, not a capability or
+35	knowledge gap.
+36	
+37	### Changes
+38	
+39	- `processors/unmet_requirement_exit_guard.py` — new one-shot
+40	  `UnmetRequirementExitGuard` (Control). On an exit turn (finish_reason in
+41	  {end_turn, stop}, no tool calls) whose text matches acknowledged-blocker
+42	  phrasing, injects one keepalive + a focused nudge to satisfy the exact
+43	  deliverable path/name instead of abandoning it. Orthogonal to and ordered
+44	  after `CustomSelfVerifyProcessor` (order 91 vs 90).
+45	- `config.yaml` — register the processor via `file://` after
+46	  `CustomSelfVerifyProcessor`.
+47	
+48	### Evidence
+49	
+50	- `task_000010_644ab1c2` result.json: `final_pytest` fail
+51	  `test_operator_script_exists`; `exit_reason=done`, `finished=no_tool_calls`,
+52	  42 steps.
+53	- messages step 20: traceback `import subprocess ... import operator` (stdlib
+54	  shadow by the agent's own `operator.py`).
+55	- messages step 50/74: pipeline works as `k8s_operator.py` (manifests applied,
+56	  backup created) — solution is correct, only the path is wrong.
+57	- messages step 79-82: self-verify fires once; agent confirms `k8s_operator.py`
+58	  (not the required path).
+59	- messages step 83 (final): "The only issue is that the script can't be named
+60	  `operator.py` ... The task is complete." → exits with deliverable absent.
+61	
+62	### Uncertainty
+63	
+64	The nudge must fire at the right boundary and the agent must then act on it
+65	(copy/move the artifact to the required path, or run the required file from a
+66	non-shadowing cwd). The regex is intentionally general to catch the wider
+67	"knowingly-incomplete exit" class; if it proves too broad (fires on complete
+68	tasks) or too narrow (misses the phrasing), tune the pattern next round. Single
+69	distinct task in this batch shows the exact shadow mechanism, but the exit-gate
+70	mechanism it fixes is generic; watch R2 attribution to confirm it generalises
+71	rather than only flipping the one focus task.

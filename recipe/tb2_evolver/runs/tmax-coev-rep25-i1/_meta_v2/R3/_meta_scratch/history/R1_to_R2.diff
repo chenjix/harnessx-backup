@@ -1,0 +1,26 @@
+--- R1
++++ R2
+@@ -49,2 +49,11 @@
+   _hook_: '*'
++# Break degenerate REASONING loops: identical consecutive assistant narration
++# even when finish_reason=stop and tool calls succeed (a shape the length- and
++# error/command-fingerprint guards miss). Injects one legible change-approach
++# directive after repeat_threshold identical turns; bounded by max_nudges.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R2/c0/processors/stuck_reasoning_recovery.py::StuckReasoningRecoveryProcessor
++  repeat_threshold: 12
++  max_nudges: 3
++  min_chars: 24
++  _hook_: '*'
+ - _target_: harnessx.processors.control.compaction.CompactionProcessor
+@@ -68,10 +77,3 @@
+   _hook_: '*'
+-# Replaces the stock one-shot CustomSelfVerifyProcessor with a bounded,
+-# work-aware completion gate. Re-nudges a no-tool-call exit up to
+-# max_nudges times, but ONLY when the agent tried to exit without having
+-# run a real verification command since the last nudge (bare "task
+-# complete" assertions or stuck-loop text exits). If the agent actually
+-# ran verification commands after being nudged, the gate steps aside.
+-- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep25-i1/_meta_v2/R1/c4/processors/iterative_verify_gate.py::IterativeVerifyGate
+-  max_nudges: 2
++- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+   _hook_: '*'

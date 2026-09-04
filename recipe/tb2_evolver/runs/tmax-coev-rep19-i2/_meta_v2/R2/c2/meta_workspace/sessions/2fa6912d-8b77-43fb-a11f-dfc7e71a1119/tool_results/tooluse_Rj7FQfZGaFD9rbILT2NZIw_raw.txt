@@ -1,0 +1,29 @@
+Write a C++ HTTP server listening exactly on `127.0.0.1:9090`. You may download and use the header-only `cpp-httplib` library for the HTTP server, and link against `sqlite3`. 
+
+Your service must implement the following REST endpoints. All endpoints must require an `Authorization` header containing exactly `Bearer dbre-token-xyz123`. Return HTTP 401 Unauthorized if missing or incorrect.
+
+1. **`GET /chain?id=<id>`**
+   * **Goal:** Trace the lineage of an incremental backup back to its root Full backup.
+   * **Implementation:** Use a Recursive CTE to traverse the `parent_id` relationships upwards until `parent_id` is NULL.
+   * **Output Format:** A JSON array of backup IDs representing the chain, starting with the requested `<id>` and ending with the root FULL backup ID. Example: `[45, 42, 40]`. Return 404 if the ID doesn't exist.
+
+2. **`GET /largest_increments`**
+   * **Goal:** For every FULL backup, find the single largest INC backup within its entire descendant chain.
+   * **Implementation:** You must use Window Functions (e.g., `MAX() OVER (...)`, `RANK()`, or `ROW_NUMBER()`) combined with your recursive lineage logic. 
+   * **Output Format:** A JSON object mapping the root FULL backup ID (as a string) to the maximum `size_bytes` of any incremental backup in its chain. Example: `{"40": 500000, "88": 120000}`. Do not include FULL backups that have no incremental descendants.
+
+3. **`GET /latest_successful`**
+   * **Goal:** Find the ID of the most recent successful (`status = 'SUCCESS'`) backup (of any type) for each distinct `db_name`.
+   * **Implementation:** The raw query for this currently requires a full table scan and is too slow. Before running your service, you must use the `sqlite3` CLI tool to analyze the query plan and create the optimal covering index(es) in `/home/user/backup_catalog.db` to make finding the latest successful backup by `db_name` extremely fast.
+   * **Output Format:** A JSON object mapping `db_name` to the backup ID. Example: `{"auth_db": 105, "billing_db": 210}`.
+
+Ensure your server runs continuously in the background or foreground once initialized. Output a file `/home/user/server_ready.txt` containing the word `READY` once your service is bound to the port and ready to accept traffic.
+=== 002063 tail ===
+
+Please fix the Rust extension, build it, write the Python server, and start the server so it listens on the required port. Leave the server running in the background.
+
+To complete the task:
+- Extract the checksum parameters from `/app/hw_specs.png`.
+- Fix the ownership issues in the Rust code.
+- Compile the Rust-to-Python extension.
+- Implement and start the HTTP server.

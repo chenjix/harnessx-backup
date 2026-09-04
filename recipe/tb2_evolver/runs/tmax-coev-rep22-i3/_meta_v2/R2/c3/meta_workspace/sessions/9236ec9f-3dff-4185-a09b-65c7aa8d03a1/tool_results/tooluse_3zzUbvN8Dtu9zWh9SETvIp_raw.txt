@@ -1,0 +1,73 @@
+1	# Evolve journal — tmax-coev-rep22-i3
+2	
+3	## Round 1 — hard-stop length loop
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_length_loop_hardstop_v1
+9	levers: [control]
+10	predicted_affected: []
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=12/50; +4/-3 gained=task_000328_80fb4c9f,task_001031_a8f0eb37,task_001653_c4cafa73,task_002167_3d0510c1 lost=task_000321_ad43caad,task_001321_658ce4a8,task_001492_94f30428; score 0.2400 >= incumbent(mean) 0.2400 - tol 0.0400
+14	expected_global_gain: "Caps budget bleed on the 'model freezes into consecutive full-length no-tool-call turns' cluster; frees shared step/wall budget for other tasks in the round"
+15	regression_risk: "A model that would have recovered on truncation turn 7+ is terminated at 6; judged unlikely — a 6-deep identical no-tool-call length loop recovering is not observed in the evolve set"
+16	cost_shift: "Net down — bounds worst-case per-task output tokens on frozen runs (was unbounded to full budget, now ~6 truncations); zero added cost on healthy runs"
+17	rollback_trigger: "Next round shows a previously-passing task newly ending exit_reason=loop_detected at the hard-stop boundary (model was mid-recovery) -> raise hard_stop_threshold or set 0"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000010_644ab1c2` (system_administration, reward=0,
+23	exit_reason=done, finished=no_tool_calls, 539.8s). The reward-0 root cause is
+24	a task-design trap: the task requires the deliverable at `/home/user/operator.py`,
+25	which shadows Python's stdlib `operator`; when the verifier runs pytest from
+26	`/home/user` the shadow triggers a circular import and pytest cannot collect.
+27	The agent's script is otherwise functionally correct. A harness fix for that
+28	would need task-specific knowledge (rename/guard the file) and fails the
+29	generalization test — logged as a task/capability trap, not patched.
+30	
+31	The generalizable harness gap the trajectory exposes is separate: while
+32	agonizing over the operator.py conflict the model froze into **13 consecutive**
+33	`stop_reason=length` no-tool-call turns (steps ~39-69), each a full 4096-token
+34	re-narration — roughly 1/3 of the run's budget with zero forward action. The
+35	existing `LengthTruncationRecoveryProcessor` fires (content collapsed to ~1964
+36	chars, corrective nudge injected) but only ever *nudges* — it has no upper
+37	bound and the model ignored the nudge all 13 turns. `CyclicLoopBreaker` keys on
+38	tool-call cycles so a no-tool-call loop never enters its window; nothing in the
+39	pipeline could terminate the loop.
+40	
+41	### Changes
+42	
+43	- `processors/length_recovery_escalating.py` — drop-in superset of the stock
+44	  `LengthTruncationRecoveryProcessor`: keeps collapse + escalating-nudge
+45	  verbatim, adds a `hard_stop_threshold` (default 6). After that many
+46	  *consecutive* length-truncation no-tool-call turns, raises `LoopDetectedError`
+47	  from `on_after_model` → clean `exit_reason='loop_detected'`, best output
+48	  recovered, workspace preserved for the verifier. Counter resets on any tool
+49	  call or non-length finish; `hard_stop_threshold<=0` restores stock behaviour.
+50	- `config.yaml` — swapped the stock recipe `_target_` for the new `file://`
+51	  processor and added `hard_stop_threshold: 6` (well above `repeat_threshold=2`
+52	  so the nudge gets 4+ chances first). All other pipeline entries unchanged.
+53	
+54	### Evidence
+55	
+56	- `task_000010_644ab1c2.result.json`: `agent.finished="no_tool_calls"`,
+57	  `elapsed_s=539.8`, `reward=0`; `final_pytest` tail =
+58	  `ImportError: cannot import name 'namedtuple' ... circular import
+59	  (/home/user/operator.py)` — the operator.py shadow trap.
+60	- Raw event log (`0521d7a5-...jsonl`): 13 records with
+61	  `meta.stop_reason="length"` and `usage.output_tokens=4096`, consecutive over
+62	  steps ~39-69; persisted assistant messages collapsed to ~1964 chars (proof
+63	  the stock processor fired) yet the model kept truncating.
+64	- Messages index: user turns 40,42,46,50,...,68 all the passive/nudge
+65	  continuation while assistant turns stayed 1964 chars with no tool call.
+66	
+67	### Uncertainty
+68	
+69	Predicted_affected is empty on purpose — this is a cost/budget-containment
+70	claim, not a pass-rate flip (task_000010 stays failed on the trap). The bet is
+71	that early termination of a demonstrably-frozen run is strictly better than
+72	nudging forever. Watch next round for any task that flips T→loop_detected at
+73	the boundary; if seen, the model was mid-recovery and the threshold should rise.

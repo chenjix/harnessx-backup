@@ -1,0 +1,208 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""ActLoopKeepalive — keep a stalled agent acting instead of ending the run.
+4	
+5	Motivation (harness deficiency, not a model-knowledge gap)
+6	----------------------------------------------------------
+7	On Terminal-Bench 2 the only tool is ``Bash``; a task is solved by *writing
+8	files / starting services via Bash*, never by emitting prose. The run loop,
+9	however, treats any assistant turn with ``finish_reason in ("end_turn",
+10	"stop")`` and **no tool calls** as a natural completion and ``break``s the
+11	episode (harnessx/core/runloop.py ~L745). The stock
+12	``CustomSelfVerifyProcessor`` intercepts this — but only **once per task**
+13	("Fires at most once per task run. On the next no-tool-call turn it stays
+14	silent."). After that single keepalive is spent, the *next* text-only turn
+15	ends the run.
+16	
+17	Failure class this addresses:
+18	  A run ends on a large text-only assistant turn that contains no tool call —
+19	  the model rambles / plans in prose instead of executing, so the required
+20	  output file simply never gets created because the agent stopped mid-thought.
+21	  Healthy runs keep assistant turns small and tool-call-bearing; the stall
+22	  signature is a big final assistant message with an empty ``tool_calls`` list.
+23	
+24	This is a *class* deficiency: the harness gives up after one nudge, so a model
+25	prone to multi-turn rambling loses the run. The fix is to make the keepalive
+26	**repeatable but bounded** — nudge the agent back to action up to
+27	``max_reprompts`` times, then let the run stop so we never spin forever.
+28	
+29	Mechanism
+30	---------
+31	``on_after_model`` (``_order`` just after the stock one-shot self-verify, so on
+32	the turn *that* processor handles this stays silent because the response now
+33	carries its keepalive tool call):
+34	
+35	  * Detect a *stall*: ``finish_reason in ("end_turn","stop")`` AND no tool calls
+36	    AND non-empty content (an empty first-turn response is handled by the run
+37	    loop's own retry; a genuinely empty stop is left alone).
+38	  * If the content contains an explicit completion sentinel
+39	    (``completion_marker``, default ``"SUCCESS"``), the agent is deliberately
+40	    finishing — let it stop (yield unchanged).
+41	  * Otherwise, if reprompt budget remains, inject a synthetic keepalive tool
+42	    call so the run loop does not treat the turn as ``done``, and queue a short
+43	    user nudge (delivered on the next ``on_before_model``) telling the agent to
+44	    continue with a concrete ``Bash`` action or to emit the completion sentinel
+45	    to finish. The keepalive tool call is intercepted in ``on_before_tool`` and
+46	    never actually runs (``approved=False`` + ``synthetic_result``), mirroring
+47	    the stock self-verify keepalive contract exactly.
+48	  * When the reprompt budget is exhausted, yield unchanged → the run loop stops
+49	    naturally. Bounded, so no infinite loop.
+50	
+51	Contract notes
+52	--------------
+53	- ``on_after_model`` only rewrites ``tool_calls`` on the returned
+54	  ``ModelResponseEvent`` (same shape the stock processor uses); it never edits
+55	  message history from this hook.
+56	- ``on_before_model`` appends **exactly one** ``user`` message and only when a
+57	  nudge is pending, keeping the +1 insertion contract. The prior turn ended
+58	  with a (synthetic) tool result, so appending a user message is legal.
+59	- No task-specific literals: the nudge text is generic terminal-agent guidance
+60	  and fires on any task that stalls.
+61	"""
+62	
+63	from __future__ import annotations
+64	
+65	import dataclasses
+66	import uuid
+67	
+68	from harnessx.core.events import (
+69	    ModelResponseEvent,
+70	    ToolCallEvent,
+71	    TaskStartEvent,
+72	    TaskEndEvent,
+73	    BeforeModelEvent,
+74	    Message,
+75	    ToolCall,
+76	)
+77	from harnessx.core.processor import MultiHookProcessor
+78	
+79	_KEEPALIVE_TOOL = "_tb2_act_keepalive"
+80	_KEEPALIVE_ACK = "Continuation acknowledged. See the message below and keep working."
+81	
+82	_NUDGE_MSG = (
+83	    "You stopped without running a command, but the task is not finished — on "
+84	    "this environment work only counts when it is performed through the Bash "
+85	    "tool (writing files, running scripts, starting services). Planning or "
+86	    "explaining in prose does not change the filesystem.\n\n"
+87	    "Do ONE of the following now:\n"
+88	    "  1. If there is still work to do, take the next concrete step by calling "
+89	    "the Bash tool with an actual command (create/inspect the required output "
+90	    "file, run your script, verify a service is up, etc.).\n"
+91	    "  2. If — and only if — you have already verified with `ls` and `cat` that "
+92	    "every required output file exists at its exact path and its contents are "
+93	    "correct, end your message with the line `SUCCESS: task complete.` to "
+94	    "finish.\n\n"
+95	    "Do not repeat this reasoning back to me; act."
+96	)
+97	
+98	
+99	class ActLoopKeepalive(MultiHookProcessor):
+100	    """Repeatable, bounded keepalive that stops a rambling agent from ending
+101	    the run prematurely on a text-only turn.
+102	
+103	    Args:
+104	        max_reprompts: Maximum number of continuation nudges injected per task.
+105	            Each fires on a distinct no-tool-call stall turn. After the budget
+106	            is spent the run loop is allowed to stop normally. Kept modest so a
+107	            model that truly has nothing to do still terminates.
+108	        completion_marker: Case-insensitive substring that, when present in the
+109	            stalling turn's content, is treated as a deliberate completion — the
+110	            agent is allowed to stop instead of being nudged again.
+111	        min_content_chars: Only treat a no-tool-call turn as a rambling stall
+112	            worth reprompting when its content is at least this long. Very short
+113	            end_turn responses are left to the stock one-shot self-verify / the
+114	            run loop's own handling.
+115	    """
+116	
+117	    required_providers: frozenset = frozenset()
+118	
+119	    _singleton_group = "tb2_act_loop_keepalive"
+120	    # Just after the stock CustomSelfVerifyProcessor (_order=90): on the turn
+121	    # that one-shot handles, the response already carries its keepalive tool
+122	    # call, so this processor sees tool_calls != () and stays silent.
+123	    _order = 91
+124	
+125	    def __init__(
+126	        self,
+127	        max_reprompts: int = 6,
+128	        completion_marker: str = "SUCCESS",
+129	        min_content_chars: int = 1,
+130	    ) -> None:
+131	        self.max_reprompts = max(0, int(max_reprompts))
+132	        self.completion_marker = str(completion_marker).strip().lower()
+133	        self.min_content_chars = max(0, int(min_content_chars))
+134	        # Keyed by run_id so parallel workers sharing the singleton each track
+135	        # their own state independently.
+136	        self._counts: dict[str, int] = {}
+137	        self._pending: dict[str, str] = {}
+138	
+139	    # -- lifecycle -------------------------------------------------------
+140	
+141	    async def on_task_start(self, event: TaskStartEvent):
+142	        self._counts.pop(event.run_id, None)
+143	        self._pending.pop(event.run_id, None)
+144	        yield event
+145	
+146	    async def on_task_end(self, event: TaskEndEvent):
+147	        self._counts.pop(event.run_id, None)
+148	        self._pending.pop(event.run_id, None)
+149	        yield event
+150	
+151	    # -- inject queued nudge --------------------------------------------
+152	
+153	    async def on_before_model(self, event: BeforeModelEvent):
+154	        msg = self._pending.pop(event.run_id, "")
+155	        if not msg:
+156	            yield event
+157	            return
+158	        # Prior turn ended with the synthetic keepalive tool result (role tool),
+159	        # so appending exactly one user message satisfies the +1 contract and
+160	        # leaves the window ending on "user".
+161	        yield dataclasses.replace(
+162	            event,
+163	            messages=tuple(event.messages) + (Message(role="user", content=msg),),
+164	        )
+165	
+166	    # -- detect stall ----------------------------------------------------
+167	
+168	    async def on_after_model(self, event: ModelResponseEvent):
+169	        run_id = event.run_id
+170	        stall = (
+171	            event.finish_reason in ("end_turn", "stop")
+172	            and not event.tool_calls
+173	            and bool((event.content or "").strip())
+174	            and len(event.content or "") >= self.min_content_chars
+175	        )
+176	        if not stall:
+177	            yield event
+178	            return
+179	
+180	        # Deliberate completion — let it stop.
+181	        if self.completion_marker and self.completion_marker in (event.content or "").lower():
+182	            yield event
+183	            return
+184	
+185	        count = self._counts.get(run_id, 0)
+186	        if count >= self.max_reprompts:
+187	            # Budget exhausted — allow the run loop to stop naturally.
+188	            yield event
+189	            return
+190	
+191	        self._counts[run_id] = count + 1
+192	        self._pending[run_id] = _NUDGE_MSG
+193	        keepalive = ToolCall(
+194	            id=f"ak-{uuid.uuid4().hex[:8]}",
+195	            name=_KEEPALIVE_TOOL,
+196	            input={},
+197	        )
+198	        yield dataclasses.replace(event, tool_calls=(keepalive,))
+199	
+200	    # -- swallow the synthetic keepalive tool call ----------------------
+201	
+202	    async def on_before_tool(self, event: ToolCallEvent):
+203	        if event.tool_name == _KEEPALIVE_TOOL:
+204	            yield dataclasses.replace(
+205	                event, approved=False, synthetic_result=_KEEPALIVE_ACK
+206	            )
+207	        else:
+208	            yield event

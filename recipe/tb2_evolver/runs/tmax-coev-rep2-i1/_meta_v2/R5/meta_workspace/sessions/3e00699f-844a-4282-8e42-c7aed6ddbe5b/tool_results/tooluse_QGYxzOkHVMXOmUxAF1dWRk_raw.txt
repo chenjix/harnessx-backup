@@ -1,0 +1,151 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	
+16	tool_registry:
+17	  builtin:
+18	  - Bash
+19	  custom: []
+20	tracer: null
+21	processors:
+22	# R4: swap the 5-line stub SiblingSystemPromptBuilder for a
+23	# TemplateSystemPromptBuilder that keeps those 5 lines verbatim as the head
+24	# and appends GENERAL execution discipline (survey -> enumerate every success
+25	# criterion type -> verify each criterion with a concrete command before exit).
+26	# Root cause (R3 trajectories): the dominant failure shape is voluntary exit
+27	# with partial completion — 11 of 18 fails are agent.finished=no_tool_calls /
+28	# exit_reason=done, many at low step counts (9-34), with final_pytest showing
+29	# "1 failed, N passed": the agent satisfied MOST criteria but missed one
+30	# specific, checkable condition it never enumerated or verified (e.g. task_140
+31	# left lingering vm_service processes; task_933 produced a tarball with the
+32	# wrong internal path layout; task_748 never re-measured the memory-profiling
+33	# behavior). The existing CustomSelfVerifyProcessor already injects a strong
+34	# FILE-centric exit checklist, so the gap is not "no verification hook" but the
+35	# agent's incomplete up-front model of WHICH criteria (incl. non-file / state /
+36	# absence / numeric) to verify — an instruction-shaped gap. This is the first
+37	# use of the instruction lever after three plateaued control-lever rounds
+38	# (R1/R2/R3). No task-specific literals; describes strategy for a class of
+39	# problems. Original 5 lines kept verbatim so passing tasks are not redirected.
+40	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+41	  system_builder:
+42	    _target_: harnessx.processors.context.strategies.system_prompt.template.TemplateSystemPromptBuilder
+43	    template_path: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R4/templates/tmax_system_prompt.j2
+44	  _hook_: '*'
+45	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+46	  working_dir: /home/user
+47	  constraints: {}
+48	  header: Environment
+49	  max_tree_lines: 20
+50	  non_interactive: true
+51	  inject_integrity_rules: true
+52	  show_project_dir: false
+53	  _hook_: '*'
+54	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+55	  tool_schemas: {}
+56	  _hook_: '*'
+57	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+58	  warn_at:
+59	  - 0.7
+60	  - 0.9
+61	  _hook_: '*'
+62	# R3: step-budget pressure signal for the budget_exceeded-at-max_steps cluster.
+63	# Root cause (R2 trajectories): six tasks (010/118/958/1031/1032/1321) exhaust
+64	# the full 80-step budget through varied-but-unproductive exploration and are
+65	# cut off (exit_reason=budget_exceeded) BEFORE writing/verifying the required
+66	# deliverables. R1's de-prime + R2's breaker already broke the identical-command
+67	# loops (max consecutive identical calls now 3-5, down from 21-33), so the
+68	# residual is not a mechanical loop but a lack of any convergence signal. The
+69	# TaskTimeReminderProcessor above is instantiated WITHOUT timeout_seconds, so it
+70	# no-ops (fired 0x on all six); and CustomSelfVerifyProcessor only fires on a
+71	# voluntary exit, which the cut-off cluster never reaches. This processor counts
+72	# its own steps, reads the hard budget from task.max_steps (no hardcoded 80), and
+73	# at 0.75/0.90 of the budget appends ONE "stop exploring, write+verify required
+74	# deliverables now" user message (each band once). Pareto-safe: 29/30 passing
+75	# tasks finished in 8-37 steps, far below the 0.75 band; only task_001818 (69
+76	# steps, passing) reaches it and the nudge reinforces convergence rather than
+77	# redirecting. Warn-only, never raises. Contract-safe: mirrors
+78	# TaskTimeReminderProcessor — appends at most +1 user message to messages and
+79	# raw_messages in on_step_start; never touches system prompt / tool results.
+80	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R3/processors/step_budget_reminder.py::StepBudgetReminderProcessor
+81	  warn_at:
+82	  - 0.75
+83	  - 0.9
+84	  default_max_steps: 80
+85	  _hook_: '*'
+86	# R1: replaces stock LengthTruncationRecoveryProcessor (same singleton group
+87	# "tmax_length_recovery", same _order=5) with a variant that additionally
+88	# DE-PRIMES the max_tokens repetition loop. Root cause on the weak model:
+89	# a truncated no-tool narration turn is persisted in full, the model sees its
+90	# own repeated prose 5-6x in context, and re-primes the identical runaway
+91	# generation — burning the whole 80-step budget on one task (264/958/1818,
+92	# all budget_exceeded at 70 msgs). On repeated consecutive truncations this
+93	# processor drops the runaway narration to a tiny stub (so history stops
+94	# re-showing the loop text) and escalates to a hard "one Bash command, no
+95	# prose" directive. First truncation keeps the stock head+tail collapse.
+96	# Contract-safe: only mutates current event content in on_after_model and
+97	# replaces/append-one the last user message in on_before_model.
+98	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R1/processors/length_loop_deprime.py::LengthLoopDeprimeProcessor
+99	  repeat_threshold: 2
+100	  head_chars: 1200
+101	  tail_chars: 600
+102	  deprime_after: 2
+103	  _hook_: '*'
+104	# R2: warn-only escalating breaker for IDENTICAL-command repetition loops. R1's
+105	# de-prime broke the pure-narration (finish_reason=length) loop, but the same
+106	# budget_exceeded cluster then re-manifested as the model re-issuing the EXACT
+107	# same Bash command turn after turn (958=33/33 identical, 1818=27/29, 1032=25/29,
+108	# 264=21 consecutive identical `cat > /tmp/test.sql` writes) while never producing
+109	# the required deliverables. The stock LengthLoopDeprime doesn't fire (these turns
+110	# aren't length-truncated) and CustomEditToolProcessor's generic "try something
+111	# different" warning fired 3x on 264 and was ignored. This processor gives an
+112	# ESCALATING, deliverable-grounded directive (verify/produce the required output
+113	# artifacts, don't re-run the same command). It is deliberately WARN-ONLY (never
+114	# raises LoopDetectedError): two currently-PASSING tasks (536, 1089) issue 27
+115	# consecutive identical commands and still pass — a hard raise would regress them.
+116	# Contract-safe: only appends to the current ToolResultEvent.result in
+117	# on_after_tool; never touches messages/history/system prompt.
+118	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep2-i1/_meta_v2/R2/processors/repeated_command_breaker.py::RepeatedCommandBreakerProcessor
+119	  warn_at: 3
+120	  escalate_at: 5
+121	  window_size: 12
+122	  compaction_drop_threshold: 5
+123	  _hook_: '*'
+124	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+125	  token_threshold: 140000
+126	  message_threshold: 100
+127	  retention_window: 6
+128	  eviction_fraction: 0.5
+129	  summarize_key: summarize
+130	  preserve_first_message: true
+131	  _hook_: '*'
+132	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+133	  max_consecutive_errors: 1
+134	  _hook_: '*'
+135	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+136	  drop_threshold: 5
+137	  _hook_: '*'
+138	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+139	  _hook_: '*'
+140	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+141	  threshold: 7
+142	  _hook_: '*'
+143	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+144	  _hook_: '*'
+145	workspace: null
+146	workspace_template: default
+147	init_workspace: false
+148	step_snapshots: true
+149	sandbox_provider: null
+150	sandbox_hint_id: null
+151	plugins: []

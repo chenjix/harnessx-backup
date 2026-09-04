@@ -1,0 +1,443 @@
+confirmed as a pure capability gap (SQL recurrence + sqlite plan-string knowledge)
+that no harness lever should chase — log and skip. NEEDS_FROM_HUMAN candidate: the
+`USING INDEX` grader assertion is arguably an over-strict test (rejects a correct
+covering-index optimization); if graders are tunable, relaxing to
+`"USING" and "INDEX"` or accepting `COVERING INDEX` would fix a false-negative.
+
+## Round 4 — computed-result plausibility + full-range compare
+
+<!-- journal:frontmatter
+round: 4
+timestamp: 2026-08-28T16:00:00Z
+hypothesis_id: h_computed_result_plausibility_v1
+levers: [instruction]
+predicted_affected: [task_000396_e56917e2, task_001653_c4cafa73, task_001937_ac874115]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Relieve the 'declared done on a glaringly wrong self-computed value' cluster (>=3 tasks across scientific_computing + data_science) by making magnitude-plausibility and full-range/tail comparison an explicit pre-exit discipline; generalizes to any reproduce/validate/optimize task."
+regression_risk: "Low - prompt-only append to the minimal R0 sidecar; removes no capability, changes no processor. Worst case a few extra comparison Bash calls on already-passing compute tasks (000338, 001088 extract/compute cleanly, so guidance only reinforces their habit). Append-only guidance cannot remove a mechanism."
+cost_shift: "Small positive - a handful of extra tail/edge comparison Bash calls on compute tasks; likely net-neutral-to-favourable by converting silent wrong-answer finishes into corrected or honestly-flagged work."
+rollback_trigger: "If next round is flat/down AND task_000396/001653/001937 stay F on the same value mismatches (residual is pure model numerical capability), OR any previously-passing compute task (000338, 001088, data_science 000578/000760/001498/001697) regresses to F - revert to the R0 minimal sidecar prompt."
+-->
+
+### Why
+
+Assigned focus `task_000396_e56917e2` (scientific_computing, reward=0,
+exit_reason=done, no_tool_calls, 30 steps). Task: fix a vendored RK45 lib's
+build + step-size bug, run the sim, compute the maximum absolute deviation of
+`output.dat` vs an analytical `reference.dat`, write it to
+`/home/user/validation.log`; verifier asserts `0.0 < max_dev < 0.1`. The agent
+fixed the two obvious bugs (`-lm`; exponent `-0.25 -> 0.25`), computed
+**max_dev = 0.607**, wrote it, and declared done. The vendored integrator is a
+forward-Euler step ("using Euler for demonstration"), unconditionally unstable
+for an oscillator: the reference stays on the unit circle (amp ~1.0) while the
+agent's output diverges to amp ~1.64 by t~10 - the sign fix was necessary but
+NOT sufficient (a stable RK4/RKF is needed). The agent had its own 0.607 metric
+in hand - the smoking gun - but "verified" by spot-checking only the first 4
+(easy) leading time steps and re-listing files, never comparing the divergent
+tail or questioning the magnitude. Same shape recurs: task_001937 reported
+"Optimal Grid: 60" (expected 50); task_001653 emitted Distance 18.6199
+(expected 11.3444). Shared root: agent treats "produced a number / script ran"
+as success and does not sanity-check magnitude or compare across the full range.
+Implementing a stable integrator is a model capability gap (not patched); the
+verification discipline is a general, harness-addressable gap.
+
+### Changes
+
+- `system_prompt.txt` (sidecar, read by `SiblingSystemPromptBuilder`) - append a
+  general "computed-result plausibility + full-range comparison" discipline:
+  judge whether a computed value/metric is plausible in magnitude/sign; when
+  matching/validating/minimizing error against a reference, a large residual or
+  out-of-range value means the computation is still wrong (fix root cause, don't
+  record the bad value); compare across the FULL range incl. hardest/tail/edge
+  samples, not just the easy leading ones; a compile-error or sign-bug fix is
+  not necessarily the complete fix - re-run end-to-end and confirm the
+  correctness criterion before finishing. No task literals, tolerances, or
+  formulas.
+- `config.yaml` - byte-identical to R0 (still `SiblingSystemPromptBuilder`); the
+  change is entirely in the sidecar prompt. Instruction lever only. Confirmed R0
+  running prompt is the minimal 5-line `DEFAULT_TMAX_PROMPT`, so this is net-new
+  guidance, not a duplicate of any live rule.
+
+### Evidence
+
+- `task_000396_e56917e2` result.json: reward=0, exit_reason=done;
+  final_pytest `max deviation 0.6072 is not within (0.0, 0.1)`. messages msg 441
+  `compare.py` -> `0.6072399999999999`; msg 449 writes it verbatim; msgs 495-521
+  "verify" only t in {0, 0.01, 0.0534, 0.1437}; msg 531 `_tb2_self_verify` fires;
+  msgs 549-583 re-ls/cat + re-declare success. Divergence verified: ref
+  t=9.94 -> (-0.870, 0.493) amp 1.0; output t~9.94 -> (-1.447, 0.765) amp 1.64.
+- `task_001937_ac874115` final_pytest: `Expected Optimal Grid to be 50, but got 60`.
+- `task_001653_c4cafa73` final_pytest: `Centroid/Distance 18.6199` != expected
+  `11.3444`.
+- Passing counter-cluster: `task_000338_27d6a1be`, `task_001088_6f566806`
+  (reward=1) - clean compute/extraction with the same toolset; the rule only
+  reinforces their habit.
+
+### Uncertainty
+
+For task_000396 the flip is not guaranteed: after flagging 0.607 as wrong the
+agent must still author a stable integrator (a model capability limit); the
+discipline converts a silent wrong-answer finish into an honest not-yet-correct
+signal and is a fair-run improvement regardless. task_001937 (recompute the
+grid) and task_001653 (recompute the report values) are more mechanical and
+likelier to land once the agent stops rubber-stamping obviously-off numbers.
+Append-only prompt guidance cannot itself regress a passing task; watch for
+step-count inflation on easy tasks and any regression on 000338/001088 or the
+passing data_science cluster. If the cluster is unchanged on the same
+value-mismatch assertions next round, revert to the R0 minimal prompt.
+
+## Round 4 — polarity-neutral lifecycle self-verify
+
+<!-- journal:frontmatter
+round: 4
+timestamp: 2026-08-28T16:00:00Z
+hypothesis_id: h_lifecycle_selfverify_polarity_v1
+levers: [control]
+predicted_affected: [task_000140_01c78b42]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Flip the clean-shutdown witness (task_000140) and remove a latent harness harm: the stock self-verify checklist's one-sided 'confirm services still ALIVE' wording actively mis-nudges every teardown-polarity lifecycle task (graceful shutdown / no lingering processes / resource release)."
+regression_risk: "Very low — the persist branch of checklist item 5 is preserved in meaning, so service-must-stay-alive tasks are unaffected; message-count contract is identical to stock CustomSelfVerifyProcessor (+1 user, one-shot, order 90), no new firing conditions."
+cost_shift: "Negligible — item 5 is ~2 sentences longer; at most one extra pgrep/kill Bash call on teardown-polarity tasks that would otherwise fail. Net-favourable (converts silent lingering-process failures into corrected clean exits)."
+rollback_trigger: "If next round shows task_000140 still F on test_no_lingering_service_processes with the process table unreconciled (nudge ignored -> model reasoning limit), OR any previously-passing service-must-stay-alive task regresses (service killed/unreachable), revert to stock CustomSelfVerifyProcessor."
+-->
+
+### Why
+
+Assigned focus `task_000140_01c78b42` (system_administration, reward=0,
+exit_reason=done, finished=no_tool_calls, 11 steps) failed only on
+`test_no_lingering_service_processes`: `pgrep -f vm_service` found lingering
+PIDs at grader time (`['344','591']`, then `['344','591','787']` on the
+second grader run). The agent correctly fixed all three files, ran its own
+`test_pipeline.sh` (which starts `./vm_service &` then `kill -TERM $PID`),
+saw curl 200 + the log written, and declared done. The stock
+`CustomSelfVerifyProcessor` DID fire, but its checklist item 5 is one-sided
+— "For running services: confirm they are still alive and reachable right
+now" — the exact wrong polarity for a clean-shutdown task. It gave the agent
+no reason to reap the test-run service, so the container's final live state
+kept the process the grader inspects. This is a harness-level polarity bug:
+the same wording is a latent regression risk for ANY task whose required end
+state is "stopped / no lingering processes", not just task_000140. Sweep
+confirmed the `no_lingering` grader is a single witness this batch, but the
+mis-nudge mechanism is general and lives in the harness, not the task.
+
+### Changes
+
+- `processors/lifecycle_self_verify.py` — new `LifecycleSelfVerifyProcessor`,
+  a drop-in replacement for `CustomSelfVerifyProcessor`: byte-identical
+  firing mechanics (singleton group `tb2_self_verify`, `_order=90`,
+  synthetic keepalive tool call + deferred +1 user message on no-tool-call
+  exit intent), with checklist item 5 rewritten to be polarity-neutral —
+  reconcile the *required* end state (persist OR teardown), and if the task
+  requires a stopped/clean state, confirm via `ps`/`pgrep` that nothing
+  remains, explicitly including any process started while self-testing. No
+  task ids / paths / service names embedded.
+- `config.yaml` — swap the final pipeline entry
+  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` for a
+  `file://…::LifecycleSelfVerifyProcessor` reference. Rest byte-identical to
+  R0; `system_prompt.txt` sidecar copied unchanged.
+
+### Evidence
+
+- `task_000140_01c78b42` result.json: `reward=0`, `exit_reason=done`,
+  `finished=no_tool_calls`, steps=11, `initial_pytest.passed=true`;
+  final_pytest fails only `test_no_lingering_service_processes`
+  (`Lingering vm_service processes found: ['344','591']`).
+- `task_000140` messages.json: msg 117 `test_pipeline.sh` ends
+  `kill -TERM $PID`; msg 157 ran `bash test_pipeline.sh` (starts
+  `./vm_service &`); msg 213 `_tb2_self_verify` fired; msgs 229–250 agent
+  re-`ls`'d files and re-declared success with no post-run `ps`/`pgrep`.
+- Stock checklist (harness.py L96): "For running services: confirm they are
+  still alive and reachable right now" — one-sided persist polarity.
+- Cluster sweep: 028/958 fail on verifier `ModuleNotFoundError: requests`;
+  118 log-size; 1706 redis-log; 1937 report-value — none share the
+  clean-shutdown mechanism, confirming 140 is the single grader witness but
+  the checklist polarity bug is harness-general.
+
+### Uncertainty
+
+If the model reads the corrected item 5 but cannot reason that its
+test-run service must be reaped, task_000140 stays F (residual is model
+reasoning, not harness). Distinct from the still-pending R1(c4)
+`h_bg_state_reconcile_v1`, which added a *separate* processor with regex
+launch-detection and an extra injected message; this candidate is a smaller,
+different shape — it corrects the polarity of the message the harness already
+sends, adding zero net messages and zero new firing conditions. If next round
+is flat with 140 still F on the same assertion, revert per rollback_trigger.
+
+
+## Round 4 (c7) — guard self-fabricated-test tautology (Control)
+
+<!-- journal:frontmatter
+round: 4
+timestamp: 2026-08-28T16:30:00Z
+hypothesis_id: h_self_fabricated_test_guard_v1
+levers: [control]
+predicted_affected: [task_000505_50b5162d]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Close the self-fabricated-test false-pass mechanism for detector/classifier/parser deliverables: agent validates a built script only against input files it manufactured from a derived value (a tautology that passes even when the value is wrong), never exercising the real on-disk artifacts. Primary target task_000505; the discipline generalizes to any task with ground-truth inputs on disk."
+regression_risk: "Very low. Append-only note on the tool result (mirrors CustomEditToolProcessor contract), never terminates, never mutates the system prompt, fires <=2x/run. Trajectory sweep over R2: fires on exactly 1 of 29 passing tasks (task_000760, a reproducibility probe with a self-made CSV) - harmless because the note is purely additive and 760 also has the real binary available. No passing task can be broken by extra advisory text."
+cost_shift: "Negligible-to-favourable. One ~120-token note (<=2x) only on the tautology shape; may add a few Bash calls to inspect real artifacts on targeted tasks, converting silent wrong-answer finishes into corrected deliverables."
+rollback_trigger: "If next round shows task_000505 still F on the same '2 of 2 evil bypassed' assertion AND the note demonstrably fired (nudge ignored -> residual is a pure OCR/model capability limit), OR any previously-passing task regresses to F (esp. task_000760), revert to R0 pipeline."
+-->
+
+### Why
+
+Assigned focus task_000505_50b5162d (security, reward=0, exit_reason=done,
+no_tool_calls, 14 steps). The agent OCR'd an ed25519 SSH key from
+/app/evidence.png, getting a GARBLED string (correct prefix AAAAC3NzaC1lZDI1NTE5
+misread as AAAAC3NzaC1IZDIINTES: l->I, 1->I, 9->S, plus stray spaces around +).
+It hardcoded that garbled key into /home/user/detect_trojan.sh, then validated
+the script by creating /tmp/malicious_test.txt via echo-ing the SAME garbled
+string and running detect_trojan.sh /tmp/malicious_test.txt -> exit 1 ("works").
+This is a self-fabricated-test TAUTOLOGY: a test input manufactured from the
+derived value can only ever pass, so the misread was never exposed. The real
+trojaned binaries (the evil corpus, present on disk) contain the CORRECT key and
+were never run through the script; the verifier's real run yielded
+"2 of 2 evil bypassed".
+
+Lever choice: the instruction lever has ALREADY targeted this exact discipline on
+this exact task twice - R1(c7) h_verify_real_artifacts_v1 (accepted) and R3
+h_ocr_extraction_discipline_v1 (pending), both telling the agent in the system
+prompt to validate against real inputs and distrust lossy-source values.
+task_000505 still failed. Per the analyze skill's cross-round rule (a lever tried
+repeatedly on the same cluster without flipping -> look elsewhere), a third prompt
+rewrite is the wrong move. The gap is not knowledge, it is DELIVERY: a
+session-start prompt sentence loses to the model's over-confidence, whereas a
+Control hook fires the correction at the DECISIVE moment (right after the
+tautological test run, injected into tool-result context). Distinct shape and
+distinct lever from both prior hypotheses.
+
+### Changes
+
+- processors/self_fabricated_test_guard.py - new SelfFabricatedTestGuardProcessor
+  (MultiHookProcessor, _order=34, after CustomEditToolProcessor(30), before
+  CustomSelfVerifyProcessor(90)). In on_before_tool it (1) records every path the
+  agent WRITES to (heredoc / redirect / tee / sed -i, reusing edit-guard
+  semantics) and (2) parses each execution segment; when a segment EXECUTES an
+  agent-authored deliverable (interpreter+script, ./script, or a written *.sh)
+  whose file-path arguments are ALL agent-fabricated (excluding this run's own
+  stdout/redirect outputs) and NONE pre-existing, it flags the call.
+  on_after_tool appends a one-shot corrective note (you tested against a file you
+  fabricated; run against the ORIGINAL on-disk artifacts; cross-check
+  lossy-source values against the real target). Append-only, non-terminating,
+  content-agnostic (no task ids / paths / literals). Fires <=2x/run.
+- config.yaml - register the processor via absolute file:// path at order 34;
+  rest of the pipeline byte-identical to R0. system_prompt.txt sidecar copied
+  unchanged (Control-only change).
+
+### Evidence
+
+- task_000505_50b5162d result.json: reward=0, exit_reason=done,
+  finished=no_tool_calls, steps=14; final_pytest "2 of 2 evil bypassed:
+  cat_evil, ls_evil".
+- messages.json msg 7 (tool result): tesseract emitted
+  "ssh-ed25519 AAAAC3NzaC1IZDIINTESAAAAIOrXQ50Bf4PZU0H9 + |J9tY +X07yG/pA3T2Xb8"
+  (garbled). msg 9 hardcoded it into the script. msg 15/17: created
+  /tmp/malicious_test.txt by echoing the same garbled string, ran
+  detect_trojan.sh /tmp/malicious_test.txt -> exit 1; msg 19 final-verification
+  ran the script against /tmp/test_binary (also fabricated with the derived key).
+  The real evil corpus was never inspected.
+- Detector dry-run over this trajectory: FIRES on the msg-19 fabricated-input run;
+  a synthetic real-input run (detect_trojan.sh /app/evidence.png) is correctly
+  SILENT (real_data present).
+- False-positive sweep over all 29 R2 passing tasks: fires on exactly 1
+  (task_000760, reproducibility probe with a self-made /tmp/test.csv) - additive
+  note only, cannot break the pass.
+
+### Uncertainty
+
+Partial-yes retroactive check: after the nudge the agent's natural next step is
+running strings on a real evil binary, which surfaces the CORRECT key and lets it
+fix the hardcoded string - closing the false-confidence loop that PREVENTED
+discovery. The residual OCR misread is a model limit; if the model reads the note
+but still declines to inspect the real corpus, task_000505 stays F, but the
+append-only design cannot itself regress anything. If next round is flat with 505
+still F on the same assertion and the note fired, the residual is a pure
+OCR/model-capability limit - revert per rollback_trigger.
+
+## Round 5 — noop: task_000010 residual is a single-task capability gap; cluster saturated
+
+<!-- journal:frontmatter
+round: 5
+timestamp: 2026-08-28T17:00:00Z
+hypothesis_id: h_noop_task010_shadow_capgap_v1
+levers: []
+predicted_affected: []
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "None — explicit no-op. The r4 failure of task_000010 is a single-task Python-stdlib-shadow reasoning trap plus a self-inflicted give-up-on-the-required-path error; there is no 2-or-more-task systemic harness gap to close, and every legitimate lever for this shape is already in-flight (3 pending control processors explicitly list task_000010 as predicted_affected)."
+regression_risk: "None — config is byte-identical to R0."
+cost_shift: "Zero."
+rollback_trigger: "N/A (noop). If none of the pending control processors (R3 h_degenerate_loop_breaker_v1 / R3 h_stuck_truncation_escalator_v1) flip task_000010 next round, the residual is confirmed a pure model-reasoning limit (finding the sys.path/cwd escape) — no harness lever applies; keep skipping."
+-->
+
+### Why
+
+Assigned focus task_000010_644ab1c2 (system_administration, reward=0,
+exit_reason=done, finished=no_tool_calls, 32 steps — a voluntary exit).
+The task hard-requires a script at /home/user/operator.py; grader
+test_operator_script_exists only checks os.path.isfile('/home/user/operator.py')
+and the other two final tests pass. The failure is that at exit the required
+file does not exist — the agent renamed it away and gave up.
+
+Root chain (messages.json): msg 13 the agent wrote /home/user/operator.py; msg
+17-19 running python3 -c "import pexpect" triggered a circular import because
+operator.py in cwd /home/user shadows Python's stdlib operator module (any
+stdlib chain subprocess to threading to operator breaks). The agent correctly
+diagnosed the shadow (msg 19) and renamed to k8s_operator.py, then ran the
+pipeline successfully as k8s_operator.py (msgs 35-44: backup created, both
+manifests applied, socat forward up). The stock CustomSelfVerifyProcessor fired
+(msg 45) and the agent even moved the file back to operator.py (msg 47) — but on
+re-running from cwd /home/user it hit the same shadow traceback (msgs 49-54),
+concluded the exact-path requirement was impossible (msg 51/55/57), and
+re-renamed it away for good (msg 59), exiting with /home/user/operator.py absent.
+
+The escape the agent missed is a real reasoning step, not a missing mechanism:
+run the script from a non-/home/user cwd (cd /tmp then python3 /home/user/operator.py)
+or strip sys.path[0], which sidesteps the shadow while keeping the file at the
+required path. Even leaving the file in place unmodified would have passed
+test_operator_script_exists.
+
+### Decision
+
+Explicit no-op. Two reasons this focus does not support a systemic harness change:
+
+1. Idiosyncratic, not systemic. The Python-stdlib-shadow circular-import shape
+   appears in exactly 1 of 50 r4 trajectories (grep of messages.json for
+   circular import / partially initialized module → only task_000010). The other
+   6 failing tasks with does-not-exist / not-found graders (000015, 000118,
+   000536, 000748, 000933, 001653) are content-correctness or accuracy misses
+   (wrong values, wrong bytes, CSV format), NOT deliverable-removed-from-path — so
+   there is no 2-or-more-task cluster sharing this mechanism. Per analyze's
+   systemic-vs-idiosyncratic filter, a single-task observation is a skip.
+
+2. Cluster saturated plus wrong-lever record. Lever scoreboard: control = 5
+   attempts / 0 accepted / 1 reverted; instruction = 2 / 0 / 1 reverted. task_000010
+   specifically is already predicted_affected by THREE in-flight control processors
+   (R1 h_step_budget_reminder_v1 [reverted], R3 h_degenerate_loop_breaker_v1
+   [pending, targets its 2-cycle], R3 h_stuck_truncation_escalator_v1 [pending,
+   targets its length-truncation loop]). Piling a 4th overlapping control/instruction
+   change on this exact task would confound their attribution and is the textbook
+   tried-repeatedly-without-flipping signal to look elsewhere. The one general
+   discipline that would help (an exact output path is non-negotiable; never
+   delete/relocate a required deliverable to dodge a tooling conflict — change the
+   invocation instead) is real but (a) single-task-grounded here and (b) the R3
+   instruction sidecar carrying exact-path guidance was net-negative and reverted
+   (h_ocr_extraction_discipline_v1), so shipping more prompt path-discipline now
+   carries live regression risk for ~1 speculative flip.
+
+This mirrors the accepted R4 c5 precedent (h_noop_task264_capgap_v1): a single-task
+capability-gap focus with the only valid lever already in flight → ship R0
+byte-for-byte rather than drift onto another proposal's territory.
+
+### Evidence
+
+- task_000010_644ab1c2 result.json: reward=0, exit_reason=done, steps=32;
+  final_pytest AssertionError: Operator script /home/user/operator.py does not
+  exist. You must create it. (other 2 final tests pass).
+- messages.json msg 19 "There's a naming conflict … Python is trying to import it
+  when importing operator"; msg 47 mv k8s_operator.py operator.py; msgs 49-54
+  circular-import traceback on import subprocess; msg 51 "this creates a circular
+  import issue"; msg 59 mv operator.py k8s_operator.py (final — path left empty).
+- Cluster sweep: grep -l "circular import" *.messages.json → only task_000010
+  (1/50). does-not-exist / not-found grader sweep → 000015/000118/000536/000748/
+  000933/001653 all content/accuracy misses, distinct mechanisms.
+
+### Uncertainty
+
+If either pending R3 control processor (loop-breaker / truncation-escalator) breaks
+task_000010's loop next round, the agent may still fail on the same shadow-escape
+reasoning step (a model limit), confirming no harness lever applies. If a future
+round finds a second task with the same stdlib-shadow-then-abandon-path shape,
+revisit as a genuine cluster (candidate lever: an on_after_tool detector for the
+circular-import-via-cwd-shadow traceback that injects a general cwd/sys.path hint).
+Config is byte-identical to R0, so this round cannot itself regress anything.
+
+## Round 5 (c1) — upscale-before-OCR remedy on tesseract low-DPI signal
+
+<!-- journal:frontmatter
+round: 5
+timestamp: 2026-08-28T17:00:00Z
+hypothesis_id: h_ocr_lowdpi_upscale_remedy_v1
+levers: [control]
+predicted_affected: [task_000015_89886d8d, task_000505_50b5162d, task_000536_9c16e8ef]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Relieve the dense-OCR-extraction failing cluster (015 routing-schema table, 505 garbled ed25519 key, 536 garbled memo id) by delivering the one resolution remedy the agent never tries (upscale to raise effective DPI) at the exact moment tesseract reports low/zero DPI. Generalizes to any low-DPI tesseract task."
+regression_risk: "Near-zero — append-only note on a tool result, runtime-gated to the tesseract low-DPI signal AND a tesseract-family command AND absence of an existing upscale token; fires <=2x/run. Inert on all non-OCR tasks (0 of 29 R2-passers invoke tesseract) and harmless to the 2 passing OCR tasks (338/1652 OCR short/clean text that survives upscaling). No prompt mutation, no removals, no termination."
+cost_shift: "Negligible — one ~150-token note at most twice per OCR task; net-favourable if it converts a guessed schema into a correct one and pre-empts the sample-inference spiral."
+rollback_trigger: "If next round shows task_000015 still F on the same accuracy assertion after an upscale+re-OCR attempt (residual = pure OCR-model limit), OR any previously-passing OCR task (338, 1652) regresses to F, revert to R0."
+-->
+
+### Why
+
+Assigned focus `task_000015_89886d8d` (software_engineering, reward=0,
+exit_reason=done, no_tool_calls, 41 steps). final_pytest:
+`Accuracy metric 0.6614 is below the 0.98 threshold`. Task builds
+`/home/user/migrate.py` from routing rules in `/app/routing_schema.png`
+(800x400 RGB, a dense multi-row mapping table); the verifier runs the script
+on a hidden 2000-URL edge-case set.
+
+Root chain: `tesseract /app/routing_schema.png stdout` (msg 2) emits
+`Warning: Invalid resolution 0 dpi. Using 70 instead. Estimating resolution as 111`
+and garbled text (`eatalogyitem`, `Wept=<depariment»`, `fsort=<sortorder>`). The
+agent tried grayscale, contrast enhance, binarize, autocontrast, sharpen, and PSM
+1/3/6/11/12 (msgs 9-23) — all *contrast* remedies — but **never once upscaled**
+the image (grep resize|--dpi|resample|LANCZOS over all tool_calls = empty). At
+~70 effective DPI a dense table OCRs to garbage regardless of contrast tuning.
+Unable to read the schema, the agent guessed a 3-route mapping from the 3 sample
+URLs (msg 25+) and "verified" only against those samples — so hidden edge cases
+(URL-encoding, extra/missing params) were never handled: the exact 0.66->0.98 gap.
+
+Harness gap: the agent has only Bash and lacks the operational fact that the
+`Invalid resolution 0 dpi / 70 dpi` warning is a *resolution* problem whose fix
+is upscaling, not more contrast tuning. Nothing in R0 supplies this at the moment
+the signal appears.
+
+### Changes
+
+- `processors/ocr_lowdpi_remedy.py` — new `OcrLowDpiRemedyProcessor`
+  (`MultiHookProcessor`, `_order=34`, after CustomEditToolProcessor(30), before
+  CustomSelfVerifyProcessor(90)). Tracks each Bash command by tool_call_id in
+  `on_before_tool`; in `on_after_tool`, when the result carries the tesseract
+  low-DPI signal AND the command invoked tesseract AND the command did not
+  already upscale/`--dpi`, appends ONE content-agnostic remedy note (upscale
+  ~3-4x with LANCZOS + re-OCR, optionally `--dpi 300`, before inferring a schema
+  from samples). Fires <=`max_fires`(2). Append-only, non-terminating, no
+  prompt mutation, no task literals.
+- `config.yaml` — register the processor via absolute `file://` path; rest
+  byte-identical to R0. `system_prompt.txt` sibling copied unchanged.
+
+### Evidence
+
+- task_000015_89886d8d result.json: reward=0, accuracy 0.6614 < 0.98;
+  messages msg 2/4 tesseract `Invalid resolution 0 dpi. Using 70 instead`
+  + garbled table; msgs 9-23 contrast/PSM remedies only, no upscale; msg 25+
+  schema guessed from 3 sample URLs.
+- Cluster: `grep "Invalid resolution 0 dpi"` matches all 5 tesseract tasks
+  (015/505/536 fail; 338/1652 pass). Passers OCR short/simple text
+  (`121\n000\n-1-2-1`; `Admin Token: TKN-8842-OMEGA`) that survives 70 dpi.
+- Validators: canonicalize ok (0 templates), dry_fire 0 likely_bugs,
+  contract 0 violations, literals 0 findings.
+
+### Uncertainty
+
+Distinct from the REVERTED R3 `h_ocr_extraction_discipline_v1` (instruction
+lever, system-prompt append that fired on every task and regressed 4 unrelated
+tasks). This is the corrected control-lever form: same mechanical fact, delivered
+only when the low-DPI signal actually appears, provably inert on non-OCR runs —
+eliminating the regression channel that killed the R3 bet. If the upscaled re-OCR
+still garbles, the residual is a pure OCR-model capability limit and 015 stays F,
+but the note also blocks the premature infer-from-samples shortcut that produced
+the 0.66 guess. Append-only design cannot itself regress a passing task; watch
+338/1652 for T->F and revert per rollback_trigger.
+
+## Round 5 (c2) — enable built-in terminate-on-identical-loop guard
+

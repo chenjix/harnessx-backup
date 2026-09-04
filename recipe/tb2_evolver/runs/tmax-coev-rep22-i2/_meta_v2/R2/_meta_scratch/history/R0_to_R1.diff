@@ -1,0 +1,14 @@
+--- R0
++++ R1
+@@ -70,2 +70,11 @@
+   _hook_: '*'
++# HTTP-service tasks are graded by an external verifier that queries the
++# service with the `requests` client (its test does `import requests`).
++# Several containers ship without `requests`, so the verifier's test fails at
++# *collection* time even when the service is correct and running — the agent
++# cannot see this because verifier files are injected after it exits.
++# This hook detects a server start and injects one reminder to make `requests`
++# importable before finishing. Fires once, only on tasks that start a server.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep22-i2/_meta_v2/R1/c4/processors/http_verifier_dep.py::HttpVerifierDepProcessor
++  _hook_: '*'
+ workspace: null

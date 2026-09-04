@@ -1,0 +1,28 @@
+1	{
+2	  "task_id": "task_000264_ab8c7253",
+3	  "domain": "data_querying",
+4	  "reward": 0,
+5	  "status": "ok",
+6	  "elapsed_s": 201.8,
+7	  "api_base": "http://127.0.0.1:8302/v1",
+8	  "model": "qwen35-9b-tmax-coev-r14",
+9	  "image": "tmax-eval:task_000264_ab8c7253-3c1408f96875",
+10	  "container": "65fc499642ff4ec9eebbd0c3503d73bf20f31afed2a9d7aa779250ec37ec5875",
+11	  "initial_pytest": {
+12	    "passed": true,
+13	    "rc": 0,
+14	    "output_tail": "...                                                                      [100%]\n3 passed in 0.01s\n"
+15	  },
+16	  "agent": {
+17	    "steps": 17,
+18	    "finished": "no_tool_calls",
+19	    "error": null,
+20	    "exit_reason": "done",
+21	    "backend": "harnessx"
+22	  },
+23	  "final_pytest": {
+24	    "passed": false,
+25	    "rc": 1,
+26	    "output_tail": "es, f\"CSV output does not match expected. Found: {actual_lines}\"\nE       AssertionError: CSV output does not match expected. Found: ['Alice (CEO),12', 'Bob (VP Eng),5', 'Charlie (VP Sales),5', 'David (Dir Eng),4', 'Grace (Dir Sales),4']\nE       assert ['Alice (CEO)...Dir Sales),4'] == ['Alice (CEO)...Dir Sales),3']\nE         \nE         At index 0 diff: 'Alice (CEO),12' != 'Alice (CEO),11'\nE         Use -v to get more diff\n\n/tmp/test_final_state.py:51: AssertionError\n____________________________ test_query_plan_output ____________________________\n\n    def test_query_plan_output():\n        \"\"\"Check if the query plan file exists and indicates index usage for the employees table.\"\"\"\n        assert os.path.isfile(PLAN_PATH), f\"Query plan file missing at {PLAN_PATH}\"\n    \n        with open(PLAN_PATH, \"r\") as f:\n            content = f.read().upper()\n    \n        # The output of EXPLAIN QUERY PLAN might vary slightly depending on sqlite version,\n        # but it should contain SEARCH (or SEARCH TABLE) and USING INDEX.\n        # We check that it doesn't do a SCAN on the employees table for the recursive part,\n        # or at least that it uses an index on employees.\n    \n>       assert \"USING INDEX\" in content, \"The query plan does not indicate that an index was used (missing 'USING INDEX').\"\nE       AssertionError: The query plan does not indicate that an index was used (missing 'USING INDEX').\nE       assert 'USING INDEX' in 'QUERY PLAN\\n|--MATERIALIZE ALL_SUBORDINATES\\n|  |--SETUP\\n|  |  `--SCAN E USING COVERING INDEX IDX_EMPLOYEES_MANAGER_...MANAGER_ID=?)\\n|--SCAN E\\n|--SEARCH A USING AUTOMATIC COVERING INDEX (MANAGER_ID=?)\\n`--USE TEMP B-TREE FOR ORDER BY\\n'\n\n/tmp/test_final_state.py:65: AssertionError\n=========================== short test summary info ============================\nFAILED ../../tmp/test_final_state.py::test_csv_output - AssertionError: CSV o...\nFAILED ../../tmp/test_final_state.py::test_query_plan_output - AssertionError...\n2 failed, 1 passed in 0.02s\n"
+27	  }
+28	}

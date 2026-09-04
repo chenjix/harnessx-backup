@@ -1,0 +1,55 @@
+=== get_current_sandbox / exec signature ===
+22:class Mount:
+38:class Sandbox(abc.ABC):
+57:    async def exec(
+
+57:    async def exec(
+188:def get_current_sandbox() -> Sandbox | None:
+
+=== TaskStartEvent fields ===
+class TaskStartEvent(Event):
+    type: str = field(default="task_start", init=False)
+    task_description: str = ""
+    model: str = ""
+    parent_run_id: str | None = None
+    session_id: str = ""  # session identifier — for /session display and /compact state loading
+    state: Any | None = field(
+        default=None, hash=False, compare=False
+    )  # mutable State ref — processors may read/write slots and messages
+    # Fields populated/modified by on_task_start processors:
+    system_prompt: str = ""  # assembled system prompt (frozen for task lifetime)
+    workspace: Any | None = field(default=None, hash=False, compare=False)  # workspace passed to run_loop
+    tools: tuple["ToolSchema", ...] = ()  # initial tool schemas from tool_registry
+
+
+@dataclass(frozen=True)
+class BoundaryHint:
+    """Annotation a step_start processor sets on StepStartEvent to pass boundary
+    metadata to RunLoop without emitting SegmentBoundaryEvent directly.
+    RunLoop reads this when constructing the auto-generated SegmentBoundaryEvent."""
+
+    reason: str = "compaction"
+    before_msgs: int = 0
+    after_msgs: int = 0
+    before_tokens: int = 0
+    after_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class StepStartEvent(Event):
+    type: str = field(default="step_start", init=False)
+    # Input fields — set by runloop, read by context processors
+    raw_messages: tuple["Message", ...] = ()  # state.raw_messages at this step
+    task: Any = field(default=None, hash=False, compare=False)
+    context_window: int = 64_000
+    workspace: Any | None = field(default=None, hash=False, compare=False)
+    tools: tuple["ToolSchema", ...] = ()  # initial schemas from tool_registry
+    # Output fields — populated/modified by step_start processors
+    messages: tuple["Message", ...] = ()  # assembled context
+    system_prompt: str = ""
+    token_count: int = 0
+    boundary_hint: "BoundaryHint | None" = field(default=None, hash=False, compare=False)
+
+
+@dataclass(frozen=True)
+class BeforeModelEvent(Event):

@@ -1,0 +1,120 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	
+16	tool_registry:
+17	  builtin:
+18	  - Bash
+19	  custom: []
+20	tracer: null
+21	processors:
+22	# R4 (meta): the ONLY change this round is the system-prompt sidecar
+23	# (system_prompt.txt beside this YAML). Prior rounds' config comments claimed a
+24	# general-workflow prompt existed, but the shipped sidecar was still the 5-line
+25	# default stub — this round actually installs the intended prompt. It is
+26	# strategy-only (no task-specific literals): survey the environment and confirm
+27	# exact input/output paths before coding; restate concrete deliverables and
+28	# format before implementing; diagnose before retrying instead of re-running the
+29	# same command; verify every required output exists at its EXACT path in the
+30	# correct format the way the external checker will (exercise servers with a real
+31	# client, compute expected values independently); keep required background
+32	# services alive and the checker's dirs clean; always write a best-effort partial
+33	# to the required path rather than leaving it empty. SiblingSystemPromptBuilder
+34	# loads it. The processor pipeline is carried forward byte-for-byte from R3
+35	# (file:// paths repointed to R3-local copies) so this round isolates the
+36	# instruction-lever effect.
+37	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+38	  system_builder:
+39	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+40	  _hook_: '*'
+41	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+42	  working_dir: /home/user
+43	  constraints: {}
+44	  header: Environment
+45	  max_tree_lines: 20
+46	  non_interactive: true
+47	  inject_integrity_rules: true
+48	  show_project_dir: false
+49	  _hook_: '*'
+50	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+51	  tool_schemas: {}
+52	  _hook_: '*'
+53	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+54	  warn_at:
+55	  - 0.7
+56	  - 0.9
+57	  _hook_: '*'
+58	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+59	# Without this, one stuck task can block an entire evolve round.
+60	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+61	  repeat_threshold: 2
+62	  head_chars: 1200
+63	  tail_chars: 600
+64	  _hook_: '*'
+65	# R2 (meta): break the *normal-finish* narration repetition loop that
+66	# LengthTruncationRecoveryProcessor cannot see. Fingerprints assistant content
+67	# and, after N consecutive look-alike turns, injects an escalating corrective
+68	# nudge. Mutates messages by at most +1 user turn per chain; no task-specific
+69	# literals. Carried forward byte-for-byte (repointed to R4-local copy).
+70	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor
+71	  repeat_threshold: 3
+72	  escalate_threshold: 5
+73	  prefix_chars: 120
+74	  min_content_chars: 40
+75	  _hook_: '*'
+76	# R3 (meta): break the *repeated-Bash-command* loop. Keys on the normalized Bash
+77	# command string over a rolling window and, after repeat_threshold occurrences,
+78	# injects an escalating nudge. +1 user turn per armed streak; no task-specific
+79	# literals. Carried forward byte-for-byte (repointed to R4-local copy).
+80	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
+81	  repeat_threshold: 4
+82	  escalate_threshold: 7
+83	  window: 12
+84	  min_cmd_chars: 3
+85	  _hook_: '*'
+86	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+87	  token_threshold: 140000
+88	  message_threshold: 100
+89	  retention_window: 6
+90	  eviction_fraction: 0.5
+91	  summarize_key: summarize
+92	  preserve_first_message: true
+93	  _hook_: '*'
+94	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+95	  max_consecutive_errors: 1
+96	  _hook_: '*'
+97	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+98	  drop_threshold: 5
+99	  _hook_: '*'
+100	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+101	  _hook_: '*'
+102	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+103	  threshold: 7
+104	  _hook_: '*'
+105	- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+106	  _hook_: '*'
+107	# R1 (meta): ensure common verifier test-deps (HTTP client / image-video frame
+108	# reader / numeric+data libs / config parser) are importable in the container
+109	# Python. Fires ONCE EARLY (first model response); no-op when modules already
+110	# present; single Bash round-trip; no task-specific literals. Carried forward
+111	# byte-for-byte (repointed to R4-local copy).
+112	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i2/_meta_v2/R4/processors/verifier_dep_guard.py::VerifierDepGuardProcessor
+113	  _hook_: '*'
+114	workspace: null
+115	workspace_template: default
+116	init_workspace: false
+117	step_snapshots: true
+118	sandbox_provider: null
+119	sandbox_hint_id: null
+120	plugins: []

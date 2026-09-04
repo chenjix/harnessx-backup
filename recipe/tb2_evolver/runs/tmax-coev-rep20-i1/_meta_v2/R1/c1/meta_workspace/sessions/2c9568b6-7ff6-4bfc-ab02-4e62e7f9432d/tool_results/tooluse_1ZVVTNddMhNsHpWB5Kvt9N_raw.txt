@@ -1,0 +1,52 @@
+# Evolve Journal — tmax-coev-rep20-i1
+
+## Round 1 — loop-detection for identical-repeat stalls
+
+<!-- journal:frontmatter
+round: 1
+timestamp: 2026-06-01T00:00:00Z
+hypothesis_id: h_loop_detection_v1
+levers: [control]
+predicted_affected: [task_000010_644ab1c2, task_000015_89886d8d, task_000264_ab8c7253, task_000329_a3ac56b0, task_000396_e56917e2, task_000505_50b5162d, task_000684_1a33ef37, task_000956_7e92337f, task_000958_4bb2b05d, task_001031_a8f0eb37, task_001088_6f566806, task_001090_c61c71f2, task_001652_86e1d185, task_001673_86224c91, task_001818_b251e5ea]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Attacks the dominant budget_exceeded cluster (~24/38 tasks show >=5 identical consecutive tool calls); warn@3 gives the model a chance to break the loop, raise@5 frees ~28 wasted steps."
+regression_risk: "A passing task that intentionally repeats the same command 5x consecutively would be terminated early; observed only in read-only verify spins (e.g. task_000344) where final state is already correct, so no pass regression expected."
+cost_shift: "Net negative (cheaper) — stuck loops terminate at ~5 steps instead of 80."
+rollback_trigger: "If R2 pass_rate is flat/down AND any previously-passing task regresses to exit_reason=loop_detected, revert or raise threshold to 8."
+-->
+
+### Why
+
+The single most common failure of R0 is the agent getting stuck emitting
+the **exact same Bash tool call verbatim** until the 80-step budget is
+exhausted. Assigned task `task_000010_644ab1c2` is the archetype: it wrote
+`/home/user/operator.py`, which shadows the stdlib `operator` module and
+poisons every `python3` invocation from the CWD, then re-ran the identical
+`python3 -c "import socket"` probe 33 times — identical narration, identical
+error — with zero variation, never diagnosing the shadowing. The pipeline
+had no guard for this: the only loop processor present
+(`LengthTruncationRecoveryProcessor`) fires solely on `finish_reason=length`
+with no tool call, a different mode. These calls are well-formed and succeed.
+
+### Changes
+
+- `config.yaml` — added built-in
+  `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+  (defaults: window 12, warn 3, raise 5, name_warn 8, compaction_drop 5),
+  placed last in the pipeline. No new code authored.
+
+### Evidence
+
+- `task_000010_644ab1c2` result.json: `exit_reason=budget_exceeded`,
+  `steps=80`; messages.json shows 33 assistant turns, all with the identical
+  tool_call `python3 -c "import socket..."` (distinct fingerprints = 1).
+- Cluster scan of all 38 `budget_exceeded` trajectories:
+  `max_identical_consec >= 5` on ~24 tasks; 17 tasks have `distinct==1`
+  (same call 33x). LoopDetectionProcessor Strategy 1 fires on all of these.
+- `task_000344_e265c898` (currently PASSING, distinct=1): the repeated call
+  is a read-only `python3 -c` reasoning spin *after* the reward-earning work
+  already landed; early termination keeps the pass and saves ~28 steps.
+=== EXIT 0 ===
+-rw-r--r-- 1 jixuan.chen xuser 3527 Aug 30 12:56 /fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep20-i1/learnings.md

@@ -1,0 +1,122 @@
+61	cycle and is never flagged. Empty/no-op steps can never join a cycle.
+62	
+63	Compaction-aware: the window is cleared on a large message-count drop so stale
+64	pre-compaction fingerprints can't inflate a cycle count.
+65	
+66	Contains no task-specific constants, paths, commands, or answers — it keys
+67	purely on the structural property "identical call+output repeated".
+68	"""
+69	
+70	from __future__ import annotations
+71	
+72	import dataclasses
+73	import hashlib
+74	import json
+75	from collections import deque
+76	
+77	from harnessx.core.events import (
+78	    StepStartEvent,
+79	    TaskEndEvent,
+80	    TaskStartEvent,
+81	    ToolCallEvent,
+82	    ToolResultEvent,
+83	)
+84	from harnessx.core.processor import MultiHookProcessor
+85	from harnessx.core.runloop import LoopDetectedError
+86	
+87	
+88	_WARN_TEMPLATE = (
+89	    "\n\n[CyclicLoopBreaker] WARNING: you have repeated the SAME cycle of "
+90	    "{period} command(s) {cycles} times and the output is identical every "
+91	    "time. You are stuck and making no progress. STOP repeating this. Re-read "
+92	    "the original task, question whether this action is even relevant to the "
+93	    "goal, and take a fundamentally different step."
+94	)
+95	
+96	_BREAK_TEMPLATE = (
+97	    "[CyclicLoopBreaker] This exact command has already been run and returned "
+98	    "identical output {runs} times with no change — it is blocked to stop an "
+99	    "infinite loop. Repeating it will NOT help. Do not run it again. Step back: "
+100	    "re-read the ORIGINAL task requirements, drop whatever tangent you are stuck "
+101	    "on (it is almost certainly not required by the task), and make concrete "
+102	    "progress on the actual deliverable now. If the real work is done, finish."
+103	)
+104	
+105	
+106	class CyclicLoopBreaker(MultiHookProcessor):
+107	    """Detect a repeating identical period-k tool cycle, then block-and-redirect.
+108	
+109	    Args:
+110	        max_period:   Largest cycle length to test for (default 4). Periods
+111	                      1..max_period are all checked each step.
+112	        warn_cycles:  Identical-cycle repetitions that inject a soft warning
+113	                      into the tool result (default 2).
+114	        break_cycles: Identical-cycle repetitions after which the *next*
+115	                      matching call is blocked and redirected instead of run
+116	                      (default 3).
+117	        max_total_blocks: Total blocked calls allowed in one run before falling
+118	                      back to LoopDetectedError as a hard safety net
+119	                      (default 12).
+120	        window_size:  Sliding fingerprint-window length (default 32).
+121	        compaction_drop_threshold: Message-count drop that signals compaction
+122	                      and clears the window (default 5).
+123	    """
+124	
+125	    _singleton_group = "cyclic_loop_breaker"
+126	    # After CompactionProcessor / PostCompactionRefresh so the window reflects
+127	    # post-eviction message counts, and after BgInstallGuard so it can't fight
+128	    # another on_before_tool blocker for the same call.
+129	    _order = 22
+130	
+131	    def __init__(
+132	        self,
+133	        max_period: int = 4,
+134	        warn_cycles: int = 2,
+135	        break_cycles: int = 3,
+136	        max_total_blocks: int = 12,
+137	        window_size: int = 32,
+138	        compaction_drop_threshold: int = 5,
+139	    ) -> None:
+140	        self.max_period = max(1, int(max_period))
+141	        self.warn_cycles = max(1, int(warn_cycles))
+142	        self.break_cycles = max(self.warn_cycles + 1, int(break_cycles))
+143	        self.max_total_blocks = max(1, int(max_total_blocks))
+144	        needed = self.max_period * (self.break_cycles + 2)
+145	        self.window_size = max(int(window_size), needed)
+146	        self.compaction_drop_threshold = int(compaction_drop_threshold)
+147	
+148	        # Full (call+result) fingerprint window — used for cycle detection.
+149	        self._fps: deque[str] = deque(maxlen=self.window_size)
+150	        # Call-only fingerprint window — used to match an *incoming* call to
+151	        # the repeating block before its result is known.
+152	        self._call_fps: deque[str] = deque(maxlen=self.window_size)
+153	        self._pending: dict[str, str] = {}
+154	        self._blocked_ids: set[str] = set()
+155	        self._current_run_id: str = ""
+156	        self._prev_message_count: int = 0
+157	        self._total_blocks: int = 0
+158	
+159	    # ------------------------------------------------------------------
+160	    # Helpers
+161	    # ------------------------------------------------------------------
+162	
+163	    @staticmethod
+164	    def _hash(text: str) -> str:
+165	        return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+166	
+167	    def _call_fp(self, tool_name: str, tool_input: dict) -> str:
+168	        try:
+169	            input_str = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
+170	        except Exception:
+171	            input_str = repr(tool_input)
+172	        return self._hash(f"{tool_name}\x00{input_str}")
+173	
+174	    @staticmethod
+175	    def _tail_cycle_count(fps: list[str], period: int) -> int:
+176	        """Identical consecutive blocks of length *period* at the tail."""
+177	        n = len(fps)
+178	        if n < period * 2:
+179	            return 1
+180	        block = fps[-period:]
+
+[Showing lines 61–180 of 302 total. Use offset=180 to read the next section.]

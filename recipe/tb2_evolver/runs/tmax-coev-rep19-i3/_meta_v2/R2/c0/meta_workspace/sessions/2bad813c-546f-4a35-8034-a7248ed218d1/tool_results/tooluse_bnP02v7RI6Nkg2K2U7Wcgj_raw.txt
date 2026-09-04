@@ -1,0 +1,69 @@
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:16:    content: str | list  # str for text; list of content blocks for multimodal (Anthropic format)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:19:    tool_calls: tuple = ()  # tuple[ToolCall, ...] — populated for role=assistant with tool calls
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:86:class TaskStartEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:131:class BeforeModelEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:141:class ModelResponseEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:143:    content: str = ""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:144:    thinking: str = ""  # extended thinking / reasoning content from the model
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:146:    tool_calls: tuple[ToolCall, ...] = ()
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:147:    finish_reason: str = "end_turn"
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:175:    content_blocks: tuple = field(default=(), hash=False, compare=False)
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:176:    # Native multimodal blocks (Anthropic content format) from MCP tools.
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:198:class TaskEndEvent(Event):
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:372:    if isinstance(m.content, list):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:373:        d["content"] = [dict(sorted(b.items())) if isinstance(b, dict) else b for b in m.content]
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:375:        d["content"] = m.content or ""
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:381:    if m.tool_calls:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:382:        d["tool_calls"] = [
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:383:            {"id": tc.id, "name": tc.name, "input": dict(sorted(tc.input.items()))} for tc in m.tool_calls
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:394:    Fields included: role, content, tool_call_id, name, tool_calls, thinking_blocks.
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:399:    When a message has no in-memory content (content is empty string / empty list)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:401:    (we never read content_ref files during hashing).
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:420:        "content": m.content if isinstance(m.content, list) else (m.content or ""),
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:426:    if m.tool_calls:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:427:        d["tool_calls"] = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in m.tool_calls]
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:437:    tool_calls = tuple(
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:438:        ToolCall(id=tc["id"], name=tc["name"], input=tc.get("input", {})) for tc in d.get("tool_calls", [])
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:442:        content=d.get("content", ""),
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:445:        tool_calls=tool_calls,
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:459:    Preserves tool_use/tool_result pairs: when an assistant message with tool_calls
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:478:        if msg.role == "assistant" and msg.tool_calls:
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:480:            tool_call_ids = {tc.id for tc in msg.tool_calls}
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:507:def _extract_text(content: "str | list") -> str:
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:508:    """Extract plain text from a content value (str or multimodal block list)."""
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:509:    if isinstance(content, str):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:510:        return content
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:512:        block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:524:    """Estimate token cost of a single non-text content block.
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:551:    Non-text content blocks (images, audio) are estimated via
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:560:        text = _extract_text(m.content)
+--
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:576:        if isinstance(m.content, list):
+/fsx/home/jixuan.chen/harnessx-backup/harnessx/core/events.py:577:            for block in m.content:

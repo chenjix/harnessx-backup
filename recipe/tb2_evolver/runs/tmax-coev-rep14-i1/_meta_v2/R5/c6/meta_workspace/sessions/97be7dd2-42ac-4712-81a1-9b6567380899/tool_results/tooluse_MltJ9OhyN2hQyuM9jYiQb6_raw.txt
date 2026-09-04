@@ -1,0 +1,159 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""DegenerateLoopBreakerProcessor — break low-information tool-call cycles.
+4	
+5	Closes a systemic Tmax/TB2 failure mode distinct from the max_tokens
+6	repetition loop handled by ``LengthTruncationRecoveryProcessor``:
+7	
+8	The model issues *completed* tool calls, gets results, but is stuck
+9	repeatedly running the same tiny set of commands that produce the same
+10	outputs — making zero new observations. This shows up in two shapes:
+11	
+12	* a single command repeated back-to-back many times (e.g. re-running an
+13	  identical failing ``sqlite3``/``jq`` invocation), and
+14	* a short A/B/A/B *cycle* of two commands whose results never change
+15	  (e.g. ``rm && ln && python3 -c 'import operator'`` -> ``OK`` alternating
+16	  with ``python3 /path/script.py`` -> the same traceback).
+17	
+18	The naive "N consecutive byte-identical results" detector catches the
+19	first shape but misses the second, because no two adjacent calls are
+20	identical. This processor instead watches a rolling window of the last
+21	``window`` (command, result) fingerprints: when that window collapses to
+22	at most ``distinct_max`` distinct fingerprints, the agent is cycling among
+23	a tiny set of repeated actions with no new information, and a corrective
+24	note is appended to the tool result.
+25	
+26	Design constraints (all satisfied):
+27	* **Append-only on the tool result** (mirrors ``CustomEditToolProcessor``):
+28	  never inserts/removes messages, never mutates the system prompt, so it
+29	  cannot violate the message-count hook contract.
+30	* **Content-agnostic**: no task ids, paths, command syntax, or dataset
+31	  literals — it keys purely on the repetition *shape*.
+32	* **Non-terminating**: it nudges and returns control; it never kills the
+33	  run or forces an exit.
+34	* Fires at most once per ``refire_gap`` firing tool-results so a stubborn
+35	  loop is nudged again (escalating message) without spamming every step.
+36	"""
+37	
+38	from __future__ import annotations
+39	
+40	import dataclasses
+41	import hashlib
+42	from collections import deque
+43	
+44	from harnessx.core.events import (
+45	    TaskEndEvent,
+46	    TaskStartEvent,
+47	    ToolCallEvent,
+48	    ToolResultEvent,
+49	)
+50	from harnessx.core.processor import MultiHookProcessor
+51	
+52	_NUDGE_SOFT = (
+53	    "\n\n[LoopBreaker] You have run essentially the same command(s) several "
+54	    "times in a row and are getting the same result(s) — you are stuck in a "
+55	    "loop and making no new progress. STOP repeating this action. Step back: "
+56	    "state in one sentence what you now know for certain from these repeated "
+57	    "outputs, then take a DIFFERENT concrete step (a different command, a "
+58	    "different tool/approach, or inspect state you have not yet looked at). "
+59	    "Do not re-run the same command again."
+60	)
+61	
+62	_NUDGE_HARD = (
+63	    "\n\n[LoopBreaker] You are STILL cycling on the same failing action. This "
+64	    "approach is not working and re-running it will not change the outcome. "
+65	    "Abandon it entirely and change strategy: if a command keeps failing the "
+66	    "same way, the fix is a fundamentally different mechanism, not a retry. "
+67	    "If you are blocked on a hard constraint, satisfy it a different way and "
+68	    "make sure every required output file exists at its exact specified path "
+69	    "before you finish. Take one new, different action now."
+70	)
+71	
+72	
+73	def _fingerprint(command: str, result: str) -> str:
+74	    """Stable short fingerprint of a (command, result) pair.
+75	
+76	    Result is truncated to keep large outputs cheap to hash while still
+77	    distinguishing genuinely different observations; the command is included
+78	    in full so an unchanged command with an unchanged head-of-result reads as
+79	    the same action.
+80	    """
+81	    h = hashlib.blake2b(digest_size=16)
+82	    h.update((command or "").strip().encode("utf-8", "replace"))
+83	    h.update(b"\x00")
+84	    h.update((result or "")[:2000].strip().encode("utf-8", "replace"))
+85	    return h.hexdigest()
+86	
+87	
+88	class DegenerateLoopBreakerProcessor(MultiHookProcessor):
+89	    """Append a corrective nudge when recent tool activity collapses to a loop."""
+90	
+91	    _singleton_group = "degenerate_loop_breaker"
+92	    _order = 33  # after CustomEditToolProcessor(30), before CustomSelfVerifyProcessor(90)
+93	
+94	    def __init__(
+95	        self,
+96	        window: int = 6,
+97	        distinct_max: int = 2,
+98	        min_window_fill: int = 6,
+99	        refire_gap: int = 4,
+100	    ) -> None:
+101	        self.window = max(2, int(window))
+102	        self.distinct_max = max(1, int(distinct_max))
+103	        # Require the window to be full before judging (avoid firing on the
+104	        # first couple of calls of a short task).
+105	        self.min_window_fill = max(self.distinct_max + 1, int(min_window_fill))
+106	        self.refire_gap = max(1, int(refire_gap))
+107	        self._fps: deque[str] = deque(maxlen=self.window)
+108	        self._pending: dict[str, str] = {}
+109	        self._fires: int = 0
+110	        self._since_last_fire: int = 0
+111	
+112	    def _reset(self) -> None:
+113	        self._fps.clear()
+114	        self._pending.clear()
+115	        self._fires = 0
+116	        self._since_last_fire = 0
+117	
+118	    async def on_task_start(self, event: TaskStartEvent):
+119	        self._reset()
+120	        yield event
+121	
+122	    async def on_before_tool(self, event: ToolCallEvent):
+123	        # Record the command text so we can pair it with its result.
+124	        cmd = ""
+125	        if isinstance(event.tool_input, dict):
+126	            cmd = str(event.tool_input.get("command", "")) or str(event.tool_input)
+127	        self._pending[event.tool_call_id] = cmd
+128	        yield event
+129	
+130	    async def on_after_tool(self, event: ToolResultEvent):
+131	        cmd = self._pending.pop(event.tool_call_id, "")
+132	        self._fps.append(_fingerprint(cmd, event.result or ""))
+133	        self._since_last_fire += 1
+134	
+135	        # Only judge once the window is full enough to be meaningful.
+136	        if len(self._fps) < self.min_window_fill:
+137	            yield event
+138	            return
+139	
+140	        distinct = len(set(self._fps))
+141	        looping = distinct <= self.distinct_max
+142	
+143	        # Fire on first detection, then only every refire_gap results so a
+144	        # persistent loop gets re-nudged (escalated) without spamming.
+145	        should_fire = looping and (
+146	            self._fires == 0 or self._since_last_fire >= self.refire_gap
+147	        )
+148	        if not should_fire:
+149	            yield event
+150	            return
+151	
+152	        note = _NUDGE_HARD if self._fires >= 1 else _NUDGE_SOFT
+153	        self._fires += 1
+154	        self._since_last_fire = 0
+155	        yield dataclasses.replace(event, result=(event.result or "") + note)
+156	
+157	    async def on_task_end(self, event: TaskEndEvent):
+158	        self._reset()
+159	        yield event

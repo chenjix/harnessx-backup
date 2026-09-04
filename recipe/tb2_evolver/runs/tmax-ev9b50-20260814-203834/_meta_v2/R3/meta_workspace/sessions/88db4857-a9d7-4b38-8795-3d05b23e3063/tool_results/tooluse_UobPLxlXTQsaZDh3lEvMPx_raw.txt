@@ -1,0 +1,122 @@
+691	                step_id=step_id,
+692	                state_snapshot=snapshot_before,
+693	                state_delta=delta,
+694	                action=model_event,
+695	                observation=step_tool_results,
+696	                event=step_event,
+697	                reward=0.0,
+698	                # step_snapshots=False: skip step_start_event — it holds assembled messages
+699	                # which reward_func never reads (saves memory in RL training).
+700	                step_start_event=None if not step_snapshots else step_start_event,
+701	            )
+702	            trajectory.add_step(traj_step)
+703	
+704	            # ── 7. Loop termination ──────────────────────────────────────────
+705	            # Thinking-only response: model emitted a reasoning block but no content
+706	            # and no tool calls. NOT a done turn — the model is mid-reasoning (e.g.
+707	            # extended-thinking models that emit <think> before deciding which tool
+708	            # to call). Append a user continuation so the next step's assembled
+709	            # context ends with "user" (required by all provider APIs) and give the
+710	            # model another turn to emit content or a tool call.
+711	            _thinking_only = (
+712	                not model_event.content
+713	                and not model_event.tool_calls
+714	                and (bool(model_event.thinking) or bool(model_event.thinking_blocks))
+715	            )
+716	            if _thinking_only:
+717	                state.add_raw_message(
+718	                    Message(
+719	                        role="user",
+720	                        content="Please continue. Use a tool or provide your final answer.",
+721	                    )
+722	                )
+723	            # Token-limit truncation: model hit max_tokens mid-generation with no tool
+724	            # calls.  The assistant message is already in state; inject a user nudge so
+725	            # the next step's context ends with "user" (required by all provider APIs).
+726	            _length_truncated = (
+727	                model_event.finish_reason == "length" and not model_event.tool_calls and not _thinking_only
+728	            )
+729	            if _length_truncated:
+730	                state.add_raw_message(
+731	                    Message(
+732	                        role="user",
+733	                        content=(
+734	                            "Your previous response was cut off by the token limit. "
+735	                            "Please continue from where you left off."
+736	                        ),
+737	                    )
+738	                )
+739	                _logger.warning(
+740	                    "run_loop: finish_reason=length with no tool calls at step=%d — "
+741	                    "injecting user continuation (run_id=%s)",
+742	                    step_id,
+743	                    state.run_id,
+744	                )
+745	            if (
+746	                not _thinking_only
+747	                and not _length_truncated
+748	                and model_event.finish_reason in ("end_turn", "stop")
+749	                and not model_event.tool_calls
+750	            ):
+751	                empty_content = not (model_event.content or "").strip()
+752	                if step_id == 0 and empty_content and not _empty_end_turn_retried:
+753	                    _model_empty_end_turn_seen = True
+754	                    _empty_end_turn_retried = True
+755	                    state.set_slot("__model_empty_end_turn_seen", "diagnostic", True)
+756	                    state.add_raw_message(
+757	                        Message(
+758	                            role="user",
+759	                            content=(
+760	                                "Your previous response was empty. Please provide a concise, non-empty "
+761	                                "answer for this task now."
+762	                            ),
+763	                        )
+764	                    )
+765	                    _logger.warning(
+766	                        "run_loop: recovered empty first-turn end_turn via single retry (run_id=%s)",
+767	                        state.run_id,
+768	                    )
+769	                    continue
+770	                break
+771	            if task.is_done(state):
+772	                break
+773	            if state.budget_exceeded():
+774	                exit_reason = "budget_exceeded"
+775	                break
+776	
+777	    except BudgetExceededError:
+778	        exit_reason = "budget_exceeded"
+779	        # Try to recover the best output from assistant messages
+780	        final_output = _recover_best_output(state.raw_messages, final_output)
+781	    except LoopDetectedError:
+782	        exit_reason = "loop_detected"
+783	        final_output = _recover_best_output(state.raw_messages, final_output)
+784	    except asyncio.CancelledError:
+785	        # User actively interrupted the execution (Ctrl+C / API cancel).
+786	        interrupt_step = state.step - 1 if state.step > 0 else state.step
+787	        await tracer.on_event(
+788	            ModelResponseEvent(
+789	                run_id=state.run_id,
+790	                step_id=interrupt_step,
+791	                content=_USER_INTERRUPTED_MESSAGE,
+792	                finish_reason="interrupted",
+793	                usage=Usage(),
+794	            )
+795	        )
+796	        _append_user_interrupted_message(state)
+797	        exit_reason = "interrupted"
+798	        final_output = _USER_INTERRUPTED_MESSAGE
+799	    except Exception as e:
+800	        # RL rollout: ContextLengthExceeded and GenerationAborted are expected
+801	        # flow-control signals (not bugs).  Log at debug to avoid flooding the
+802	        # console with thousands of tracebacks per run.
+803	        _exc_name = type(e).__name__
+804	        if _exc_name in ("ContextLengthExceeded", "GenerationAborted"):
+805	            _logger.debug("run_loop: %s: %s", _exc_name, e)
+806	        else:
+807	            # Warning without traceback so non-verbose CLI stays clean.
+808	            # Full traceback is available at DEBUG level (harnessx -v).
+809	            _logger.warning("run_loop error: %s: %s", _exc_name, e)
+810	            _logger.debug("run_loop error traceback:", exc_info=True)
+
+[Showing lines 691–810 of 981 total. Use offset=810 to read the next section.]

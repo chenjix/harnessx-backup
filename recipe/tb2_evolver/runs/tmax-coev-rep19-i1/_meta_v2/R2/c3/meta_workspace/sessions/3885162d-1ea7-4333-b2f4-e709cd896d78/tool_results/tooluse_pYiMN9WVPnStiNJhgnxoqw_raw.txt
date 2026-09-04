@@ -1,0 +1,141 @@
+73	
+74	## Round 2 — verifier-runtime readiness
+75	
+76	<!-- journal:frontmatter
+77	round: 2
+78	timestamp: 2026-06-01T00:00:00Z
+79	hypothesis_id: h_verifier_runtime_readiness_v1
+80	levers: [instruction]
+81	predicted_affected: [task_000028_7fe033ac, task_000958_4bb2b05d]
+82	cited_candidates: [C-201]
+83	gating_outcome: pending
+84	gating_attribution: pending
+85	expected_global_gain: "Flips the missing-verifier-dependency cluster (HTTP-service tasks whose pytest verifier does `import requests` against an absent package) and generalizes to any future externally-HTTP-verified task where the test client is not installed"
+86	regression_risk: "Low — guidance gated on the task explicitly describing an external HTTP verifier; worst case one redundant pip install (fast warm-cache no-op) on service tasks that already have requests. No effect on non-service tasks."
+87	cost_shift: "Negligible — at most one extra Bash import-probe + optional install on HTTP-service tasks; zero elsewhere."
+88	rollback_trigger: "If R3 shows a previously-passing HTTP task regressing (extra install hangs/errors and burns budget) alongside flat/down pass_rate, revert the prompt addition."
+89	-->
+90	
+91	### Why
+92	
+93	Assigned focus `task_000028_7fe033ac` fails with reward=0 despite a
+94	functionally correct solution: the agent's Nginx→C++ UNIX-socket
+95	microservice returns `HTTP/1.1 200 OK` with the frame count `150` end to end
+96	(msg [70]). The zero comes entirely from the verifier phase — `pytest`
+97	collecting `/tmp/test_final_state.py` aborts with
+98	`ModuleNotFoundError: No module named 'requests'` because the verifier drives
+99	its HTTP checks through the `requests` package, which is not installed in the
+100	container's Python. `task_000958_4bb2b05d` (C++ SQLite HTTP microservice)
+101	fails identically. Both passing HTTP tasks in the set
+102	(`task_000206_a943669b`, `task_001498_df8254c9`) had verifiers that did not
+103	import `requests`, so the discriminator is purely the missing dependency, not
+104	solution quality. The container supports offline pip installs (warm-cache
+105	logic in `benchmarks/terminal_bench_2/dind_environment.py`), so the agents
+106	could have made `requests` importable — nothing told them the verifier
+107	depended on it.
+108	
+109	### Changes
+110	
+111	- `system_prompt.txt` — appended one generalized "verifier readiness"
+112	  paragraph: when the task states an external/automated verifier will make
+113	  HTTP requests to a service you run, confirm the standard Python HTTP client
+114	  (`requests`) is importable in the tests' interpreter and install it if
+115	  missing. No task id, path, port, or constant embedded.
+116	- `config.yaml` — byte-identical processor pipeline to R1; the only effective
+117	  delta is the new sidecar prompt read by `SiblingSystemPromptBuilder`.
+118	
+119	### Evidence
+120	
+121	- `task_000028_7fe033ac` `result.json`: `reward=0`, `exit_reason=done`,
+122	  `steps=54`; `final_pytest.output_tail`:
+123	  `import requests → ModuleNotFoundError: No module named 'requests'`
+124	  (`Interrupted: 1 error during collection`). Solution verified working:
+125	  msg [53]/[70] `HTTP/1.1 200 OK` body `150`.
+126	- `task_000958_4bb2b05d` `result.json`: `reward=0`, `exit_reason=done`,
+127	  `steps=64`; same `import requests` collection crash at
+128	  `/tmp/test_final_state.py:4`.
+129	- Contrast passers: `task_000206_a943669b` `2 passed`,
+130	  `task_001498_df8254c9` `4 passed` — verifiers did not import `requests`.
+131	
+132	### Uncertainty
+133	
+134	Instruction lever depends on model compliance: the agent must (a) recognize
+135	the task as externally HTTP-verified and (b) actually run the import
+136	probe/install. If it ignores the paragraph the cluster stays failed but
+137	nothing regresses (config pipeline unchanged). A flip is plausible, not
+138	certain. If the install step ever hangs and burns budget on a passing task,
+139	that is the rollback signal.
+140	
+141	## Round 2 — OCR quality advisor
+142	
+143	<!-- journal:frontmatter
+144	round: 2
+145	timestamp: 2026-06-02T00:00:00Z
+146	hypothesis_id: h_ocr_quality_advisor_v1
+147	levers: [control]
+148	predicted_affected: [task_000015_89886d8d, task_000505_50b5162d]
+149	cited_candidates: [C-001]
+150	gating_outcome: pending
+151	gating_attribution: pending
+152	expected_global_gain: "Closes the garbled-OCR->wrong-artifact failing cluster (000015 schema mapping @0.34 accuracy, 000505 mis-read SSH key); generalizes to any unseen task needing structured OCR (7 OCR tasks this round)"
+153	regression_risk: "Near zero — fires at most once per task, only appends to the first OCR command's tool result (contract-safe), inert on all non-OCR tasks and on the ~5 passing OCR tasks"
+154	cost_shift: "Negligible/positive — one ~200-token advisory only on tasks that invoke OCR; expected to REDUCE wasted tokens from the 6+ failed OCR retries the agent currently thrashes through"
+155	rollback_trigger: "If R2 pass_rate flat/down AND neither 000015 nor 000505 flips, revert (advisory added surface without changing outcome)"
+156	-->
+157	
+158	### Why
+159	
+160	Assigned focus `task_000015_89886d8d` (software_engineering) exits `done` but
+161	fails the verifier with "Accuracy metric 0.3411 is below the 0.98 threshold".
+162	The task requires OCRing `/app/routing_schema.png` (a small 800x400 image) to
+163	extract URL->JSON route mappings, then building `migrate.py` against a hidden
+164	2000-URL edge-case dataset. The agent ran `tesseract <img> stdout` ~6 times —
+165	every run emitted `Warning: Invalid resolution 0 dpi. Using 70 instead` and
+166	returned garbled text ("atalogyitem <item _id>Mept=<depariment>..."). It tried
+167	contrast/threshold/whitelist tweaks but never applied the standard fix
+168	(upscale the image, force `--dpi 300`, try `--psm` modes). It then abandoned
+169	the image and *inferred* the schema from the 3 visible sample URLs, hard-coding
+170	3 routes that scored 0.34 on the hidden set. The SAME root cause fails
+171	`task_000505_50b5162d`: OCR mis-read an SSH key's base64 (`IZDIINTES` for
+172	`lZDI1NTE5`, spurious spaces/`|`) so the trojan detector never matched — "2 of
+173	2 evil bypassed". Two distinct tasks, one mechanism: naive OCR on a small image
+174	produces garbage the agent trusts or works around. The existing loop breakers
+175	never fire because the commands vary slightly each time.
+176	
+177	### Changes
+178	
+179	- `processors/ocr_quality_advisor.py` — new `OcrQualityAdvisor`
+180	  `MultiHookProcessor`. On the first OCR invocation per task (`tesseract` /
+181	  `pytesseract` / `image_to_string` in a Bash command), appends a one-time
+182	  general OCR-quality recipe to that tool's result: upscale several-fold, force
+183	  `--dpi 300`, try alternate `--psm` modes, and VERIFY legibility before
+184	  trusting the text or building a parser on it — explicitly warning against
+185	  guessing content from sample values or trusting a mis-read string.
+186	  Content-agnostic (no task/path/schema/constant); contract-safe (only augments
+187	  `event.result`, fires at most once per task).
+188	- `config.yaml` — register after `RepeatedCommandBreaker` (order 32), before
+189	  `CustomSelfVerifyProcessor`.
+190	- `system_prompt.txt` — copied byte-for-byte from R1 (SiblingSystemPromptBuilder
+191	  needs it as a sibling of the active config).
+192	
+193	### Evidence
+194	
+195	- `task_000015_89886d8d` result.json: `reward=0`, exit `done`,
+196	  final_pytest "Accuracy metric 0.3411 is below the 0.98 threshold".
+197	- `task_000015` msg[2] tool: garbled OCR; msg[14] agent reads 3 sample URLs and
+198	  msg[17]/[21] infers the schema from them instead of the image.
+199	- `task_000505_50b5162d` msg[4] tool: "ssh-ed25519
+200	  AAAAC3NzaC1IZDIINTESAAAAIOrXQ50Bf4PZU0H9 + |J9tY +X07yG/pA3T2Xb8" (mis-read);
+201	  final_pytest "2 of 2 evil bypassed: ls_evil, cat_evil".
+202	- Cluster: 7 tasks invoke tesseract/OCR this round; the 2 that need the FULL
+203	  structured content of a small image fail, the ~5 that need a short legible
+204	  token pass — confirming the gap is OCR quality on dense/small images.
+205	
+206	### Uncertainty
+207	
+208	The advisor guarantees the recipe is in context at the first OCR call; it does
+209	not guarantee the model executes the upscale correctly, so a flip is plausible
+210	not certain. The sure win is redirecting the agent away from fabricating or
+211	trusting garbled data. If it proves ineffective (neither task flips) it is inert
+212	elsewhere, so downside is bounded to a small token cost on OCR tasks — revert per
+213	the rollback trigger if pass_rate is flat/down.

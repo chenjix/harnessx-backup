@@ -1,0 +1,72 @@
+71	        self,
+72	        command: str,
+73	        cwd: str | None = None,
+74	        timeout: float = 30.0,
+75	    ) -> str:
+76	        # Run the command inside a new session via setsid so it gets its own
+77	        # process group (PGID == PID of the setsid'd process).  The PID is
+78	        # saved to _PGID_FILE so kill_running() can target exactly this group
+79	        # without affecting other container processes.
+80	        #
+81	        # stdout/stderr flow through the background job's inherited file
+82	        # descriptors to docker compose exec's client as normal.  The exit
+83	        # code is forwarded via `wait`.
+84	        wrapped = (
+85	            f"setsid bash -c {shlex.quote(command)} &"
+86	            f" _hx_pid=$!;"
+87	            f" printf '%s' \"$_hx_pid\" > {_PGID_FILE};"
+88	            f" wait $_hx_pid"
+89	        )
+90	        try:
+91	            result = await self._env.exec(
+92	                wrapped,
+93	                cwd=cwd or self._workspace_path,
+94	                timeout_sec=int(timeout),
+95	            )
+96	        except BaseException:
+97	            # Harbor raises RuntimeError on timeout (not asyncio.TimeoutError).
+98	            # CancelledError arrives when an outer asyncio.wait_for fires.
+99	            # Either way the setsid'd process is still running — kill it.
+100	            try:
+101	                await asyncio.shield(self.kill_running())
+102	            except Exception:
+103	                pass
+104	            raise
+105	        stdout = result.stdout or ""
+106	        stderr = result.stderr or ""
+107	        output = stdout
+108	        if stderr:
+109	            output = f"{output}\nSTDERR: {stderr}" if output else f"STDERR: {stderr}"
+110	        if not output:
+111	            output = f"(exit {result.return_code}, no output captured)"
+112	        elif result.return_code != 0:
+113	            output = f"{output}\n(exit {result.return_code})"
+114	        return self._trim(output)
+115	
+116	
+117	class HarborSandboxProvider(SandboxProvider):
+118	    """Provider that wraps a Harbor ``BaseEnvironment``.
+119	
+120	    Harbor manages the container lifecycle; this provider has no lifecycle of
+121	    its own — acquire/release are no-ops.
+122	
+123	    Args:
+124	        environment:    A Harbor ``BaseEnvironment`` instance passed in from
+125	                        ``HarnessXAgent.run()``.
+126	        workspace_path: Container-side path used as the default cwd for all
+127	                        tool calls.  Defaults to ``/workspace``; use ``/app``
+128	                        for Terminal Bench 2.0 tasks.
+129	        output_limit:   Truncate exec output to this many characters.
+130	                        Default 4 000 (matches the old hand-rolled limit).
+131	                        Pass ``None`` to disable truncation.
+132	    """
+133	
+134	    def __init__(
+135	        self,
+136	        environment: Any,
+137	        workspace_path: str = "/workspace",
+138	        output_limit: int | None = _OUTPUT_LIMIT,
+139	    ) -> None:
+140	        self._environment = environment
+
+[Showing lines 71–140 of 159 total. Use offset=140 to read the next section.]

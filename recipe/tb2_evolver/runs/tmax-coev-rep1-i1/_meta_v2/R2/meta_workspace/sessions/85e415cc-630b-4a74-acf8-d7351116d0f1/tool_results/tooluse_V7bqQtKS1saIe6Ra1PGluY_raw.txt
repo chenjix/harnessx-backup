@@ -1,0 +1,51 @@
+                # always replace it so the model sees a fresh prompt rather than
+                # silently perpetuating stale content.
+                _assembled_list = [m for m in _assembled_list if m.role != "system"]
+                _assembled_list.insert(0, Message(role="system", content=task_system_prompt))
+            before_event = BeforeModelEvent(
+                run_id=state.run_id,
+                step_id=step_id,
+                messages=tuple(_assembled_list),
+                tools=step_start_event.tools,
+                cumulative_cost_usd=state.cumulative_cost_usd,
+            )
+            _bm_events = await pipe_all(
+                before_event,
+                get_procs("before_model"),
+                tracer=tracer,
+                hook="before_model",
+            )
+            before_event = next(
+                (e for e in reversed(_bm_events) if isinstance(e, BeforeModelEvent)),
+                before_event,
+            )
+            await tracer.on_event(before_event)
+
+            # ── 3. Call model ────────────────────────────────────────────────
+            if before_event.skip_model:
+                model_event = ModelResponseEvent(
+                    run_id=state.run_id,
+                    step_id=step_id,
+                    content=before_event.synthetic_output,
+                    finish_reason="stop",
+                    usage=Usage(),
+                )
+                spawn_events: list[SpawnSubAgentEvent] = []
+            else:
+                # Validate message sequence before sending to API:
+                # - Ensure tool_use/tool_result pairs are complete
+                # - Ensure messages don't end with assistant role (would be interpreted as prefill)
+                _before_msg_list = list(before_event.messages)
+                final_messages = _validate_messages(_before_msg_list)
+                model_response = await active_model_provider.complete(
+                    messages=final_messages,
+                    tools=list(before_event.tools),
+                    stream_callback=stream_callback,
+                )
+                model_event = ModelResponseEvent(
+                    run_id=state.run_id,
+                    step_id=step_id,
+                    content=model_response.content,
+                    thinking=model_response.thinking,
+                    thinking_blocks=model_response.thinking_blocks,
+                    tool_calls=model_response.tool_calls,

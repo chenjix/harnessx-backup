@@ -1,0 +1,132 @@
+132	    type: str = field(default="before_model", init=False)
+133	    messages: tuple[Message, ...] = ()
+134	    tools: tuple[ToolSchema, ...] = ()
+135	    cumulative_cost_usd: float = 0.0  # needed by CostGuardProcessor
+136	    skip_model: bool = field(default=False, hash=False, compare=False)
+137	    synthetic_output: str = field(default="", hash=False, compare=False)
+138	
+139	
+140	@dataclass(frozen=True)
+141	class ModelResponseEvent(Event):
+142	    type: str = field(default="model_response", init=False)
+143	    content: str = ""
+144	    thinking: str = ""  # extended thinking / reasoning content from the model
+145	    thinking_blocks: tuple = ()  # raw provider blocks (with signatures) for multi-turn replay
+146	    tool_calls: tuple[ToolCall, ...] = ()
+147	    finish_reason: str = "end_turn"
+148	    usage: Usage = field(default_factory=Usage)
+149	    model: str = ""
+150	    attempted_models: tuple[str, ...] = ()  # models tried before this one (ProviderGroup fallback)
+151	
+152	
+153	@dataclass(frozen=True)
+154	class ToolCallEvent(Event):
+155	    type: str = field(default="tool_call", init=False)
+156	    tool_name: str = ""
+157	    tool_input: dict = field(default_factory=dict)
+158	    tool_call_id: str = ""
+159	    approved: bool = True
+160	    synthetic_result: str | None = None
+161	    """When set alongside approved=False, the RunLoop injects this as the
+162	    ToolResultEvent result instead of sending "Tool call not approved."
+163	    Processors can use this to intercept tool calls and inject custom results.
+164	    """
+165	
+166	
+167	@dataclass(frozen=True)
+168	class ToolResultEvent(Event):
+169	    type: str = field(default="tool_result", init=False)
+170	    tool_name: str = ""
+171	    tool_call_id: str = ""
+172	    result: str = ""
+173	    error: str | None = None
+174	    duration_ms: float = 0.0
+175	    content_blocks: tuple = field(default=(), hash=False, compare=False)
+176	    # Native multimodal blocks (Anthropic content format) from MCP tools.
+177	    # Empty tuple = text-only result; processor chain passes this through unchanged.
+178	
+179	
+180	@dataclass(frozen=True)
+181	class StepEndEvent(Event):
+182	    type: str = field(default="step_end", init=False)
+183	    step_summary: str = ""
+184	    tool_call_summary: str = ""  # "tool1(args)|tool2(args)" — used by LoopDetectionProcessor
+185	    cumulative_tokens: int = 0
+186	    cumulative_cost_usd: float = 0.0
+187	    memory_written: bool = False
+188	    state_snapshot: "dict | None" = field(
+189	        default=None, hash=False, compare=False
+190	    )  # needed by CheckpointProcessor; None by default to keep events lightweight
+191	    # Timing + token breakdown (populated by run_loop, forwarded via SSETracer)
+192	    duration_ms: float = 0.0
+193	    input_tokens: int = 0
+194	    output_tokens: int = 0
+195	
+196	
+197	@dataclass(frozen=True)
+198	class TaskEndEvent(Event):
+199	    type: str = field(default="task_end", init=False)
+200	    final_output: str = ""
+201	    exit_reason: str = "done"
+202	    total_steps: int = 0
+203	    total_tokens: int = 0
+204	    total_input_tokens: int = 0
+205	    total_output_tokens: int = 0
+206	    total_cost_usd: float = 0.0
+207	    last_step_input_tokens: int = 0  # input_tokens of the final model call (= context size)
+208	    last_step_output_tokens: int = 0  # output_tokens of the final model call
+209	    eval_result: EvalResult | None = None
+210	    success_criteria: str = ""  # from task.success_criteria — used by EvaluationProcessor
+211	    task_description: str = ""  # from task.description — used by LLMJudgeProcessor
+212	    final_messages: tuple = field(default_factory=tuple, hash=False, compare=False)
+213	    # tuple[Message, ...] — full conversation at task end; used by LLMJudgeEvaluator
+214	    error: str = ""  # exception message when exit_reason == "error"
+215	    state_snapshot: "dict | None" = field(
+216	        default=None, hash=False, compare=False
+217	    )  # State.snapshot() at task end — used by HarnessJournal to write final_state.json
+218	
+219	
+220	@dataclass(frozen=True)
+221	class SegmentBoundaryEvent(Event):
+222	    """Signals that the conversation history has been restructured and a new
+223	    recording segment should begin.
+224	
+225	    Emitted by any processor that modifies ``state.messages`` in a way that
+226	    breaks continuity with the previous event stream — compaction, multi-agent
+227	    handoff, strategy-based context resets, etc.
+228	
+229	    HarnessJournal handles this event by:
+230	
+231	    1. Writing ``{run_id}_state.json`` for the *current* segment (checkpoint).
+232	    2. Rotating to a new ``{new_run_id}.jsonl`` + ``{new_run_id}_trace.jsonl``.
+233	    3. Updating the session index (appending ``new_run_id``, updating
+234	       ``latest_run_id``).
+235	
+236	    The RunLoop does **not** restart; only the journal's file pointers change.
+237	
+238	    Args:
+239	        reason:         Human-readable reason for the boundary.  Conventional
+240	                        values: ``"compaction"``, ``"agent_handoff"``.
+241	                        Any string is valid — used for tracing / analytics only.
+242	        new_run_id:     ID for the new recording segment.  Generated by the
+243	                        emitting processor via ``make_run_id()``.
+244	        state_snapshot: ``state.snapshot()`` captured *after* the restructuring.
+245	                        Written by HarnessJournal to the checkpoint file so the
+246	                        segment can be resumed independently.
+247	    """
+248	
+249	    type: str = field(default="segment_boundary", init=False)
+250	    reason: str = "compaction"
+251	    new_run_id: str = ""
+252	    state_snapshot: "dict | None" = field(default=None, hash=False, compare=False)
+253	    # Post-compaction message list — written by HarnessJournal as a
+254	    # ``context_snapshot`` record in the NEW segment's JSONL so that
+255	    # wake() can reconstruct State.messages from the latest JSONL alone,
+256	    # without reading any prior segment or the state file's messages field.
+257	    compacted_messages: "tuple[Message, ...]" = field(default=(), hash=False, compare=False)
+258	    # When the two tracks diverge after trimming (e.g. token_budget), the raw
+259	    # track snapshot is stored here separately.  When absent, both snapshots use
+260	    # compacted_messages (compaction case: two tracks are identical after summary).
+261	    compacted_raw_messages: "tuple[Message, ...]" = field(default=(), hash=False, compare=False)
+
+[Showing lines 132–261 of 580 total. Use offset=261 to read the next section.]

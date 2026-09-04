@@ -1,0 +1,66 @@
+=== task_000059_e4b842f5 full pytest tail ===
+======= short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_verify_mac_py_python3_compatible
+1 failed, 3 passed in 0.02s
+..F.                                                                     [100%]
+=================================== FAILURES ===================================
+____________________ test_verify_mac_py_python3_compatible _____________________
+
+    def test_verify_mac_py_python3_compatible():
+        path = "/home/user/legacy_auth/verify_mac.py"
+        assert os.path.isfile(path), f"{path} is missing"
+        with open(path, "r") as f:
+            content = f.read()
+    
+>       assert "xrange" not in content, "verify_mac.py still contains Python 2 'xrange'"
+E       AssertionError: verify_mac.py still contains Python 2 'xrange'
+E       assert 'xrange' not in 'import sys\...(mac_val))\n'
+E         
+E         'xrange' is contained here:
+E           (replaces xrange)
+E         ?           ++++++
+E               for i in range(100, 200):
+E                   val += (seed * i) ^ 0xAAAA
+E               return val...
+E         
+E         ...Full output truncated (10 lines hidden), use '-vv' to show
+
+/tmp/test_final_state.py:41: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_verify_mac_py_python3_compatible
+1 failed, 3 passed in 0.02s
+
+
+=== task_000431_fabf4ad3 full pytest tail ===
+___________________________ test_go_source_fixes _____________________________
+
+    def test_go_source_fixes():
+        go_path = "/home/user/logprocessor.go"
+        assert os.path.isfile(go_path), f"Go source file {go_path} is missing."
+    
+        with open(go_path, "r") as f:
+            content = f.read()
+    
+        # Check if channel is closed
+        assert "close(results)" in content, "The channel 'results' is never closed. This causes a deadlock."
+    
+        # Check if off-by-one error is fixed
+>       assert "len(lines)-1" not in content, "The loop condition still skips the last line (i < len(lines)-1)."
+E       AssertionError: The loop condition still skips the last line (i < len(lines)-1).
+E       assert 'len(lines)-1' not in 'package mai...<- ewma\n}\n'
+E         
+E         'len(lines)-1' is contained here:
+E         ?          --------
+E           anged i < len(lines)-1 to i < len(lines) to include the last line
+E         ?                     ++   ++++++++++++++++++
+E           	for i := 0; i < len(lines); i++ {
+E           		line := lines[i]...
+E         
+E         ...Full output truncated (16 lines hidden), use '-vv' to show
+
+/tmp/test_final_state.py:32: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/test_final_state.py::test_go_source_fixes - AssertionError: ...
+1 failed, 2 passed in 0.02s
+
+

@@ -1,0 +1,152 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatedCommandRecoveryProcessor for Tmax (and TB2-style) agents.
+4	
+5	Closes a systemic failure mode that is orthogonal to the max_tokens loop
+6	handled by ``LengthTruncationRecoveryProcessor``: the agent gets *stuck
+7	re-issuing the exact same tool call and receiving the exact same result*,
+8	turn after turn, without changing its approach.
+9	
+10	Observed shape (r0 trajectories): on 15/25 failing tasks the agent emitted
+11	a run of >=4 (frequently 15-33) consecutive identical Bash calls that each
+12	returned an identical result — usually an identical error traceback. The
+13	model narrates "let me try a different approach" but then re-issues the
+14	byte-for-byte same command. Nothing in the pipeline detects this: the parse
+15	retry guard only fires on parse errors, and the length-recovery guard only
+16	fires on ``finish_reason == "length"``. So the agent burns its entire step
+17	budget hammering a command that provably cannot make progress.
+18	
+19	This processor:
+20	* fingerprints each (tool_name, tool_input, result) triple as it completes
+21	* counts consecutive repeats of the identical fingerprint
+22	* once the run reaches ``repeat_threshold``, injects a corrective user
+23	  message before the next model call that (a) states the repetition was
+24	  detected, (b) states that re-running the same command will keep producing
+25	  the same output, and (c) instructs the agent to change its approach
+26	  (inspect why the command fails / try a materially different command /
+27	  stop and report) rather than re-issue it.
+28	
+29	The nudge is a generic strategy prompt: it names no task, path, command, or
+30	constant — it applies to any stuck-repetition loop on any task.
+31	"""
+32	
+33	from __future__ import annotations
+34	
+35	import dataclasses
+36	
+37	from harnessx.core.events import (
+38	    BeforeModelEvent,
+39	    Message,
+40	    TaskEndEvent,
+41	    TaskStartEvent,
+42	    ToolResultEvent,
+43	)
+44	from harnessx.core.processor import MultiHookProcessor
+45	
+46	_NUDGE_FIRST = (
+47	    "LOOP DETECTED: your last {n} tool calls were byte-for-byte identical and "
+48	    "each returned the identical result. Re-running the same command will keep "
+49	    "producing the same output — you are not making progress. Do NOT issue that "
+50	    "command again. Instead, in your next turn: (1) read the previous result "
+51	    "carefully to understand WHY it is not what you want, then (2) issue a "
+52	    "MATERIALLY DIFFERENT command that addresses the actual cause (e.g. inspect "
+53	    "the environment, fix a prerequisite, or take a different route to the goal). "
+54	    "One concrete, different command."
+55	)
+56	
+57	_NUDGE_REPEAT = (
+58	    "STILL LOOPING: you have now repeated the same failing command many times. "
+59	    "Stop retrying it entirely — it cannot succeed as written. Step back and "
+60	    "diagnose the root cause from the error you keep seeing, then take a "
+61	    "different concrete action. If the error names a conflict, name collision, "
+62	    "missing dependency, wrong path, or wrong working directory, address THAT "
+63	    "first with a single different command. Do not narrate at length; act "
+64	    "differently."
+65	)
+66	
+67	
+68	class RepeatedCommandRecoveryProcessor(MultiHookProcessor):
+69	    """Break identical-tool-call/identical-result repetition loops."""
+70	
+71	    _singleton_group = "tmax_repeat_command_recovery"
+72	    # After length recovery (5) / time reminder (6); before compaction (8).
+73	    _order = 7
+74	
+75	    def __init__(
+76	        self,
+77	        repeat_threshold: int = 3,
+78	        result_fingerprint_chars: int = 2000,
+79	    ) -> None:
+80	        # repeat_threshold counts the number of *consecutive identical*
+81	        # (call, result) pairs required before the guard fires. threshold=3
+82	        # means: the 1st call, an identical 2nd, an identical 3rd -> fire
+83	        # before the model would produce a 4th.
+84	        self.repeat_threshold = max(2, int(repeat_threshold))
+85	        self.result_fingerprint_chars = max(0, int(result_fingerprint_chars))
+86	        self._last_fp: str | None = None
+87	        self._run_len: int = 0
+88	        self._pending_nudge: str = ""
+89	
+90	    def _reset(self) -> None:
+91	        self._last_fp = None
+92	        self._run_len = 0
+93	        self._pending_nudge = ""
+94	
+95	    async def on_task_start(self, event: TaskStartEvent):
+96	        self._reset()
+97	        yield event
+98	
+99	    async def on_after_tool(self, event: ToolResultEvent):
+100	        # Build a fingerprint from the tool identity + the result text.
+101	        # tool_input is not on ToolResultEvent, but for the stuck-loop shape
+102	        # an identical result from the same tool is a reliable signal; we
+103	        # additionally key on tool_call_id-independent content.
+104	        result_text = event.result or ""
+105	        err_text = event.error or ""
+106	        fp = "\x00".join(
+107	            (
+108	                event.tool_name or "",
+109	                result_text[: self.result_fingerprint_chars],
+110	                err_text[: self.result_fingerprint_chars],
+111	            )
+112	        )
+113	
+114	        if fp == self._last_fp:
+115	            self._run_len += 1
+116	        else:
+117	            self._last_fp = fp
+118	            self._run_len = 1
+119	
+120	        if self._run_len >= self.repeat_threshold:
+121	            # Escalate the nudge the deeper the loop goes.
+122	            if self._run_len >= self.repeat_threshold + 2:
+123	                self._pending_nudge = _NUDGE_REPEAT
+124	            else:
+125	                self._pending_nudge = _NUDGE_FIRST.format(n=self._run_len)
+126	
+127	        yield event
+128	
+129	    async def on_before_model(self, event: BeforeModelEvent):
+130	        if not self._pending_nudge:
+131	            yield event
+132	            return
+133	        nudge = self._pending_nudge
+134	        self._pending_nudge = ""
+135	        msgs = list(event.messages)
+136	        # Contract: do not create two consecutive user messages. If the run
+137	        # loop already left a trailing user message, append our nudge onto it
+138	        # rather than inserting a new one.
+139	        if msgs and getattr(msgs[-1], "role", None) == "user":
+140	            prev = msgs[-1].content or ""
+141	            merged = (prev + "\n\n" + nudge) if prev else nudge
+142	            msgs[-1] = Message(role="user", content=merged)
+143	            yield dataclasses.replace(event, messages=tuple(msgs))
+144	        else:
+145	            yield dataclasses.replace(
+146	                event,
+147	                messages=tuple(msgs) + (Message(role="user", content=nudge),),
+148	            )
+149	
+150	    async def on_task_end(self, event: TaskEndEvent):
+151	        self._reset()
+152	        yield event

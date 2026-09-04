@@ -1,0 +1,57 @@
+2	# SPDX-License-Identifier: MIT
+3	"""TB2 harness config factory and processor implementations.
+4	
+5	Public API
+6	----------
+7	``make_tb2_harness_config(*, timeout_seconds=None) -> HarnessConfig``
+8	    Build a fully serializable ``HarnessConfig`` with no runtime slots.
+9	    Persist it with ``cfg.to_yaml_file(path)`` for meta-harness evolution.
+10	
+11	    Runtime-only slots (``sandbox_provider``, ``tracer``) are **not** included
+12	    here — they are injected by the agent at run time via ``cfg.copy(...)``.
+13	
+14	All processor classes are kept in this module so that YAML round-trip
+15	deserialization (``HarnessConfig.from_yaml_file``) can resolve their
+16	``_target_`` dotted paths.
+17	"""
+18	
+19	from __future__ import annotations
+20	
+21	import dataclasses
+22	import re
+23	import time
+24	import uuid
+25	
+26	from harnessx.core.builder import HarnessBuilder
+27	from harnessx.core.harness import HarnessConfig
+28	from harnessx.core.events import (
+29	    BeforeModelEvent,
+30	    Message,
+31	    ModelResponseEvent,
+32	    StepStartEvent,
+33	    TaskEndEvent,
+34	    TaskStartEvent,
+35	    ToolCall,
+36	    ToolCallEvent,
+37	    ToolResultEvent,
+38	)
+39	from harnessx.core.processor import MultiHookProcessor
+40	from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+41	from harnessx.processors.context.strategies.system_prompt.base import (
+42	    BaseSystemPromptBuilder,
+43	)
+44	from harnessx.processors.context.system_prompt import SystemPromptProcessor
+45	from harnessx.processors.control.bg_install_guard import BgInstallGuard
+46	from harnessx.processors.control.compaction import CompactionProcessor
+47	from harnessx.processors.control.parse_retry import ParseRetryProcessor
+48	from harnessx.processors.control.tool_call_correction import ToolCallCorrectionLayer
+49	from harnessx.tools.builtin import bash_tool
+50	from harnessx.tools.inmemory import InMemoryToolRegistry
+51	
+52	from .defaults import OUTPUT_LIMIT, WORKSPACE_PATH
+53	
+54	_REDIRECT_WRITE_RE = re.compile(r"(?<![<>2&\d])>{1,2}\s*([^\s;&|><\n'\"]+)")
+55	_SED_INPLACE_RE = re.compile(r"\bsed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|-i\S*)\s+\S+\s+([^\s;&|><\n'\"]+)")
+56	_TEE_WRITE_RE = re.compile(r"\btee\s+(?:-\S+\s+)*([^\s;&|><\n'\"]+)")
+
+[Showing lines 2–56 of 466 total. Use offset=56 to read the next section.]

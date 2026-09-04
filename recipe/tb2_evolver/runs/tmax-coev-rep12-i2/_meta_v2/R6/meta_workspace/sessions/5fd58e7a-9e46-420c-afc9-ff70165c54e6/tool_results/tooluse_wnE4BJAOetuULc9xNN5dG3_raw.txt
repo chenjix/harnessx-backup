@@ -1,0 +1,399 @@
+1	# Evolve Journal — tmax-coev-rep12-i2
+2	
+3	Cross-round memory for the meta-agent. One `## Round N` section per evolve.
+4	
+5	## Round 1 — early verifier-dep guard
+6	
+7	<!-- journal:frontmatter
+8	round: 1
+9	timestamp: 2026-06-12T00:00:00Z
+10	hypothesis_id: h_verifier_dep_guard_early_v1
+11	levers: [control]
+12	predicted_affected: [task_000773_9bc1b20e, task_000796_828a72cf, task_000910_16cc0daf, task_002108_a8cfbf2a]
+13	cited_candidates: [C-001]
+14	gating_outcome: accepted
+15	gating_attribution: score=20/50; +4/-4 gained=task_000199_d50c0e57,task_000603_3ed5cdb5,task_000718_2c9ef3a3,task_000948_7c813b00 lost=task_000197_1460b736,task_000311_82f9e3ba,task_000716_206dc0f6,task_001016_b1b861c4; score 0.4000 >= incumbent(mean) 0.4000 - tol 0.0400
+16	expected_global_gain: "Recovers the 'correct/attempted solution, uncollectable verifier' class: 4 tasks abort at pytest collection with ModuleNotFoundError (3x requests, 1x imageio) across security/sysadmin/file_ops. Early+broader guard installs the dep regardless of exit path."
+17	regression_risk: "One extra Bash tool call appended to the agent's first response on every task; fully `|| true`-guarded no-op when deps present. Worst case a few seconds of pip time on lean images."
+18	cost_shift: "+1 short Bash round-trip per task (was already ~1 on clean-exit tasks under the old guard); negligible token delta."
+19	rollback_trigger: "If R2 pass_rate drops vs R0 baseline (20/50) OR the synthetic replay / any task shows exit_reason=error attributable to the injected first-turn Bash call, revert to the exit-only guard."
+20	-->
+21	
+22	### Why
+23	
+24	Baseline 20/50 (0.40). Beyond the large `budget_exceeded` thrash cluster
+25	(~12 tasks stuck in repetition loops on genuinely hard crypto / reverse-
+26	engineering / multi-service tasks — model capability gaps, not harness),
+27	there is a clean **harness-shaped** cluster: 4 tasks whose verifier aborts
+28	at **pytest collection time** with `ModuleNotFoundError` — the grader does
+29	`import requests` / `import imageio` against a container whose base image
+30	lacks the package. Solution quality is irrelevant; the test file cannot
+31	even be collected, so `reward=0`.
+32	
+33	The R0 config already carried a `VerifierDepGuardProcessor`, but it fired
+34	**only on the agent's clean exit-intent turn** and its allow-list was just
+35	`(requests, pyyaml)`. Trajectory grep of `VERIFIER DEP CHECK` shows it
+36	fired on the 36 clean-exit tasks but on **none** of the 3 ImportError
+37	tasks that ended via `budget_exceeded` / `error` — the exact tasks that
+38	needed it. And task_000773 (a clean finish) still failed because `imageio`
+39	was not in the allow-list.
+40	
+41	### Changes
+42	
+43	- `processors/verifier_dep_guard.py` — rewrote `VerifierDepGuardProcessor`
+44	  to fire **once early** (first `on_after_model`), appending a forced Bash
+45	  ensure-deps call alongside the agent's own first tool calls, instead of
+46	  gating on a graceful exit. Expanded allow-list to the ubiquitous verifier
+47	  libs: `requests, imageio, Pillow(PIL), numpy, scipy, pyyaml`. Still a
+48	  no-op when present; fires at most once.
+49	- `config.yaml` — repointed the guard `_target_` `file://` to the R1 copy;
+50	  updated the comment. Everything else copied byte-for-byte from R0,
+51	  including the `system_prompt.txt` sidecar (copied into R1 so the sibling
+52	  prompt builder still finds it).
+53	
+54	### Evidence
+55	
+56	- `task_000773_9bc1b20e` final_pytest tail:
+57	  `/tmp/test_final_state.py:8: in <module> import imageio.v3 as iio /
+58	  E ModuleNotFoundError: No module named 'imageio'`; exit=done, guard
+59	  fired but `imageio` absent from allow-list.
+60	- `task_000796_828a72cf` result.json `"exit_reason": "error"`; tail
+61	  `import requests / ModuleNotFoundError`; no dep-check marker in
+62	  messages → old guard silent on error exits.
+63	- `task_000910_16cc0daf`, `task_002108_a8cfbf2a` result.json
+64	  `"exit_reason": "budget_exceeded"`, `steps: 80`; tail `import requests /
+65	  ModuleNotFoundError`; no dep-check marker → old guard silent on step-cap.
+66	
+67	### Uncertainty
+68	
+69	Highest-confidence flip is task_000773 (clean finish blocked solely at
+70	collection). The three `requests` tasks were thrashing / incomplete, so
+71	the install alone may not flip them this round — but firing early
+72	structurally guarantees deps for any correct-but-non-clean-exit solution
+73	going forward, which the exit-only guard could not. Risk is the appended
+74	first-turn Bash call: it runs after the agent's own first call and is
+75	`|| true`-guarded, so it should never fail the run. If replay or R2 shows
+76	a first-turn error or a pass-rate regression, revert.
+77	
+78	### needs_from_human / capability gaps (no harness fix — skip)
+79	
+80	- The `budget_exceeded` cluster (task_000032 crypto crack, task_000730 &
+81	  task_001877 git-forensics, task_001044 binary reverse-engineering,
+82	  task_000796/000910/002108 multi-service builds) reflects model
+83	  reasoning/domain capability gaps, not harness deficiencies — the agent
+84	  visibly loops ("I keep repeating the same commands"). No harness fix;
+85	  a repetition-loop breaker could save budget but would not flip these.
+86	
+87	## Round 2 — narration-loop breaker
+88	
+89	<!-- journal:frontmatter
+90	round: 2
+91	timestamp: 2026-08-22T20:27:45Z
+92	hypothesis_id: h_content_repetition_loop_v1
+93	levers: [control]
+94	predicted_affected: [task_000910_16cc0daf, task_001028_5bc8bc70, task_000716_206dc0f6, task_001877_bd2513aa]
+95	cited_candidates: [C-002]
+96	gating_outcome: accepted
+97	gating_attribution: score=21/50; +2/-1 gained=task_000197_1460b736,task_000897_f4216424 lost=task_000603_3ed5cdb5; score 0.4200 >= incumbent(mean) 0.4000 - tol 0.0400
+98	expected_global_gain: "Cuts wasted step/cost across the ~4-task narration-loop cluster (all pinned at 80-step cap); secondary chance to flip a borderline task by forcing an earlier pivot to writing required output files"
+99	regression_risk: "Advisory nudge could fire on a legitimately iterative task that narrates similarly; mitigated by high threshold (3 near-identical + escalate at 5), min_content_chars floor, no passing R1 task showed a 3+ identical-narration streak"
+100	cost_shift: "Net negative (cheaper) — interrupting a 15-turn identical streak at turn 3 removes ~12 wasted model turns; pure no-op on non-looping tasks"
+101	rollback_trigger: "R3 pass_rate below R1 (20/50) beyond repeat noise, OR synthetic replay / any task shows exit_reason=error attributable to this processor, OR a previously-passing task regresses with a content-repetition nudge visible in transcript"
+102	-->
+103	
+104	### Why
+105	
+106	R0=20/50, R1=20/50 (flat; R1's +4/-4 task swap classified as run-to-run
+107	noise). The dominant *harness-shaped* signal in R1 is a content-repetition
+108	loop: 4 of the 5 `budget_exceeded`/`max_steps` failures (all pinned at the
+109	80-step cap) emit degenerate near-identical assistant narration turn after
+110	turn. task_000910 shows 15 consecutive identical assistant turns;
+111	task_001028 shows 9 consecutive identical turns and 24 turns sharing the
+112	same 60-char prefix. Existing guards miss this: LengthTruncationRecovery
+113	fires only on `finish_reason=="length" and not tool_calls` (these finish
+114	normally / carry tool calls); CustomEditTool counts only repeated file-write
+115	commands (these are diagnostic/compile commands); CustomSelfVerify fires once
+116	on exit-intent only. No live mechanism detects a normal-finish narration loop
+117	mid-run — a detection/interception gap, the canonical MultiHookProcessor case.
+118	
+119	### Changes
+120	
+121	- `processors/content_repetition_recovery.py::ContentRepetitionRecoveryProcessor`
+122	  — new MultiHookProcessor, `_order=6` (right after length-recovery).
+123	  Fingerprints normalized assistant content on `on_after_model`; after
+124	  `repeat_threshold=3` consecutive look-alike turns injects a corrective nudge
+125	  (change tactic / gather new evidence), escalating at `escalate_threshold=5`
+126	  to a hard "STOP — write the required output file to its exact path or run one
+127	  genuinely new command". +1 user message per chain max; `min_content_chars=40`
+128	  avoids tripping on terse action turns. Counter resets after each nudge.
+129	- `config.yaml` — register new processor after LengthTruncationRecovery;
+130	  carry R1's VerifierDepGuardProcessor forward byte-for-byte (repointed to
+131	  R2-local copy); SiblingSystemPromptBuilder sidecar `system_prompt.txt`
+132	  copied into R2/.
+133	
+134	### Evidence
+135	
+136	- `task_000910_16cc0daf` (probe5.py over R1 messages.json): 15 consecutive
+137	  identical assistant turns ("Let me try a different approach - use a simpler
+138	  command to compile and test."); exit=budget_exceeded, 80 steps.
+139	- `task_001028_5bc8bc70`: 9 consecutive identical turns ("I've been stuck in a
+140	  loop trying to understand the binary. Let me take a completely different
+141	  approach."); 24 turns share same 60-char prefix; exit=budget_exceeded, 80 steps.
+142	- `task_000716_206dc0f6`: 4 consecutive identical turns; env-injected
+143	  "stop the repetition" already present but not breaking the loop;
+144	  exit=budget_exceeded, 80 steps.
+145	- Counterfactual: had this been live in R1, task_000910 interrupts after turn 3
+146	  of its 15-turn streak (~step 6-9 instead of 80); the escalated nudge routes
+147	  toward writing the required output file before the cap — the specific gap
+148	  that scored these 0 (files never created).
+149	
+150	### Uncertainty
+151	
+152	Neither loop task is guaranteed to flip (both are genuinely hard: multi-service
+153	daemon + binary RE). Worst realistic case is no flips but large step/cost
+154	savings on the loop cluster. Main risk is a false-positive nudge on a
+155	legitimately iterative task; no passing R1 task showed a 3+ identical-narration
+156	streak (passing tasks finished in 6-33 steps), so predicted collateral is near
+157	zero. Trigger threshold is unvalidated at runtime — if R3 shows the nudge firing
+158	without breaking loops, or any regression with a nudge in-transcript, revert.
+159	
+160	
+161	## Round 3 — command-repetition loop breaker
+162	
+163	<!-- journal:frontmatter
+164	round: 3
+165	timestamp: 2026-08-22T21:25:00Z
+166	hypothesis_id: h_command_repetition_loop_v1
+167	levers: [control]
+168	predicted_affected: [task_001028_5bc8bc70, task_000032_3fb303f6, task_000348_31fb8c8a, task_002108_a8cfbf2a, task_001465_aa3ed3f8]
+169	cited_candidates: [C-003]
+170	gating_outcome: accepted
+171	gating_attribution: score=22/50; +2/-1 gained=task_000603_3ed5cdb5,task_000716_206dc0f6 lost=task_000199_d50c0e57; score 0.4400 >= incumbent(mean) 0.4200 - tol 0.0400
+172	expected_global_gain: "Closes the repeated-Bash-command loop class (~9 budget_exceeded tasks all pinned at the 80-step cap that re-issue one identical command 10x-34x). Escalation nudge forces an output-write attempt before the cap on tasks that currently reach it empty-handed; the rest recover large step/cost budget."
+173	regression_risk: "False-positive nudge on a legitimately iterative task that re-runs one command (e.g. poll-until-ready). Mitigated: threshold=4 is clear of the 2-3x build->fix->rebuild retries; no passing R2 task showed a 4x-or-more identical-command run (passing tasks finished in 6-41 steps). Nudge is advisory (+1 user turn), never blocks the tool call."
+174	cost_shift: "Net negative (cheaper). Interrupting a 33-turn identical-command streak at turn 4 removes ~29 wasted model+tool turns; pure no-op on non-looping tasks."
+175	rollback_trigger: "R4 pass_rate below R2 (21/50) beyond run-to-run noise, OR synthetic replay / any task shows exit_reason=error attributable to this processor, OR a previously-passing task regresses with a command-repetition nudge visible in transcript."
+176	-->
+177	
+178	### Why
+179	
+180	R0=20/50, R1=20/50, R2=21/50. The dominant harness-shaped signal is the
+181	budget_exceeded loop cluster (~9 tasks, all pinned at the 80-step cap). R2
+182	shipped a content-fingerprint loop breaker (ContentRepetitionRecoveryProcessor)
+183	predicted to fire on these, but tool-call analysis of the R2 run shows its
+184	nudge text appears 0 times across all 50 messages.json: it never armed. The
+185	loops do not repeat content verbatim, the assistant re-words long narration each
+186	turn (task_000910: 1112/1964-char turns that oscillate; max consecutive
+187	same-120-char-prefix run = 1). The loop is only visible at the tool-call layer:
+188	the agent re-issues the SAME Bash command 4x-34x. LengthTruncationRecovery gates
+189	on finish_reason==length (these finish normally with tool calls);
+190	CustomEditToolProcessor counts only file-write commands (these re-issue
+191	curl/compile/probe commands). No live guard watches repeated tool-call command
+192	strings, the missing mechanical hook.
+193	
+194	### Changes
+195	
+196	- processors/command_repetition_recovery.py::CommandRepetitionRecoveryProcessor
+197	  new MultiHookProcessor, _order=7 (after the content-repetition guard).
+198	  Normalizes each Bash tool-call command over a rolling window=12; after
+199	  repeat_threshold=4 occurrences injects a corrective nudge (get NEW info / run
+200	  a command not yet tried), escalating at escalate_threshold=7 to a hard STOP
+201	  (write the required output to its exact path with ls -l, or gather genuinely
+202	  new evidence). +1 user turn per armed streak; no task-specific literals.
+203	- config.yaml register the new processor after ContentRepetitionRecovery; carry
+204	  R1 VerifierDepGuardProcessor and R2 ContentRepetitionRecoveryProcessor forward
+205	  byte-for-byte (repointed to R3-local copies); system_prompt.txt sidecar copied
+206	  into R3/.
+207	
+208	### Evidence
+209	
+210	- task_001028_5bc8bc70: 33/33 tool calls one identical echo pipe; exit=budget_exceeded, 80 steps.
+211	- task_000032_3fb303f6: 34/34 tool calls identical probe; never wrote /home/user/report.txt; exit=budget_exceeded, 80 steps.
+212	- task_000348_31fb8c8a: compile reissued 10x, server-kill 5x, nohup-start 5x; exit=budget_exceeded, 80 steps.
+213	- task_001465_aa3ed3f8: identical curl POST /embed 13x; exit=budget_exceeded, 80 steps.
+214	- Counterfactual: R2 content guard nudge text = 0 occurrences across all 50 messages.json. A command-string detector would interrupt task_001028 at command #4 (~step 8) instead of 80.
+215	
+216	### Uncertainty
+217	
+218	Neither cited task is guaranteed to flip; several are capability-bound (crypto
+219	crack, multi-service builds). Worst realistic case: no flips but large step/cost
+220	savings across the loop cluster. Main risk is a false-positive nudge on a
+221	poll-until-ready pattern; threshold=4 over a 12-command window is above the 2-3x
+222	retries seen on passing tasks. If R4 shows the nudge firing without breaking
+223	loops, or any regression with a command nudge in-transcript, revert.
+224	
+225	### needs_from_human / capability gaps (no harness fix, skip)
+226	
+227	- task_000998_4d9c7852: verifier crashes with circular-import because the task
+228	  mandates writing /home/user/operator.py, which shadows stdlib operator at the
+229	  pytest-collection CWD. File name is task-required, no generalizable harness fix.
+230	- The 19 exit_reason=done failures produce wrong values while the agent believes
+231	  it verified ("all validations passed"), genuine domain/reasoning capability
+232	  gaps (statistics thresholds, SQL graph queries). No harness fix.
+233	
+234	
+235	## Round 4 — real workflow system prompt (instruction)
+236	
+237	<!-- journal:frontmatter
+238	round: 4
+239	timestamp: 2026-08-22T22:09:41Z
+240	hypothesis_id: h_workflow_system_prompt_v1
+241	levers: [instruction]
+242	predicted_affected: [task_002146_0bc2994c, task_000348_31fb8c8a, task_000885_d1c1007b, task_000032_3fb303f6]
+243	cited_candidates: [C-004]
+244	gating_outcome: accepted
+245	gating_attribution: score=22/50; +1/-1 gained=task_000311_82f9e3ba lost=task_000718_2c9ef3a3; score 0.4400 >= incumbent(mean) 0.4400 - tol 0.0400
+246	expected_global_gain: "Recovers the slice of the ~15-task exit_reason=done-but-wrong cluster whose defect is a SKIPPED self-check (dead service, wrong endpoint response, un-recomputed value) rather than an unreachable capability; plausibly 2-4 flips and structurally hardens every task against premature-exit-with-empty-output."
+247	regression_risk: "Longer prompt could over-verify and inflate steps on already-short passing tasks; mitigated — strategy-only, verification scoped to REQUIRED deliverables, passing tasks finish 6-40 steps under the 80 cap. No task literals."
+248	cost_shift: "Mildly positive — a few extra verification Bash calls per task on tasks that previously exited early; bounded by the step cap and partly offset by less mid-task flailing from clearer up-front planning."
+249	rollback_trigger: "R5 pass_rate below R3 (22/50) beyond run-to-run noise, OR a previously-passing short task regresses with visible over-verification thrash in transcript, OR synthetic replay shows exit_reason=error attributable to the prompt. Revert to the 5-line default stub."
+250	-->
+251	
+252	### Why
+253	
+254	R0=20, R1=20, R2=21, R3=22 (all within run-to-run noise for 20+ repeats).
+255	The three prior rounds all shipped Control-lever loop breakers. Direct
+256	transcript inspection of the R3 run is decisive: the R3 command-repetition
+257	nudge armed **0 times** across all 50 tasks (nudge text absent from every
+258	messages.json) — even on task_001016 which ran ONE identical command 34/34
+259	times, i.e. the exact case the guard was built for. The R2 content nudge is
+260	likewise not present. So the Control lever on the loop cluster is exhausted /
+261	unverifiable, and the residual budget_exceeded cluster has shrunk to 5 tasks,
+262	all capability-bound (crypto, OCR pipelines, multi-service C++ APIs).
+263	
+264	The dominant remaining failure mode is now `exit_reason=done` with wrong or
+265	missing output — the agent calls end_turn believing it finished. A subset of
+266	these are SKIPPED self-checks the agent could have caught with Bash: it never
+267	exercised the service it was told to leave running, never POSTed to its own
+268	endpoint, never recomputed the expected value. That is a knowledge-of-when gap
+269	(when/how to verify), the canonical Instruction case — and Instruction has
+270	never been tried on this benchmark (scoreboard: 0 attempts).
+271	
+272	Crucially, the R3 config comment claimed a general-workflow prompt was
+273	installed, but the shipped `system_prompt.txt` sidecar was still the 5-line
+274	`DEFAULT_TMAX_PROMPT` stub — the intended Instruction change was documented
+275	but never actually written. This round actually writes it.
+276	
+277	### Changes
+278	
+279	- `system_prompt.txt` (sidecar beside config.yaml, read by
+280	  SiblingSystemPromptBuilder) — replace the 5-line stub with a strategy-only
+281	  general workflow: survey the environment and confirm exact input/output
+282	  paths before coding; restate concrete deliverables and format before
+283	  implementing; diagnose before retrying (don't re-run the same command);
+284	  verify every required output exists at its EXACT path in the correct format
+285	  the way the external checker will (exercise servers with a real client,
+286	  recompute expected values and compare); keep required background services
+287	  alive and the checker's dirs clean; always write a best-effort partial to
+288	  the required path rather than leaving it empty. No task-specific literals.
+289	- `config.yaml` — pipeline carried forward from R3 byte-for-byte (all three
+290	  meta processors repointed to R4-local copies); comment updated. The
+291	  instruction change is isolated so its effect is attributable.
+292	
+293	### Evidence
+294	
+295	- Passing end (habit fired): task_000381 clean finish in 6 steps; task_000707
+296	  in 9; task_000798 in 6; task_000457 in 7 (per-task result.json agent.steps,
+297	  all exit_reason=done, reward=1) — scoped survey→act→confirm.
+298	- Failing end (habit absent at decisive step): task_002146 final tool output
+299	  prints `=== TASK COMPLETE === Manager is running: 1 process(es)` then the
+300	  agent stops, yet the checker fails with
+301	  `ConnectionError HTTPConnectionPool(host='127.0.0.1', port=8080)` — the
+302	  served endpoint was never exercised before exit. task_000348 final_pytest:
+303	  `TypeError: unsupported operand type(s) for -: 'NoneType' and 'float'` — the
+304	  `/process_spectrum` endpoint returned a null field; the agent never POSTed to
+305	  its own server. task_000032 final_pytest: report line 1 is `admin123`,
+306	  expected `network2023` — no independent recomputation before exit.
+307	- Control-lever exhaustion: grep of all 50 R3 messages.json for the command- and
+308	  content-repetition nudge strings returns 0 and (near) 0 hits respectively.
+309	
+310	### Uncertainty
+311	
+312	A longer prompt could induce over-verification and inflate steps on short
+313	passing tasks; passing tasks have wide headroom under the 80-step cap, so the
+314	realistic worst case is a small cost bump, not a pass-rate regression. It will
+315	NOT flip purely capability-bound tasks (OCR policy extraction, Go
+316	circular-import refactor, statistics-threshold tasks) — those remain logged
+317	capability gaps. If R5 drops below R3 or a short passing task visibly thrashes
+318	on verification, revert to the stub.
+319	
+320	### needs_from_human / capability gaps (no harness fix, skip)
+321	
+322	- task_000885 (TF-IDF/SVD 50-components on 14 features → sklearn ValueError),
+323	  task_000164 / task_000785 / task_000925 (statistics: wrong y_pred, ks_stat,
+324	  ridge alpha), task_000311 / task_000908 (SQL graph collaborator ranking),
+325	  task_000669 / task_001465 / task_001674 / task_000438 (OCR-policy / corpus
+326	  filtering / Go refactor) — domain/reasoning capability gaps; the workflow
+327	  prompt may help them verify-and-notice but cannot supply the missing method.
+328	
+329	## Round 5 — fire truncation nudge on first hit
+330	
+331	<!-- journal:frontmatter
+332	round: 5
+333	timestamp: 2026-08-22T23:01:13Z
+334	hypothesis_id: h_length_recovery_threshold_v1
+335	levers: [configuration]
+336	predicted_affected: [task_000730, task_001028]
+337	cited_candidates: [C-005]
+338	gating_outcome: accepted
+339	gating_attribution: score=22/50; +1/-1 gained=task_000773_9bc1b20e lost=task_000311_82f9e3ba; score 0.4400 >= incumbent(mean) 0.4400 - tol 0.0400
+340	expected_global_gain: "Recovers the truncation-loop/budget_exceeded slice whose only failing assertion is 'required output file missing' by pulling the existing file-write escalation one turn earlier (>=2 tasks: task_000730, task_001028)"
+341	regression_risk: "Escalated nudge fires one turn sooner, but ONLY on finish_reason=length & no tool_calls — ~absent on passing tasks (task_000267=1 event, still passed); no passing task reaches the step cap"
+342	cost_shift: "Net negative (cheaper): forcing one short Bash call on the first truncation removes 7-18 runaway re-generation steps per truncation-heavy task; no-op on non-truncating passing tasks"
+343	rollback_trigger: "R6 pass_rate below R4 (22/50) beyond noise, OR a previously-passing task regresses with the length-recovery nudge visible in-transcript, OR synthetic replay shows exit_reason=error from the earlier-firing nudge — revert repeat_threshold to 2"
+344	-->
+345	
+346	### Why
+347	
+348	R4 stayed flat at 22/50 (0.44) for the third round running. The dominant
+349	harness-fixable driver is a max_tokens truncation loop: the run loop appends
+350	"Your previous response was cut off by the token limit. Please continue…" once
+351	per `finish_reason=length & no tool_calls` step. Grepping R4 messages.json,
+352	this string appears 2–18 times on EACH failing truncation task
+353	(task_000730=18, task_000032=16, task_000796=15, task_001016=8, task_001028=7,
+354	task_001044=4, task_000908=3, task_000506=2) and essentially zero on passing
+355	tasks (only task_000267=1, which still passed). Two of these tasks
+356	(task_000730, task_001028) fail solely because the required output file was
+357	never created — the agent burned its whole step budget re-generating truncated
+358	analysis and reached the cap empty-handed. `LengthTruncationRecoveryProcessor`
+359	already exists to detect this and inject an escalating file-write nudge, but at
+360	`repeat_threshold=2` the *hard* "write the required output to its exact path
+361	now" directive is delayed to the second consecutive truncation.
+362	
+363	### Changes
+364	
+365	- `config.yaml` — `LengthTruncationRecoveryProcessor.repeat_threshold` 2 → 1
+366	  (hard escalation nudge fires on the first truncation).
+367	- `config.yaml` — meta-authored processor `file://` paths (command/content
+368	  repetition guards, verifier dep guard) repointed from R4 to R5-local copies;
+369	  the three processor modules and `system_prompt.txt` sidecar copied into R5
+370	  byte-for-byte (md5 verified identical to R4). No behavioral change to those.
+371	
+372	### Evidence
+373	
+374	- `task_000730` final_pytest tail: `os.path` AssertionError on
+375	  `test_solution_file` — required solution file never written before the cap;
+376	  18 truncation events in messages.json.
+377	- `task_001028` final_pytest tail: `test_success_file_exists_and_correct`
+378	  AssertionError — required file absent; 7 truncation events.
+379	- `task_001044` messages.json indices 3/7/14/22 are user turns carrying the raw
+380	  "cut off by the token limit … continue" text, each preceded by an assistant
+381	  turn with `tool_calls=False` — the exact `finish_reason=length & not
+382	  tool_calls` condition the processor gates on.
+383	- Rejected tightening the command/content-repetition guards instead: passing
+384	  iterative tasks reach 5–6 identical full-command repeats (task_000197=6,
+385	  task_000716=5), overlapping the failing loops at any firing threshold →
+386	  real regression risk. The truncation signal has no such overlap, so it is
+387	  the safe lever.
+388	
+389	### Uncertainty
+390	
+391	Firing the hard nudge one turn earlier gives ~1 extra early action turn aimed
+392	at creating the missing file — the single failing assertion on task_000730 /
+393	task_001028 — but does not guarantee the file content is correct; those may
+394	stay F on a content mismatch even if the existence check flips. For the
+395	capability-bound truncation tasks (task_000032, task_000796, task_001016) this
+396	is cost-savings, not a flip. Worst case regression is one extra short user turn
+397	on a task that truncated once and would have recovered anyway — bounded and
+398	non-blocking. If R6 pass_rate drops below R4 or a passing task visibly thrashes
+399	with the length-recovery nudge in-transcript, revert to `repeat_threshold=2`.

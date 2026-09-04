@@ -1,0 +1,540 @@
+1	# Tmax coev rep12-i4 — evolve journal
+2	
+3	## Round 1 — break identical-Bash loops
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_bash_loop_breaker_v1
+9	levers: [control]
+10	predicted_affected: [task_000032_3fb303f6, task_000910_16cc0daf, task_001044_45c70cf1, task_001465_aa3ed3f8, task_000506_c13429e7, task_001028_5bc8bc70, task_000938_6d7bdc5c, task_000796_828a72cf, task_000761_072f9e93]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=10/50; +1/-1 gained=task_000677_1de47eed lost=task_000560_7dc63881; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+14	expected_global_gain: "Recover wasted step-budget on the largest failing cluster (9/11 budget_exceeded tasks stuck in identical-Bash loops); frees ~25-70 steps per task to try a different approach."
+15	regression_risk: "A legitimate task that must poll one identical command >=6 times (waiting on a service) could be interrupted; mitigated by generous break_threshold=6 and a redirect that says verify-and-finish rather than hard-fail. Internal _tb2_self_verify calls are excluded from tracking, protecting the passing task that repeats it 22x."
+16	cost_shift: "Net decrease — intercepting dead loops truncates 20-75 wasted step-generations per affected task, including the 1600s/1900s runaways."
+17	rollback_trigger: "If R2 pass_rate is flat-or-down AND any previously-passing task regressed to F with a BashLoopBreaker BLOCKED message in its final steps, revert."
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 10/50 (0.20). The single dominant failure cluster is
+23	`exit_reason=budget_exceeded` at the step cap (`steps=80`): 11 tasks, only 1
+24	passed. On 9 of those 11, the model enters a degenerate tool-level repetition
+25	loop — it re-issues the byte-for-byte same `Bash` command 10-33 times in a row,
+26	gets the identical result each time, explicitly narrates "I'm stuck in a loop /
+27	I need to stop repeating this command," and then repeats it again until the
+28	budget is exhausted. The loops set in early (3rd-7th Bash call), so 25-75 steps
+29	are wasted on a command already proven useless. This is a harness deficiency:
+30	the model cannot self-correct a loop it recognises, and there is no mechanical
+31	guard in the pipeline for repeated-identical-tool-call loops (the existing
+32	`LengthTruncationRecoveryProcessor` only handles `finish_reason=length` / no
+33	tool call, a different shape).
+34	
+35	### Changes
+36	
+37	- `processors/bash_loop_breaker.py` — new `BashLoopBreakerProcessor`
+38	  (`MultiHookProcessor`): Bash-only fingerprinting; warns on the 3rd identical
+39	  command (appends nudge to the tool result), intercepts the 6th (does not
+40	  execute; injects a corrective redirect via `approved=False` +
+41	  `synthetic_result`). Internal tools (e.g. `_tb2_self_verify`) are never
+42	  fingerprinted, so they cannot trip the detector.
+43	- `config.yaml` — register the processor after
+44	  `LengthTruncationRecoveryProcessor` with `warn_threshold=3`,
+45	  `break_threshold=6`. Rest of the pipeline copied byte-for-byte from R0.
+46	- `system_prompt.txt` — copied byte-for-byte beside the new config (required by
+47	  `SiblingSystemPromptBuilder`).
+48	
+49	### Evidence
+50	
+51	- `task_000910_16cc0daf`: 33x identical `ffmpeg ... -f rawvideo ...`; tool output
+52	  each time is the interactive `File 'pixel_format=rgb24' already exists.
+53	  Overwrite? [y/N] Not overwriting - exiting`; assistant: "I need to stop
+54	  repeating the same command" → repeats.
+55	- `task_000032_3fb303f6`: 16x identical Bash returning `(exit 0, no output
+56	  captured)`; assistant: "Let me try a different approach" → repeats verbatim.
+57	- `task_001044_45c70cf1`: 27x identical `echo "1 10 ..." | perf_oracle` →
+58	  `Trend: m=0 b=1` each time.
+59	- `task_001465_aa3ed3f8`: 26x identical `curl -s http://localhost:5000/embed`.
+60	- Passing-set safety: all 10 R0 passing tasks had max consecutive identical-Bash
+61	  run = 1 (measured); the one passing task with heavy repetition
+62	  (`task_002138_2e85672e`, 22x) repeats `_tb2_self_verify`, which the detector
+63	  ignores by design.
+64	
+65	### Uncertainty
+66	
+67	Breaking the loop returns budget but does not guarantee each task flips — some
+68	(e.g. the video-frame + crypto + Go-server task) also need domain capability the
+69	model may still lack; those are model-capability gaps, not harness gaps, and
+70	this round does not try to patch them. The clean win is removing the specific
+71	harness-level waste (burning the whole budget on a proven-useless command). If
+72	R2 shows no pass-rate movement AND no cost reduction on the cluster, the loop
+73	was masking a deeper capability wall and the lever should move elsewhere.
+74	
+75	## Round 2 — deploy round-trip verify workflow prompt
+76	
+77	<!-- journal:frontmatter
+78	round: 2
+79	timestamp: 2026-06-02T00:00:00Z
+80	hypothesis_id: h_roundtrip_verify_prompt_v1
+81	levers: [instruction]
+82	predicted_affected: [task_000763_7713d5ae, task_000567_d082f802, task_000142_47a40a0c, task_000032_3fb303f6]
+83	cited_candidates: [C-002]
+84	gating_outcome: accepted
+85	gating_attribution: score=10/50; +2/-2 gained=task_000560_7dc63881,task_001185_636b067c lost=task_000677_1de47eed,task_002138_2e85672e; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+86	expected_global_gain: "Largest failing cluster is done-but-wrong-content (28 tasks; 16 clear value mismatches). Deploy the general survey/plan/round-trip-verify/preserve-partial-credit workflow the R1 config header claimed but never actually shipped (R1's sibling system_prompt.txt was the bare 5-line default). Even a modest hit rate flips pass_rate off the flat 0.20."
+87	regression_risk: "LOW — prompt is strategy-only and additive, cannot remove capability. Minor: extra verify steps could add budget pressure near the step cap; mitigated by the paired 'abandon doomed subgoal / bank completed deliverables' rule which REDUCES wasted steps on the budget_exceeded cluster."
+88	cost_shift: "Neutral-to-down: +a few verify steps on short tasks, -many wasted steps on the 80-step budget_exceeded runaways."
+89	rollback_trigger: "Revert to the 5-line prompt if R3 pass_rate < 0.20 OR a previously-passing task regresses with the agent visibly over-verifying into the step cap."
+90	-->
+91	
+92	### Why
+93	
+94	R1 (BashLoopBreaker, control) left pass_rate flat at 0.20 (10/50). Post-hoc:
+95	the loop-breaker fired on only 4/11 budget_exceeded tasks, and on those the
+96	model IGNORED the BLOCKED redirect and re-emitted the byte-identical command
+97	5-33 more times (task_000032: 33 consecutive BLOCKs, never once attempted the
+98	required report.txt). Mechanical redirects are being ignored — the control
+99	lever has hit a capability wall on the loop cluster. The dominant failure shape
+100	is now `exit_reason=done` with a verifier AssertionError on a computed VALUE
+101	(28 done-but-fail; 16 clear value mismatches). In these the agent confidently
+102	declares success; where it "verified" at all, it never round-tripped its answer
+103	against the constraint the task actually states (e.g. task_000763 ran the
+104	forward token algo on its guessed PIN 2778 but never checked that 2778 actually
+105	reproduces the given token 1A3B — ground truth was 2394).
+106	
+107	Critically, the R1 config's own header comment claims a full
+108	survey/plan/verify workflow prompt, but the `system_prompt.txt` shipped beside
+109	it is the bare 5-line default. The playbook's #1 lever (explicit plan +
+110	verify-deliverables discipline) was never actually deployed.
+111	
+112	### Changes
+113	
+114	- `system_prompt.txt` (sibling of config, loaded by SiblingSystemPromptBuilder):
+115	  replaced the 5-line default with a general solver workflow centered on
+116	  (a) round-trip verification — when you derive a value from a GIVEN target,
+117	  re-run the forward process on your value and confirm it reproduces the
+118	  target; (b) verbatim diff against any exact stated string/path/target;
+119	  (c) preserve-partial-credit — abandon a doomed subgoal and bank completed
+120	  deliverables rather than burn the whole budget re-issuing a failing command.
+121	  Strategy-only: no task ids, answers, constants, or per-task code.
+122	- `config.yaml`: processor pipeline copied byte-for-byte from R1 (BashLoopBreaker
+123	  retained). Only the sibling system prompt changed. file:// refs to R1/R0
+124	  processor assets are read-only and unchanged.
+125	
+126	### Evidence
+127	
+128	See `_meta_scratch/candidates.md` C-002 for body-quoted verifier assertions on
+129	task_000763 (PIN 2778 vs 2394), task_000567 (PC1_Sum 6.9499 vs 7.7709), and
+130	task_000142 (symlink -> file_A.dat vs financial_records_2021.dat).
+131	
+132	### Uncertainty
+133	
+134	Instruction cannot conjure computation the model can't do; the round-trip rule
+135	only helps where the model CAN detect its own error by re-checking against the
+136	stated constraint (strongest on task_000763 and task_000142). task_000567's
+137	seed/determinism mismatch may still need capability the model lacks. Honest
+138	expectation: flips a subset of the value-mismatch cluster, not all. If R3 shows
+139	zero movement, the done-but-wrong cluster is a pure capability wall and the
+140	lever should move off Instruction entirely for this benchmark.
+141	
+142	## Round 3 — fire verifier-dep guard proactively
+143	
+144	<!-- journal:frontmatter
+145	round: 3
+146	timestamp: 2026-06-03T00:00:00Z
+147	hypothesis_id: h_verifier_dep_guard_proactive_v1
+148	levers: [control]
+149	predicted_affected: [task_000796_828a72cf, task_000910_16cc0daf, task_002108_a8cfbf2a]
+150	cited_candidates: [C-003]
+151	gating_outcome: accepted
+152	gating_attribution: score=10/50; +1/-1 gained=task_000013_b393db71 lost=task_001185_636b067c; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+153	expected_global_gain: "Remove a guaranteed-0 mechanical wall on the HTTP-service subset of the budget_exceeded cluster: 3 tasks whose verifier aborts at pytest COLLECTION time with `ModuleNotFoundError: No module named 'requests'` because the exit-intent-only dep guard never fires on budget_exceeded (steps=80) runs. Generalizes to any long-running task whose hidden verifier imports requests/yaml."
+154	regression_risk: "Very low. The ensure command is idempotent (import-check first, pip only on failure, whole thing `|| true`), a pure no-op where requests is already present (the passing set). Prepending it to a mid-run tool-call turn adds one tool result to context but does NOT replace the model's own call (the run loop executes every call in a turn). Fires at most once per task."
+155	cost_shift: "Negligible +1 Bash round-trip (a few hundred tokens of banner) per task, once. No change to runaway tails."
+156	rollback_trigger: "Revert if R4 pass_rate < 0.20 OR a previously-passing task regresses with a 'VERIFIER DEP CHECK' banner implicated in its final steps (prepended call disrupting the model's flow)."
+157	-->
+158	
+159	### Why
+160	
+161	R1 (control/loop-breaker) and R2 (instruction/verify-prompt) both left pass_rate
+162	flat at 0.20 (10/50). Reading the R2 trajectories' `final_pytest.output_tail`
+163	surfaced a distinct, purely-mechanical failure the prior rounds never touched:
+164	three separate HTTP-service tasks (task_000796 security, task_000910 sysadmin,
+165	task_002108 file_operations) fail at verifier **collection** time —
+166	`ImportError while importing test module '/tmp/test_final_state.py' ...
+167	ModuleNotFoundError: No module named 'requests' ... Interrupted: 1 error during
+168	collection`. The agent's server work is never even scored; pytest can't collect
+169	the test module. The R0/R2 pipeline already carries a `VerifierDepGuardProcessor`
+170	built exactly for this, but it fires ONLY at clean exit-intent — and all three
+171	tasks end in `exit_reason=budget_exceeded` at `steps=80`, so the guard never
+172	fires (the "VERIFIER DEP CHECK" banner appears 0 times in each transcript). The
+173	tasks that most need the guard are precisely the ones that never reach clean
+174	exit. This is a Control deficiency: the guard's trigger is wrong, not its
+175	command.
+176	
+177	### Changes
+178	
+179	- `processors/verifier_dep_guard_proactive.py` — new
+180	  `ProactiveVerifierDepGuardProcessor` (`MultiHookProcessor`): fires the
+181	  dep-ensure exactly once per task, whichever comes first — (a) PROACTIVE:
+182	  prepends the ensure `Bash` call onto the first mid-run tool-call turn at/after
+183	  `proactive_step=4` (the run loop executes every tool call in a turn, so the
+184	  model's own work proceeds); (b) EXIT-INTENT fallback, preserving the original
+185	  guard's behaviour for short clean tasks. Idempotent import-check-then-pip,
+186	  fully `|| true`-guarded.
+187	- `config.yaml` — replaced the exit-intent-only `VerifierDepGuardProcessor` in
+188	  the tail slot with `ProactiveVerifierDepGuardProcessor(proactive_step=4)`.
+189	  Rest of the pipeline + sibling `system_prompt.txt` copied byte-for-byte from
+190	  R2 (BashLoopBreaker + R2 verify-workflow prompt retained).
+191	
+192	### Evidence
+193	
+194	- task_000796_828a72cf.result.json: collection ImportError, `import requests`
+195	  test line 5; exit_reason=budget_exceeded, steps=80.
+196	- task_000910_16cc0daf.result.json: identical collection ImportError, `import
+197	  requests` line 5; budget_exceeded, steps=80.
+198	- task_002108_a8cfbf2a.result.json: identical collection ImportError, `import
+199	  requests` line 4; budget_exceeded, steps=80.
+200	- Guard-never-fired: `grep -c "VERIFIER DEP CHECK"` = 0 in all three
+201	  `messages.json` (exit-intent path unreached — run ended budget_exceeded).
+202	- pip-reaches-PyPI: task_001013_7f3bf12e installed `flask-3.1.3` + full dep
+203	  chain (blinker/click/itsdangerous/jinja2/markupsafe) from PyPI at full speed,
+204	  so `pip install requests` succeeds in-container.
+205	
+206	### Uncertainty
+207	
+208	Installing `requests` reliably converts a certain-fail *collection* error into a
+209	real test run; whether each of the three then passes depends on the underlying
+210	server correctness, which the collection abort made unobservable (tests never
+211	executed). So this is a partial-yes retroactive check: guaranteed to remove the
+212	mechanical 0, uncertain how many of the 3 flip. Because the install is
+213	idempotent the downside on the passing set is nil. If R4 shows the three still
+214	failing but now with real per-test assertions (not collection errors), the
+215	remaining gap is server-capability, not harness — and the lever moves off the
+216	dep guard. If a passing task regresses due to the prepended call, lower
+217	`proactive_step` reasoning was wrong and revert.
+218	
+219	## Round 4 — hard-terminate degenerate assistant-turn loops
+220	
+221	<!-- journal:frontmatter
+222	round: 4
+223	timestamp: 2026-06-04T00:00:00Z
+224	hypothesis_id: h_degenerate_turn_terminator_v1
+225	levers: [control]
+226	predicted_affected: [task_000438_fee5a792, task_000032_3fb303f6, task_000938_6d7bdc5c, task_001044_45c70cf1, task_000761_072f9e93, task_001028_5bc8bc70, task_002138_2e85672e, task_002146_0bc2994c, task_000348_31fb8c8a, task_000908_170e5e4e]
+227	cited_candidates: [C-004]
+228	gating_outcome: accepted
+229	expected_global_gain: "Eliminates the exit_reason=error crash cluster (4 tasks: 000032, 000438, 000938, 001044) by converting the identical-turn runaway into a clean done that guarantees verifier scoring and protects the post-flight replay gate (which hard-fails on exit_reason=error). Recovers 20-70 wasted step-generations across the full 16-task identical-assistant-turn-loop cluster and lets exit-intent processors (verifier-dep guard) fire on tasks that previously died at the step cap. Generalizes to any future task that falls into byte-identical assistant repetition (Bash OR no-tool-call), a shape the R1 BashLoopBreaker structurally cannot cover."
+230	regression_risk: "Near-zero on pass-rate. All 10 R3 passing tasks have a max consecutive identical-assistant run of at most 2; terminate_threshold=6 (warn at 4) cannot be tripped by any observed passing trajectory. Force-stop fires only after the run is provably dead (6 identical turns after the R2 prompt AND R1 soft block were both ignored). Small theoretical risk: a legitimate task that must poll one identical action many times could be stopped, mitigated by the high threshold and the fact that the R2 self-verify tool (which repeats legitimately in one passing task) does not produce identical assistant-text runs."
+231	cost_shift: "Net decrease. Truncates 20-70 wasted step-generations (full model calls, some at the 4096-token cap) across 16 tasks including the 900-1900s runaways. The synthetic stop turn replaces a model call rather than adding one; no new model calls."
+232	rollback_trigger: "Revert if R5 pass_rate below 0.20 OR any previously-passing task regresses with a [LoopTerminator] banner implicated in its final steps (threshold too low / disrupted a legitimate repeat)."
+233	-->
+234	
+235	### Why
+236	
+237	R0-R3 are flat at 0.20 (10/50). Re-reading the R3 transcripts surfaced the true
+238	dominant failure shape that all prior rounds only partially touched: a
+239	DEGENERATE ASSISTANT-TURN LOOP. Measuring the max run of byte-identical
+240	consecutive assistant messages: 16 distinct FAILING tasks have a run of 4 or
+241	more (ranging 4 to 41); every PASSING task's max run is 2 or fewer, a
+242	razor-sharp separator. Four of the 16 (000032, 000438, 000938, 001044) end in
+243	exit_reason=error (agent_error crash driven by the repetition), the rest in
+244	budget_exceeded.
+245	
+246	The R1 BashLoopBreaker fingerprints only the Bash tool input, so it is blind
+247	to the no-tool-call half of the loop (e.g. task_000761 repeats "The user is
+248	asking me to verify my solution..." with NO tool call, alternating with the
+249	self-verify ACK, msgs 2-11). Where it does fire, its soft "BLOCKED" redirect is
+250	ignored verbatim: task_000032 shows 20 consecutive BLOCKs with the model
+251	re-emitting the identical assistant turn each time. The R2 system prompt already
+252	instructs the model to stop looping; it ignores that too. Instruction plus soft
+253	mechanical redirect are proven-saturated over three rounds. The missing
+254	capability is termination, plus coverage of the no-tool-call loop shape.
+255	
+256	### Changes
+257	
+258	- `processors/degenerate_turn_terminator.py` — new
+259	  `DegenerateTurnTerminatorProcessor` (`MultiHookProcessor`, `on_before_model`):
+260	  fingerprints the text of the last assistant turn in the assembled context;
+261	  warns at `warn_threshold=4` (one contract-safe user message), and at
+262	  `terminate_threshold=6` sets `skip_model=True` + `synthetic_output`, which the
+263	  run loop turns into a `finish_reason="stop"` response with no tool calls, its
+264	  own clean-exit condition (exit_reason=done). Strategy-only, no task literals.
+265	- `config.yaml` — registered the new processor immediately after the retained
+266	  R1 BashLoopBreaker (which still trims the Bash-input half early) and before
+267	  CompactionProcessor. Rest of the R3 pipeline plus sibling `system_prompt.txt`
+268	  copied byte-for-byte. R3's ProactiveVerifierDepGuard is retained: R3
+269	  trajectories confirm it works (796/910/2108 no longer hit collection
+270	  ImportError; they now fail with real ConnectionError, a server-capability
+271	  gap, not a harness gap).
+272	
+273	### Evidence
+274	
+275	See `_meta_scratch/candidates.md` C-004 for body-quoted identical-turn loops on
+276	task_000032 (20x "stuck in a loop" + BLOCK), task_000761 (self-verify no-tool
+277	loop msgs 2-11 + build.rs loop msgs 13-21), and the full 16-task run-length
+278	table (all FAIL, run 4-41) vs the passing set (all 2 or fewer).
+279	
+280	### Uncertainty
+281	
+282	This is a PARTIAL-yes retroactive check. On the 4 exit_reason=error tasks the
+283	forced clean done is a strict robustness improvement (removes the crash,
+284	guarantees verifier scoring, protects the replay gate). On the budget_exceeded
+285	loopers it does NOT by itself add a missing deliverable; those remain
+286	capability-bound, so the honest gain there is cost/step recovery and a clean
+287	exit that lets the verifier-dep guard's exit-intent path run. Net expectation:
+288	robustness plus a large cost win, with pass-rate upside concentrated on the
+289	crash cluster. If R5 shows the crash tasks still failing with real per-test
+290	assertions (not agent_error) and no cost reduction on the loop cluster, the
+291	remaining wall is pure model capability and the lever should move off loop
+292	control entirely for this benchmark.
+293	
+294	
+295	## Round 5 — fuzzy near-identical turn terminator
+296	
+297	<!-- journal:frontmatter
+298	round: 5
+299	timestamp: 2026-06-05T00:00:00Z
+300	hypothesis_id: h_fuzzy_loop_terminator_v1
+301	levers: [control]
+302	predicted_affected: [task_000032_3fb303f6, task_001201_1340f4e2, task_001028_5bc8bc70, task_001465_aa3ed3f8, task_001044_45c70cf1]
+303	cited_candidates: [C-005]
+304	gating_outcome: accepted
+305	gating_attribution: score=10/50; +0/-0; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+306	expected_global_gain: "Eliminate the exit_reason=error crash cluster (task_000032, task_001201) by converting agent_error into a clean done that guarantees verifier scoring and protects the post-flight replay gate, and reclaim 20-50 wasted step-generations / 600-1600s wall-clock across the drifting-loop cluster (>=5 tasks) so exit-intent processors (verifier-dep guard) fire. Generalizes to any task falling into a NEAR-identical (not byte-identical) assistant-turn loop — the shape R1 (Bash-input) and R4 (byte-identical) structurally cannot cover."
+307	regression_risk: "Near-zero on pass-rate. Every R4 passing task has a max consecutive similarity>=0.85 assistant-turn run of at most 2; terminate_threshold=5 (warn at 3) cannot be tripped by any observed passing trajectory. Residual: a legitimate task that must poll a near-identical action >=5 times could be stopped early — mitigated by the high threshold, min_tokens=5 (short acks ignored), and the two-turn warn window before termination."
+308	cost_shift: "Net decrease. Truncates 20-50 wasted step-generations (several at the 4096-token cap) across the loop cluster including the 828s/1555s/964s runaways. The synthetic stop turn replaces a model call rather than adding one; no new model calls. Warn path adds at most one small user message per looping task."
+309	rollback_trigger: "Revert if R6 pass_rate < 0.20 OR any previously-passing task regresses with a [LoopTerminator] banner implicated in its final steps (threshold too low / disrupted a legitimate near-identical repeat)."
+310	-->
+311	
+312	### Why
+313	
+314	R0-R4 are all flat at pass_rate 0.20 (10/50). The dominant remaining
+315	harness-level waste is a degenerate assistant-turn loop; the R4
+316	DegenerateTurnTerminatorProcessor was built to convert it into a clean exit but
+317	measurement on the R4 trajectories shows it NEVER FIRED on its target tasks
+318	(grep [LoopTerminator] = 0 in both exit_reason=error crashes and in the
+319	budget_exceeded loopers). The cause: R4's fingerprint requires byte-identical
+320	turns, but the real loops DRIFT — each regenerated "I've been stuck in a loop
+321	... take a fundamentally different approach" turn differs by a few words or a
+322	different 4096-token truncation point. The max byte-identical consecutive
+323	assistant run tops out at 4, below R4's terminate_threshold of 6. A similarity
+324	(Jaccard on normalized token set) counter at 0.85 separates loopers from the
+325	passing set even more sharply: FAILING loopers reach runs of 4/5/6/10/17 while
+326	the entire R4 passing set has a max run of 2. The done-but-wrong-value cluster
+327	that makes up most of the remaining failures is a model-capability wall (wrong
+328	computed numbers/hashes/MSE across ~28 tasks) and is explicitly NOT targeted
+329	this round — no harness fix for those; they need model capability.
+330	
+331	### Changes
+332	
+333	- processors/fuzzy_loop_terminator.py — new FuzzyLoopTerminatorProcessor
+334	  (MultiHookProcessor, on_before_model): counts consecutive assistant turns
+335	  whose normalized token-set Jaccard similarity is at least 0.85 (byte-identical
+336	  scores 1.0, so it subsumes the R4 exact matcher); warns at 3 (one
+337	  contract-safe user message), force-terminates at 5 via skip_model +
+338	  synthetic_output which the run loop turns into finish_reason=stop ->
+339	  exit_reason=done. Strategy-only, no task literals.
+340	- config.yaml — REPLACED the R4 exact-match DegenerateTurnTerminatorProcessor
+341	  with the fuzzy terminator (warn 3 / terminate 5 / similarity 0.85). Rest of
+342	  the R4 pipeline (R1 BashLoopBreaker, R3 ProactiveVerifierDepGuard, etc.) and
+343	  sibling system_prompt.txt copied byte-for-byte.
+344	
+345	### Evidence
+346	
+347	See _meta_scratch/candidates.md C-005 for the measured byte-run vs
+348	similarity-run tables. Key: task_000032 byte_run=4 / sim_run=4 (crashed
+349	exit_reason=error, 828s); task_001201 byte_run=4 / sim_run=10 (crashed
+350	exit_reason=error); task_001028 byte_run=4 / sim_run=17; task_001465 sim_run=6;
+351	task_001044 sim_run=5 (all budget_exceeded, steps=80). Passing set: max
+352	sim_run=2 (task_000899), nine of ten equal 1. [LoopTerminator] banner count = 0
+353	in all target messages.json (R4 exact matcher never fired).
+354	
+355	### Uncertainty
+356	
+357	Partial-yes retroactive check. On the two exit_reason=error tasks the forced
+358	clean stop is a strict robustness win (removes the crash, protects the replay
+359	gate, banks partial work, saves wall-clock). On the budget loopers it does not
+360	by itself add a missing deliverable — most fail on a wrong computed value, a
+361	capability wall — so the honest gain there is cost/step recovery plus a clean
+362	exit that lets the verifier-dep guard exit-intent path run. If R6 shows the
+363	crash tasks still failing with real per-test assertions (not agent_error) AND no
+364	cost reduction on the loop cluster, loop control is fully saturated for this
+365	benchmark and the lever must move off it entirely (the remaining wall is pure
+366	model capability).
+367	
+368	## Round 6 — no-op: loop lever saturated, remainder is a capability wall
+369	
+370	<!-- journal:frontmatter
+371	round: 6
+372	timestamp: 2026-06-06T00:00:00Z
+373	hypothesis_id: h_noop_loop_saturated_v1
+374	levers: []
+375	predicted_affected: []
+376	gating_outcome: accepted
+377	gating_attribution: score=10/50; +0/-0; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+378	expected_global_gain: "0 flips. Explicit no-op. The only harness-shaped lever left (loop control) has provably collapsed its safety margin on the R5 run, and the dominant remaining failing cluster is a model-capability wall that SOUL.md forbids patching with domain knowledge. Preserving the currently-stable R5 pipeline (which fires on no passing task) is the correct Pareto move."
+379	regression_risk: "None — byte-identical config + sibling system_prompt.txt copied from R5. No processor currently fires on any of the 10 passing tasks (verified), so nothing is at risk of a knob-tune regression this round."
+380	cost_shift: "Zero — identical pipeline."
+381	rollback_trigger: "N/A (no-op). Next round: if a NEW harness-shaped signal appears (a recurring blocked-but-recoverable tool shape, a mis-parametrized processor firing on passers, or a done-but-wrong sub-cluster whose fix is mechanical rather than domain-knowledge), pursue it. Do NOT push loop control further."
+382	-->
+383	
+384	### Why
+385	
+386	R0-R5 are all flat at pass_rate 0.20 (10/50). This round is an evidence-backed
+387	explicit NO-OP. Two independent findings drove it:
+388	
+389	1. **The loop-control lever (4 control rounds: R1/R3/R4/R5) is saturated AND now
+390	   regression-unsafe.** Measured on the R5 run, the max consecutive run of
+391	   near-identical assistant turns (Jaccard>=0.85 token-set, both fixed-anchor
+392	   and sliding-previous variants) is only **3** on every looper
+393	   (task_001044, task_001465, task_000032, task_001201, task_000438) — down from
+394	   R4's 4-17 because this run's loops drift more per turn. Critically, a PASSING
+395	   task (task_000061) also reaches run=3, identical to the loopers. The
+396	   separator between loopers and passers that R4/R5 relied on (looper 4-17 vs
+397	   passer <=2) has collapsed: there is now NO terminate_threshold that catches
+398	   the loopers without also firing on a passing task. Confirmed inert: the
+399	   [LoopTerminator] banner fired 0 times on all target tasks (grep=0), and the R3
+400	   ProactiveVerifierDepGuard "VERIFIER DEP" banner also fired 0 times on the 3
+401	   HTTP tasks. I also traced the R5 FuzzyLoopTerminator's anchor bug (it compares
+402	   each turn to the run's FIRST turn, so drift decays the score) — but the
+403	   sliding-previous fix yields the same max run (3) on this data, so even the bug
+404	   fix cannot reach a safe firing threshold. The lever is dead for this benchmark.
+405	
+406	2. **The dominant remaining failing cluster (~28 exit=done tasks) is a model-
+407	   capability wall.** Body/verifier reads across every sub-shape confirm this:
+408	   wrong computed numbers (task_000164 y_pred 3.44 vs 3.195; task_000567 PCA
+409	   PC1_Sum 6.9499 vs 7.7709; task_000763 PIN 2778 vs 2394), wrong validation
+410	   logic producing empty deliverables (task_000028 wrote 0 valid payloads vs 2,
+411	   and its own self-verify narrated "empty is correct"; task_000740 empty
+412	   alerts.log; task_000669 empty corpus), and wrong edge-case handling
+413	   (task_000142 symlink target file_A.dat vs financial_records_2021.dat, 5/6
+414	   subtests pass). No harness mechanism produces the correct value; SOUL.md is
+415	   explicit that these are model-capability gaps and must NOT be patched by
+416	   embedding domain knowledge into the prompt. The R2 verify/plan/round-trip
+417	   system prompt is already deployed, general, and strong.
+418	
+419	The current pipeline is stable (no processor fires on any passing task), so
+420	there is no mis-parametrized knob to correct either. With no evidence-backed
+421	harness intervention available and the one candidate lever collapsed, the
+422	disciplined choice is to preserve the stable pipeline rather than push a
+423	saturated, now-regression-prone mechanism or inject task-specific knowledge.
+424	
+425	### Changes
+426	
+427	- `config.yaml` — byte-for-byte copy of R5 (canonicalize ok, checked_templates=0).
+428	- `system_prompt.txt` — byte-for-byte copy of R5 (sibling, required by
+429	  SiblingSystemPromptBuilder).
+430	
+431	### Evidence
+432	
+433	- Loop max-run measurement (R5 messages.json): loopers task_001044/task_001465/
+434	  task_000032/task_001201/task_000438 all max near-identical run = 3 (anchor and
+435	  sliding); PASSING task_000061 also run = 3 — separator collapsed.
+436	- Banner grep: [LoopTerminator]=0 on all loopers; VERIFIER DEP=0 on all 3 HTTP
+437	  tasks; no processor banner on any of the 10 passing tasks.
+438	- Capability-wall verifier tails: task_000164 y_pred 3.4418 vs 3.195079;
+439	  task_000567 PC1_Sum 6.9499 vs 7.7709; task_000028 valid_payloads len 0 vs 2
+440	  (self-verify: "empty is correct"); task_000142 symlink file_A.dat vs
+441	  financial_records_2021.dat.
+442	
+443	### Uncertainty
+444	
+445	Risk of a no-op is leaving a real signal on the table. Mitigated: I swept all 40
+446	failures by exit_reason and read representatives of every done-but-wrong
+447	sub-shape; each is capability-bound, and the one harness lever is provably
+448	collapsed. If a future run surfaces a genuinely NEW harness-shaped pattern
+449	(a recurring blocked-but-recoverable tool return, a processor mis-firing on a
+450	passer, or a mechanically-fixable done-but-wrong sub-cluster), that is the next
+451	lever — but it is NOT loop control, which is retired for this benchmark.
+452	
+453	## Round 7 — no-op: verify-workflow fires yet capability wall holds
+454	
+455	<!-- journal:frontmatter
+456	round: 7
+457	timestamp: 2026-06-07T00:00:00Z
+458	hypothesis_id: h_noop_verify_fires_capwall_v1
+459	levers: []
+460	predicted_affected: []
+461	gating_outcome: accepted
+462	gating_attribution: score=12/50; +2/-0 gained=task_001201_1340f4e2,task_002138_2e85672e; score 0.2400 >= incumbent(mean) 0.2160 - tol 0.0400
+463	expected_global_gain: "0 flips. Explicit no-op. Fresh R6-run evidence this round (distinct from R6's finding) shows the deployed R2 verify/round-trip system prompt now DEMONSTRABLY FIRES AND EXECUTES CORRECTLY on the value-mismatch cluster — the agent runs the forward-check, confirms it reproduces the given target, then still lands the wrong ground-truth value. That closes the instruction lever as saturated with direct execution evidence (not just 'deployed'). The loop/control lever remains regression-safe and inert on all 10 passers. No new class-level harness deficiency exists, so preserving the stable R5/R6 pipeline is the correct Pareto move."
+464	regression_risk: "None — byte-identical config + sibling system_prompt.txt copied from R6 (md5 044420c4291e005fa03fa83dd25d6b82 / c3d21a500424db9387e4b58505b87cfe). Verified no loop/terminator banner fires on any of the 10 passing tasks this run; the ProactiveVerifierDepGuard banner fires on 8/10 passers but is idempotent (no-op) and does not disturb them."
+465	cost_shift: "Zero — identical pipeline."
+466	rollback_trigger: "N/A (no-op). Next round: pursue a lever ONLY if a genuinely NEW harness-shaped signal appears — a recurring blocked-but-recoverable tool return, a processor mis-firing on a passer, or a mechanically-fixable done-but-wrong sub-cluster (e.g. a missing-deliverable pattern the agent COULD produce but exits before writing). Do NOT re-push loop control (retired) or the verify/plan instruction (saturated with execution evidence)."
+467	-->
+468	
+469	### Why
+470	
+471	R0-R6 are all flat at pass_rate 0.20 (10/50), R5 config measured 3x at exactly
+472	10/50. This round is an evidence-backed explicit NO-OP, distinct from R6.
+473	
+474	The R6 run shifted shape vs prior rounds: **0 exit_reason=error crashes** this
+475	run (the R4/R5 terminators + loop breakers converted the former crashes into
+476	clean exits), 6 budget_exceeded (steps=80), 34 exit=done/no_tool_calls. I swept
+477	all 40 failures by verifier `output_tail`.
+478	
+479	The decisive new finding: the deployed R2 verify/round-trip system prompt is not
+480	merely present, it is being **executed correctly** on the value-mismatch cluster
+481	and still fails on ground truth. On task_000763 the agent computed PIN=2778,
+482	explicitly ran the forward check `bash token_algo.sh 2778` → got the given target
+483	`1A3B`, confirmed the round-trip in its self-verify turn, and declared success —
+484	yet the verifier wants 2394. The forward-check the prompt asks for PASSES on the
+485	agent's wrong answer. No harness mechanism can distinguish this; the instruction
+486	lever has hit its ceiling with direct execution evidence, not just deployment.
+487	
+488	The rest of the failing set is the same capability wall: wrong computed numbers
+489	(task_000164 y_pred 3.4418 vs 3.195079; task_000567 PC1_Sum 6.9499 vs 7.7709;
+490	task_000925 best_ridge_alpha 1.0 vs 10.0; task_000785 ks_statistic 0.2 vs 0.3;
+491	task_000905 MSE 159841 vs <=1.0; task_000730 Iteration 1733 vs 1716), wrong
+492	logic / empty deliverables (task_000028 valid_payloads 0 vs 2; task_000669 empty
+493	evil corpus; task_001465 2/2 evil bypassed), wrong edge-case (task_000142 symlink
+494	file_A.dat vs financial_records_2021.dat, 5/6 subtests pass), server crashes
+495	during verification (task_000885 n_components(50)>n_features(14)), and two
+496	non-agent verifier faults that are unfixable from the harness (task_002071 the
+497	injected test has a Python SyntaxError `f-string expression part cannot include a
+498	backslash` at collection; task_000998 the agent's own wrong-content operator.py
+499	shadows the stdlib operator module and crashes the verifier bootstrap — a
+500	capability error in file content, not a harness gap). SOUL.md forbids patching
+501	any of these with domain knowledge.
+502	
+503	I evaluated one candidate NEW mechanism — a pre-exit named-deliverable existence
+504	guard — and rejected it: the short done-fails (steps 12-27) overwhelmingly have
+505	the file PRESENT with a wrong VALUE (existence guard is a no-op on them), and the
+506	three genuinely-missing-file cases (task_000677 bug_report.txt, task_001201,
+507	task_002033) are loop-bound long tasks where the agent already KNOWS the file is
+508	missing (it narrates it) but cannot produce the content — a nudge cannot conjure
+509	capability. The guard would fire mostly as a no-op and add regression surface on
+510	passers for zero expected flips. Not Pareto-justified.
+511	
+512	### Changes
+513	
+514	- `config.yaml` — byte-for-byte copy of R6 (canonicalize ok, checked_templates=0).
+515	- `system_prompt.txt` — byte-for-byte copy of R6 (sibling, required by
+516	  SiblingSystemPromptBuilder).
+517	
+518	### Evidence
+519	
+520	- task_000763 messages.json: agent self-verify turn "Verification: bash
+521	  /home/user/token_algo.sh 2778 outputs 1A3B ✓" — round-trip PASSES on wrong
+522	  answer; verifier wants 2394. Direct proof the verify prompt executes and is
+523	  insufficient.
+524	- Value-mismatch tails: task_000164 3.4418 vs 3.195079; task_000567 6.9499 vs
+525	  7.7709; task_000925 alpha 1.0 vs 10.0; task_000785 ks 0.2 vs 0.3.
+526	- Non-agent verifier faults: task_002071 collection SyntaxError (backslash in
+527	  f-string); task_000998 stdlib-shadowing operator.py crashes pytest bootstrap.
+528	- Regression safety: grep of all 10 passing-task messages.json → 0 loop/
+529	  terminator banners; ProactiveVerifierDepGuard banner on 8/10 passers is
+530	  idempotent no-op.
+531	
+532	### Uncertainty
+533	
+534	Risk of a second consecutive no-op is leaving a real signal on the table. I
+535	mitigated by sweeping every failure's verifier tail this run (not reusing R6's
+536	read) and by actively designing + rejecting one concrete new mechanism against
+537	the current data. If a future run surfaces a mechanically-fixable done-but-wrong
+538	sub-cluster (a deliverable the agent CAN produce but exits before writing, or a
+539	processor mis-firing on a passer), that is the next lever — but neither loop
+540	control nor the verify/plan instruction, both now confirmed saturated.

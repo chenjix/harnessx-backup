@@ -1,0 +1,122 @@
+871	second grader run). The agent correctly fixed all three files, ran its own
+872	`test_pipeline.sh` (which starts `./vm_service &` then `kill -TERM $PID`),
+873	saw curl 200 + the log written, and declared done. The stock
+874	`CustomSelfVerifyProcessor` DID fire, but its checklist item 5 is one-sided
+875	— "For running services: confirm they are still alive and reachable right
+876	now" — the exact wrong polarity for a clean-shutdown task. It gave the agent
+877	no reason to reap the test-run service, so the container's final live state
+878	kept the process the grader inspects. This is a harness-level polarity bug:
+879	the same wording is a latent regression risk for ANY task whose required end
+880	state is "stopped / no lingering processes", not just task_000140. Sweep
+881	confirmed the `no_lingering` grader is a single witness this batch, but the
+882	mis-nudge mechanism is general and lives in the harness, not the task.
+883	
+884	### Changes
+885	
+886	- `processors/lifecycle_self_verify.py` — new `LifecycleSelfVerifyProcessor`,
+887	  a drop-in replacement for `CustomSelfVerifyProcessor`: byte-identical
+888	  firing mechanics (singleton group `tb2_self_verify`, `_order=90`,
+889	  synthetic keepalive tool call + deferred +1 user message on no-tool-call
+890	  exit intent), with checklist item 5 rewritten to be polarity-neutral —
+891	  reconcile the *required* end state (persist OR teardown), and if the task
+892	  requires a stopped/clean state, confirm via `ps`/`pgrep` that nothing
+893	  remains, explicitly including any process started while self-testing. No
+894	  task ids / paths / service names embedded.
+895	- `config.yaml` — swap the final pipeline entry
+896	  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` for a
+897	  `file://…::LifecycleSelfVerifyProcessor` reference. Rest byte-identical to
+898	  R0; `system_prompt.txt` sidecar copied unchanged.
+899	
+900	### Evidence
+901	
+902	- `task_000140_01c78b42` result.json: `reward=0`, `exit_reason=done`,
+903	  `finished=no_tool_calls`, steps=11, `initial_pytest.passed=true`;
+904	  final_pytest fails only `test_no_lingering_service_processes`
+905	  (`Lingering vm_service processes found: ['344','591']`).
+906	- `task_000140` messages.json: msg 117 `test_pipeline.sh` ends
+907	  `kill -TERM $PID`; msg 157 ran `bash test_pipeline.sh` (starts
+908	  `./vm_service &`); msg 213 `_tb2_self_verify` fired; msgs 229–250 agent
+909	  re-`ls`'d files and re-declared success with no post-run `ps`/`pgrep`.
+910	- Stock checklist (harness.py L96): "For running services: confirm they are
+911	  still alive and reachable right now" — one-sided persist polarity.
+912	- Cluster sweep: 028/958 fail on verifier `ModuleNotFoundError: requests`;
+913	  118 log-size; 1706 redis-log; 1937 report-value — none share the
+914	  clean-shutdown mechanism, confirming 140 is the single grader witness but
+915	  the checklist polarity bug is harness-general.
+916	
+917	### Uncertainty
+918	
+919	If the model reads the corrected item 5 but cannot reason that its
+920	test-run service must be reaped, task_000140 stays F (residual is model
+921	reasoning, not harness). Distinct from the still-pending R1(c4)
+922	`h_bg_state_reconcile_v1`, which added a *separate* processor with regex
+923	launch-detection and an extra injected message; this candidate is a smaller,
+924	different shape — it corrects the polarity of the message the harness already
+925	sends, adding zero net messages and zero new firing conditions. If next round
+926	is flat with 140 still F on the same assertion, revert per rollback_trigger.
+927	
+928	
+929	## Round 4 (c7) — guard self-fabricated-test tautology (Control)
+930	
+931	<!-- journal:frontmatter
+932	round: 4
+933	timestamp: 2026-08-28T16:30:00Z
+934	hypothesis_id: h_self_fabricated_test_guard_v1
+935	levers: [control]
+936	predicted_affected: [task_000505_50b5162d]
+937	cited_candidates: [C-001]
+938	gating_outcome: pending
+939	gating_attribution: pending
+940	expected_global_gain: "Close the self-fabricated-test false-pass mechanism for detector/classifier/parser deliverables: agent validates a built script only against input files it manufactured from a derived value (a tautology that passes even when the value is wrong), never exercising the real on-disk artifacts. Primary target task_000505; the discipline generalizes to any task with ground-truth inputs on disk."
+941	regression_risk: "Very low. Append-only note on the tool result (mirrors CustomEditToolProcessor contract), never terminates, never mutates the system prompt, fires <=2x/run. Trajectory sweep over R2: fires on exactly 1 of 29 passing tasks (task_000760, a reproducibility probe with a self-made CSV) - harmless because the note is purely additive and 760 also has the real binary available. No passing task can be broken by extra advisory text."
+942	cost_shift: "Negligible-to-favourable. One ~120-token note (<=2x) only on the tautology shape; may add a few Bash calls to inspect real artifacts on targeted tasks, converting silent wrong-answer finishes into corrected deliverables."
+943	rollback_trigger: "If next round shows task_000505 still F on the same '2 of 2 evil bypassed' assertion AND the note demonstrably fired (nudge ignored -> residual is a pure OCR/model capability limit), OR any previously-passing task regresses to F (esp. task_000760), revert to R0 pipeline."
+944	-->
+945	
+946	### Why
+947	
+948	Assigned focus task_000505_50b5162d (security, reward=0, exit_reason=done,
+949	no_tool_calls, 14 steps). The agent OCR'd an ed25519 SSH key from
+950	/app/evidence.png, getting a GARBLED string (correct prefix AAAAC3NzaC1lZDI1NTE5
+951	misread as AAAAC3NzaC1IZDIINTES: l->I, 1->I, 9->S, plus stray spaces around +).
+952	It hardcoded that garbled key into /home/user/detect_trojan.sh, then validated
+953	the script by creating /tmp/malicious_test.txt via echo-ing the SAME garbled
+954	string and running detect_trojan.sh /tmp/malicious_test.txt -> exit 1 ("works").
+955	This is a self-fabricated-test TAUTOLOGY: a test input manufactured from the
+956	derived value can only ever pass, so the misread was never exposed. The real
+957	trojaned binaries (the evil corpus, present on disk) contain the CORRECT key and
+958	were never run through the script; the verifier's real run yielded
+959	"2 of 2 evil bypassed".
+960	
+961	Lever choice: the instruction lever has ALREADY targeted this exact discipline on
+962	this exact task twice - R1(c7) h_verify_real_artifacts_v1 (accepted) and R3
+963	h_ocr_extraction_discipline_v1 (pending), both telling the agent in the system
+964	prompt to validate against real inputs and distrust lossy-source values.
+965	task_000505 still failed. Per the analyze skill's cross-round rule (a lever tried
+966	repeatedly on the same cluster without flipping -> look elsewhere), a third prompt
+967	rewrite is the wrong move. The gap is not knowledge, it is DELIVERY: a
+968	session-start prompt sentence loses to the model's over-confidence, whereas a
+969	Control hook fires the correction at the DECISIVE moment (right after the
+970	tautological test run, injected into tool-result context). Distinct shape and
+971	distinct lever from both prior hypotheses.
+972	
+973	### Changes
+974	
+975	- processors/self_fabricated_test_guard.py - new SelfFabricatedTestGuardProcessor
+976	  (MultiHookProcessor, _order=34, after CustomEditToolProcessor(30), before
+977	  CustomSelfVerifyProcessor(90)). In on_before_tool it (1) records every path the
+978	  agent WRITES to (heredoc / redirect / tee / sed -i, reusing edit-guard
+979	  semantics) and (2) parses each execution segment; when a segment EXECUTES an
+980	  agent-authored deliverable (interpreter+script, ./script, or a written *.sh)
+981	  whose file-path arguments are ALL agent-fabricated (excluding this run's own
+982	  stdout/redirect outputs) and NONE pre-existing, it flags the call.
+983	  on_after_tool appends a one-shot corrective note (you tested against a file you
+984	  fabricated; run against the ORIGINAL on-disk artifacts; cross-check
+985	  lossy-source values against the real target). Append-only, non-terminating,
+986	  content-agnostic (no task ids / paths / literals). Fires <=2x/run.
+987	- config.yaml - register the processor via absolute file:// path at order 34;
+988	  rest of the pipeline byte-identical to R0. system_prompt.txt sidecar copied
+989	  unchanged (Control-only change).
+990	
+
+[Showing lines 871–990 of 1117 total. Use offset=990 to read the next section.]

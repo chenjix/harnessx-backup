@@ -1,0 +1,65 @@
+189	
+190	<!-- journal:frontmatter
+191	round: 2
+192	timestamp: 2026-06-02T00:00:00Z
+193	hypothesis_id: h_numeric_crosscheck_v1
+194	levers: [instruction]
+195	predicted_affected: [task_000111_cbada64a, task_000117_1b598e44, task_001048_14335141, task_001937_ac874115, task_000396_e56917e2, task_000328_80fb4c9f]
+196	cited_candidates: [C-004]
+197	gating_outcome: pending
+198	gating_attribution: pending
+199	expected_global_gain: "Flips a cross-domain (scientific_computing + data_science) wrong-answer/false-confidence cluster where the artifact is structurally perfect but the graded VALUE is wrong; an independent second-route recomputation catches the observed bug class"
+200	regression_risk: "Prompt-only additive guidance; small token increase from an extra verification pass on numeric tasks; no loop/crash risk (control processors still guard); passing numeric tasks only get reconfirmed"
+201	cost_shift: "Mildly positive (+tokens/steps) on correctness-graded numeric tasks that now run a second confirmation; negligible on non-numeric tasks (guidance is scoped)"
+202	rollback_trigger: "A previously-passing numeric task newly fails, OR step/token cost rises materially while predicted tasks stay reward=0 (no cluster flips) -> revert to R1 prompt"
+203	-->
+204	
+205	### Why
+206	
+207	Assigned focus `task_000111_cbada64a` (scientific_computing) finished cleanly —
+208	`exit_reason=done`, 7 steps, `finished=no_tool_calls`, initial_pytest passed —
+209	but `reward=0`: the verifier failed on the VALUE, `Expected m to be approx
+210	2.5997, got 2.5056` (OLS slope off ~0.094). The agent's C++ was textbook-shaped
+211	(correct OLS/bootstrap skeleton), compiled, ran, wrote a well-formatted
+212	result.txt, and the `_tb2_self_verify` hook fired — but the agent's response was
+213	purely structural (re-read checklist, `ls` the files, "formula correct ✓,
+214	format correct ✓") with zero independent numeric recomputation. A one-line
+215	numpy.polyfit on the same CSV would have produced the correct slope and exposed
+216	the bug. This is a systemic cluster: sweeping for
+217	`reward=0 AND exit_reason=done AND finished=no_tool_calls` surfaces multiple
+218	wrong-VALUE / false-confidence failures — task_000117 (PDB column-parse bug),
+219	task_001048 (integral 165.7908 vs 161.8028), task_001937 (grid 60 vs 50),
+220	task_000396 (deviation 0.607 vs <0.1), task_000328 (300 frames vs ~10). All ran
+221	without error and were declared done on an incorrect computed value.
+222	
+223	### Changes
+224	
+225	- `system_prompt.txt` (sibling read by `SiblingSystemPromptBuilder`, already
+226	  wired in config) — add a general "independent cross-check for computed
+227	  results" section: for any correctness-graded quantitative output, reconfirm
+228	  the key result via a SECOND independent route (different language / tested
+229	  library / hand computation on a slice) and reconcile discrepancies before
+230	  finishing; sanity-check magnitude/sign/range; confirm the whole input was
+231	  consumed. Names no task-specific constants, files, or algorithms.
+232	- `config.yaml` — copied byte-for-byte from R1 (no processor/pipeline change).
+233	
+234	### Evidence
+235	
+236	- `task_000111_cbada64a.result.json`: reward=0, exit_reason=done, steps=7;
+237	  final_pytest tail `AssertionError: Expected m to be approx 2.5997, got 2.5056`.
+238	- `task_000111_cbada64a.messages.json` msgs 66–128: after `_tb2_self_verify`,
+239	  the verification is structural only ("correct formula ✓ … format ✓ … files
+240	  exist ✓") — no independent recomputation; declared SUCCESS on a wrong value.
+241	- Cluster sweep: task_000117 `float('5 -94.99')` col-parse bug; task_001048
+242	  `Chunk 0 integral mismatch. Expected 161.8028, got 165.7908`; task_001937
+243	  `Expected Optimal Grid to be 50, but got 60`; task_000396 `max deviation
+244	  0.6072 is not within (0.0, 0.1)`; task_000328 `got 300` frames vs ~10.
+245	
+246	### Uncertainty
+247	
+248	Main risk is cost inflation from an extra verification pass without flipping
+249	the cluster — the model may still write a same-bug second implementation, or
+250	over-verify trivially-correct values. If R3 shows predicted tasks still
+251	reward=0 while cost climbs, the instruction is inert-but-expensive → revert to
+252	the R1 prompt. Because the change is prompt-only and additive, it cannot
+253	introduce loops or crashes (control processors remain in place).

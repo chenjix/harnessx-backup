@@ -1,0 +1,75 @@
+1	# Tmax coev rep22-i5 — evolve journal
+2	
+3	## Round 1 — break repeated length-truncation loop
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-01T00:00:00Z
+8	hypothesis_id: h_length_loop_breaker_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_000958_4bb2b05d, task_001857_24daeef3, task_001116_4c65c2f5, task_001098_f5acdd79, task_001032_1adaccb9, task_001837_deaf31cb]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=10/50; +6/-1 gained=task_000297_01ba10b6,task_001492_94f30428,task_001696_b87e1463,task_001832_dd672877 lost=task_001321_658ce4a8; score 0.2000 >= incumbent(mean) 0.2000 - tol 0.0400
+14	expected_global_gain: "Closes a 7-task failing cluster stuck in content-only max_tokens loops; flips tasks where a working artifact already existed and stops the rest from burning the full 80-step budget"
+15	regression_risk: "False hard-stop on a task that would self-recover after 6+ consecutive length-truncations; inert on healthy trajectories since any tool call resets the counter"
+16	cost_shift: "Net negative — prunes context on looping turns and caps wasted generations at ~6 instead of ~16-50"
+17	rollback_trigger: "A previously-passing task newly fails with exit_reason=loop_detected AND <~10 steps of real tool activity → hard-stop too eager; raise hard_stop_after or revert"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus task_000010_644ab1c2 (create `/home/user/operator.py`) failed
+23	`budget_exceeded` at 80 steps with reward=0. The agent correctly diagnosed the
+24	real bug — naming the script `operator.py` triggers a Python stdlib circular
+25	import (`from operator import eq` in `collections`) — and a working script
+26	already existed at `k8s_operator.py`. But it then entered a degenerate loop:
+27	16 of 33 assistant turns were content-only, hit `finish_reason=length`, and were
+28	followed by the run-loop's passive "Your previous response was cut off by the
+29	token limit. Please continue from where you left off." nudge, which re-primed the
+30	same runaway narration. A single `mv` would have passed; the loop never let a
+31	tool call out. This is systemic: 7 R0 tasks (task_000958, task_001857,
+32	task_001116, task_001098, task_001032, task_001837, plus 000010) show the same
+33	content-only length-truncation loop, all reward=0. The existing
+34	`LengthTruncationRecoveryProcessor` only *nudges* (rewrites the passive message);
+35	it never prunes the re-priming narration or hard-stops a non-recovering loop, so
+36	the whole budget burns.
+37	
+38	### Changes
+39	
+40	- `processors/length_loop_breaker.py` — new `LengthLoopBreaker` MultiHookProcessor.
+41	  Counts consecutive content-only `finish_reason=length` turns (`on_after_model`);
+42	  any tool call resets. At `prune_after=3` it prunes the accumulated truncation
+43	  narration + passive nudges from the context tail (keeps first message and all
+44	  tool exchanges) and injects one hard "emit ONE Bash call" directive
+45	  (`on_before_model`). At `hard_stop_after=6` it raises `LoopDetectedError` to
+46	  reclaim the remaining step budget.
+47	- `config.yaml` — register `LengthLoopBreaker` (via absolute `file://`) directly
+48	  after `LengthTruncationRecoveryProcessor` (`_order=6`, so it escalates only
+49	  after the per-turn nudge layer has run).
+50	
+51	### Evidence
+52	
+53	- `task_000010_644ab1c2` result.json: `exit_reason=budget_exceeded`, 80 steps,
+54	  reward=0; final_pytest fails on missing `/home/user/operator.py`. Message log
+55	  msgs 40–69: strict alternation of the passive "cut off by the token limit …
+56	  continue" nudge and an assistant turn opening "The user is telling me to stop
+57	  repeating myself and just run a command … Actually, the best solution is to
+58	  just keep the script at /home/user/k8s_operator.py" — 5 byte-identical prose
+59	  openings, zero tool calls.
+60	- `task_000958_4bb2b05d` result.json: `budget_exceeded`, 80 steps, reward=0;
+61	  assistant repeats "The user is telling me I'm stuck in a loop and hitting token
+62	  limits" 8× with the passive nudge interleaved.
+63	- Programmatic sweep of all `.messages.json`: content-only truncated assistant
+64	  turns — task_000010 16/33, task_000958 16/33, task_001857 13/33,
+65	  task_001116 10/48, task_001098 7, task_001032 6, task_001837 6. All reward=0.
+66	
+67	### Uncertainty
+68	
+69	The main risk is a false hard-stop on a task that would have self-recovered past
+70	6 consecutive length-truncations. Evidence argues against this: the observed R0
+71	loops ran 13–16 truncations without ever recovering, so 6 is well past the point
+72	nudging has proven futile, and `keep_recent_pairs=1` keeps the model aware it was
+73	just told to stop. If a previously-passing task newly fails with
+74	`exit_reason=loop_detected` and little real tool activity, raise `hard_stop_after`
+75	or revert.

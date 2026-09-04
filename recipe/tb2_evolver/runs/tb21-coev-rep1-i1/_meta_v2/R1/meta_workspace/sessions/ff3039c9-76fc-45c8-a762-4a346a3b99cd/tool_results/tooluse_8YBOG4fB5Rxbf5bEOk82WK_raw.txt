@@ -1,0 +1,317 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	from __future__ import annotations
+4	
+5	import dataclasses
+6	import logging
+7	from typing import Callable, Coroutine, Any
+8	
+9	from ...core.events import (
+10	    StepStartEvent,
+11	    BeforeModelEvent,
+12	    BoundaryHint,
+13	    TaskStartEvent,
+14	    TaskEndEvent,
+15	    Message,
+16	    rough_token_count,
+17	    _extract_text,
+18	)
+19	from ...core.processor import MultiHookProcessor
+20	
+21	logger = logging.getLogger(__name__)
+22	
+23	
+24	# ---------------------------------------------------------------------------
+25	# Default (no-op) summariser
+26	# ---------------------------------------------------------------------------
+27	
+28	
+29	_DEFAULT_SUMMARY_MAX_MSGS = 15
+30	_DEFAULT_SUMMARY_MSG_CHARS = 150
+31	
+32	
+33	async def _default_summarize(messages: list[Message]) -> str:
+34	    """Fallback summariser used when no ``summarize`` sub-harness is registered.
+35	
+36	    Takes the most recent ``_DEFAULT_SUMMARY_MAX_MSGS`` of the evicted set
+37	    (closest to the retention window, therefore most relevant) and truncates
+38	    each to ``_DEFAULT_SUMMARY_MSG_CHARS`` chars.  This bounds summary size to
+39	    ~15 × 150 chars regardless of how many messages were evicted, preventing
+40	    unbounded accumulation across repeated compaction cycles.
+41	    """
+42	    tail = messages[-_DEFAULT_SUMMARY_MAX_MSGS:]
+43	    parts = [f"[{m.role}] {_extract_text(m.content)[:_DEFAULT_SUMMARY_MSG_CHARS]}" for m in tail]
+44	    return "[Summary of earlier context]\n" + "\n".join(parts)
+45	
+46	
+47	# ---------------------------------------------------------------------------
+48	# CompactionProcessor
+49	# ---------------------------------------------------------------------------
+50	
+51	
+52	class CompactionProcessor(MultiHookProcessor):
+53	    """Dual-trigger, dual-window context compaction.
+54	
+55	    Triggers compaction when *either*:
+56	
+57	    - ``token_count > token_threshold``, or
+58	    - ``len(messages) > message_threshold``
+59	
+60	    When triggered:
+61	
+62	    1. The most recent ``retention_window`` messages are kept intact.
+63	    2. Of the remaining (older) messages, at most ``eviction_fraction`` are
+64	       handed to the summariser.
+65	    3. The summary is prepended as a single synthetic ``user`` message.
+66	
+67	    Summarisation runs through a sub-harness (keyed by ``summarize_key``) so
+68	    the LLM call appears in the trace stream linked to the parent run.
+69	    If the key is absent from the registry, ``summarize_fn`` is used as a
+70	    fallback (defaults to a no-op concatenation stub).
+71	
+72	    Args:
+73	        token_threshold:    Token count that triggers compaction (default 140 000).
+74	        message_threshold:  Message count that triggers compaction (default 100).
+75	        retention_window:   Number of recent messages never compacted (default 10).
+76	        eviction_fraction:  Maximum fraction of compactable messages to summarise
+77	                            per call (default 0.5 — half at a time).
+78	        summarize_key:      Sub-harnesses registry key for the summarisation model
+79	                            (default ``"summarize"``).
+80	        summarize_fn:       Fallback async callable ``(list[Message]) → str``.
+81	                            Used when ``summarize_key`` is not in the registry.
+82	                            Defaults to a no-op concatenation stub.
+83	        summarize_prompt_template:
+84	                            Optional prompt template for LLM summarisation.
+85	                            When provided, ``{conversation}`` is replaced with
+86	                            the compactable message transcript.
+87	    """
+88	
+89	    required_providers: frozenset = frozenset()
+90	
+91	    _singleton_group = "compaction"
+92	    _order = 8  # after context.env (5), before token_budget (10)
+93	
+94	    def _bind_model_config(self, model_config: Any) -> None:
+95	        super()._bind_model_config(model_config)
+96	        if self._summarize_key not in self._sub_harnesses and model_config is not None:
+97	            from ...core.harness import Harness as _Harness, HarnessConfig
+98	            from ...tracing.null_tracer import NullTracer as _NullTracer
+99	            from ...core.model_config import ModelConfig as _MC
+100	
+101	            provider = model_config.get(self._summarize_key)  # falls back to "main" if key absent
+102	            self._sub_harnesses = {
+103	                **self._sub_harnesses,
+104	                self._summarize_key: _Harness(_MC(main=provider), HarnessConfig(tracer=_NullTracer())),
+105	            }
+106	
+107	    def _maybe_rebuild_sub_harness(self) -> None:
+108	        """Rebuild the summarize sub-harness with a nested HarnessJournal when the parent uses one.
+109	
+110	        Called from on_task_start once session_id is known. The child journal is nested at
+111	        {parent.base_dir}/{session_id}/subharnesses/ mirroring how spawn_subagent nests
+112	        child agents under {parent.base_dir}/{session_id}/subagents/.
+113	        """
+114	        if not self._session_id:
+115	            return
+116	        rt = getattr(self, "_harness_runtime", None)
+117	        if rt is None:
+118	            return
+119	        from ...tracing.journal import HarnessJournal as _HJ
+120	
+121	        tracer = rt.tracer
+122	        if not isinstance(tracer, _HJ):
+123	            return
+124	        import os
+125	        from ...core.harness import Harness as _Harness, HarnessConfig
+126	        from ...core.config_schema import TracerConfig as _TC
+127	        from ...core.model_config import ModelConfig as _MC
+128	
+129	        model_config = getattr(self, "_model_config", None)
+130	        if model_config is None:
+131	            return
+132	        provider = model_config.get(self._summarize_key)
+133	        child_base_dir = os.path.join(tracer.base_dir, self._session_id, "subharnesses")
+134	        child_tracer = _TC(
+135	            base_dir=child_base_dir,
+136	            export_jsonl=tracer.export_jsonl,
+137	            silent=tracer.silent,
+138	        )
+139	        self._sub_harnesses = {
+140	            **self._sub_harnesses,
+141	            self._summarize_key: _Harness(_MC(main=provider), HarnessConfig(tracer=child_tracer)),
+142	        }
+143	
+144	    def __init__(
+145	        self,
+146	        token_threshold: int = 140_000,
+147	        message_threshold: int = 100,
+148	        retention_window: int = 6,
+149	        eviction_fraction: float = 0.5,
+150	        summarize_key: str = "summarize",
+151	        summarize_fn: Callable[[list[Message]], Coroutine[Any, Any, str]] | None = None,
+152	        summarize_prompt_template: str | None = None,
+153	        preserve_first_message: bool = True,
+154	    ) -> None:
+155	        self.token_threshold = token_threshold
+156	        self.message_threshold = message_threshold
+157	        self.retention_window = retention_window
+158	        self.eviction_fraction = max(0.0, min(1.0, eviction_fraction))
+159	        self._summarize_key = summarize_key
+160	        self._summarize_fn = summarize_fn or _default_summarize
+161	        self._summarize_prompt_template = summarize_prompt_template
+162	        self._preserve_first_message = preserve_first_message
+163	        self._task_anchor: Message | None = None
+164	        self._force_compact_mode: bool = False
+165	        self._compact_stats: tuple[int, int, int, int] | None = None  # (before_msgs, after_msgs, before_tok, after_tok)
+166	        self._session_id: str = ""
+167	
+168	    async def on_task_start(self, event: TaskStartEvent):
+169	        if self._preserve_first_message and event.task_description:
+170	            self._task_anchor = Message(role="user", content=event.task_description)
+171	        self._force_compact_mode = False
+172	        self._compact_stats = None
+173	        _prev_session = self._session_id
+174	        self._session_id = event.session_id
+175	        if self._session_id != _prev_session:
+176	            self._maybe_rebuild_sub_harness()
+177	        yield event
+178	
+179	    async def on_task_end(self, event: TaskEndEvent):
+180	        self._task_anchor = None
+181	        self._force_compact_mode = False
+182	        self._compact_stats = None
+183	        yield event
+184	
+185	    async def _compact(self, messages: tuple[Message, ...], run_id: str = "") -> tuple[Message, ...]:
+186	        msgs = list(messages)
+187	
+188	        # Strip the anchor from position 0 if already injected by a previous compaction cycle.
+189	        anchor = self._task_anchor if self._preserve_first_message else None
+190	        if anchor is not None and msgs and msgs[0].content == anchor.content:
+191	            msgs = msgs[1:]
+192	
+193	        if len(msgs) <= self.retention_window:
+194	            result = tuple(msgs)
+195	            return (anchor,) + result if anchor is not None else result
+196	
+197	        recent = msgs[-self.retention_window :]
+198	        compactable = msgs[: -self.retention_window]
+199	
+200	        evict_count = max(1, int(len(compactable) * self.eviction_fraction))
+201	        to_evict = list(compactable[:evict_count])
+202	        to_keep = list(compactable[evict_count:])
+203	        recent = list(recent)
+204	
+205	        # Ensure the split boundary respects tool_use/tool_result pairs.
+206	        # If to_keep starts with tool results, their parent assistant was evicted → move them too.
+207	        while to_keep and to_keep[0].role == "tool":
+208	            to_evict.append(to_keep.pop(0))
+209	        # If to_keep is now empty, recent may start with tool results that reference
+210	        # the last evicted assistant message → drop them as well.
+211	        if not to_keep:
+212	            while recent and recent[0].role == "tool":
+213	                to_evict.append(recent.pop(0))
+214	
+215	        sub = self._sub_harnesses.get(self._summarize_key)
+216	        if sub is not None:
+217	            summary_text = await self._summarize_via_harness(sub, to_evict, run_id)
+218	        else:
+219	            summary_text = await self._summarize_fn(to_evict)
+220	        summary_msg = Message(role="user", content=summary_text)
+221	
+222	        result = tuple([summary_msg] + to_keep + list(recent))
+223	        return (anchor,) + result if anchor is not None else result
+224	
+225	    async def _summarize_via_harness(
+226	        self,
+227	        sub_harness: object,
+228	        messages: list[Message],
+229	        run_id: str,
+230	    ) -> str:
+231	        from ...core.harness import BaseTask
+232	
+233	        conv_text = "\n".join(f"[{m.role}] {_extract_text(m.content)[:300]}" for m in messages)
+234	        if self._summarize_prompt_template and "{conversation}" in self._summarize_prompt_template:
+235	            prompt = self._summarize_prompt_template.replace("{conversation}", conv_text)
+236	        elif self._summarize_prompt_template:
+237	            prompt = self._summarize_prompt_template + "\n\n" + conv_text
+238	        else:
+239	            prompt = (
+240	                "Summarize the following conversation history in 2-4 sentences, "
+241	                "preserving key decisions, facts, and context:\n\n" + conv_text
+242	            )
+243	        try:
+244	            result = await sub_harness.run(
+245	                BaseTask(description=prompt, max_steps=1),
+246	                parent_run_id=run_id,
+247	            )
+248	            return f"[Earlier conversation summary: {result.final_output.strip()}]"
+249	        except Exception:
+250	            return await self._summarize_fn(messages)
+251	
+252	    async def on_step_start(self, event: StepStartEvent):
+253	        # Detect force_compact from task (StepStartEvent carries the task object)
+254	        if getattr(event.task, "force_compact", False):
+255	            self._force_compact_mode = True
+256	            self._task_anchor = None  # management op — don't prepend description to compacted history
+257	
+258	        messages_to_compact = event.messages if event.messages else event.raw_messages
+259	        before_msgs = len(messages_to_compact)
+260	        before_tokens = rough_token_count(list(messages_to_compact))
+261	
+262	        if (
+263	            not self._force_compact_mode
+264	            and before_tokens <= self.token_threshold
+265	            and before_msgs <= self.message_threshold
+266	        ):
+267	            yield event
+268	            return
+269	
+270	        new_messages = await self._compact(messages_to_compact, run_id=event.run_id)
+271	        new_count = rough_token_count(list(new_messages))
+272	
+273	        self._compact_stats = (before_msgs, len(new_messages), before_tokens, new_count)
+274	
+275	        logger.info(
+276	            "Context compacted: %d → %d messages (~%d → ~%d tokens)",
+277	            before_msgs,
+278	            len(new_messages),
+279	            before_tokens,
+280	            new_count,
+281	        )
+282	
+283	        # Always set the hint so RunLoop labels the auto-boundary as "compaction".
+284	        # If the content didn't actually change, hash comparison won't fire a boundary
+285	        # and this hint is never read.
+286	        hint = BoundaryHint(
+287	            reason="compaction",
+288	            before_msgs=before_msgs,
+289	            after_msgs=len(new_messages),
+290	            before_tokens=before_tokens,
+291	            after_tokens=new_count,
+292	        )
+293	
+294	        yield dataclasses.replace(
+295	            event,
+296	            messages=new_messages,
+297	            raw_messages=new_messages,
+298	            token_count=new_count,
+299	            boundary_hint=hint,
+300	        )
+301	
+302	    async def on_before_model(self, event: BeforeModelEvent):
+303	        if not self._force_compact_mode:
+304	            yield event
+305	            return
+306	
+307	        stats = self._compact_stats
+308	        if stats:
+309	            before_msgs, after_msgs, before_tok, after_tok = stats
+310	            if before_msgs != after_msgs:
+311	                msg = f"✅ 已压缩：{before_msgs} → {after_msgs} 条消息（~{before_tok:,} → ~{after_tok:,} tokens）"
+312	            else:
+313	                msg = f"无需压缩（当前 {before_msgs} 条消息，~{before_tok:,} tokens）"
+314	        else:
+315	            msg = "✅ 压缩完成"
+316	
+317	        yield dataclasses.replace(event, skip_model=True, synthetic_output=msg)

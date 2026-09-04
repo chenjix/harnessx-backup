@@ -1,0 +1,103 @@
+1	# SPDX-License-Identifier: MIT
+2	"""StepBudgetDeadlineProcessor — step-based deadline nudges.
+3	
+4	Terminal-Bench-style tasks run under a hard *step* budget (``task.max_steps``,
+5	80 in the tmax eval). The existing ``TaskTimeReminderProcessor`` keys off a
+6	wall-clock ``timeout_seconds`` that is never populated by the recipe runner, so
+7	it is inert — no deadline nudge ever reaches the model. The observed failure
+8	mode is: the agent explores / thrashes for the whole budget and hits
+9	``exit_reason=budget_exceeded`` with **zero deliverable files written to disk**,
+10	which is an automatic score of 0 regardless of how close the reasoning was.
+11	
+12	This processor closes that gap generically. It watches the fraction of the step
+13	budget consumed (``step_id / task.max_steps``) and injects escalating user-role
+14	reminders at configurable fractions. The message tells the agent to stop
+15	exploring, commit its current best-effort output to the required paths, and
+16	verify the files exist with ``ls`` — the single behaviour that turns a
+17	budget_exceeded loss into a possible pass.
+18	
+19	It is deliberately task-agnostic: it names no paths, no domains, and no
+20	task ids. It only knows "you are running out of steps; get your deliverables
+21	onto disk now".
+22	"""
+23	
+24	from __future__ import annotations
+25	
+26	import dataclasses
+27	
+28	from harnessx.core.events import Message, StepStartEvent, TaskEndEvent, TaskStartEvent
+29	from harnessx.core.processor import MultiHookProcessor
+30	
+31	_WARN_EARLY = (
+32	    "[StepBudgetReminder] You have used about {pct:.0f}% of your step budget "
+33	    "(step {step} of {total}). Stop open-ended exploration now. If the task "
+34	    "requires producing output files or artifacts, make sure your current "
+35	    "best-effort version of EVERY required output is written to its exact "
+36	    "expected path, then continue refining. Prefer committing a working "
+37	    "partial result over leaving nothing on disk."
+38	)
+39	_WARN_CRITICAL = (
+40	    "[StepBudgetReminder] CRITICAL: about {pct:.0f}% of your step budget is "
+41	    "gone (step {step} of {total}). The run will be terminated shortly and any "
+42	    "required output that is missing from disk scores 0 automatically. Do NOT "
+43	    "start new investigation or a fundamentally different approach. Write your "
+44	    "best current answer to every required output path IMMEDIATELY, then run "
+45	    "`ls -l` (or `cat`) on each expected path to confirm it exists and is "
+46	    "non-empty."
+47	)
+48	
+49	
+50	class StepBudgetDeadlineProcessor(MultiHookProcessor):
+51	    """Inject escalating deadline reminders keyed off the step budget.
+52	
+53	    Parameters
+54	    ----------
+55	    warn_at:
+56	        Fractions of ``task.max_steps`` at which to fire. The highest fraction
+57	        that is ``>= 0.8`` uses the CRITICAL wording; lower fractions use the
+58	        early wording. Each fraction fires at most once per task.
+59	    """
+60	
+61	    _singleton_group = "step_budget_deadline"
+62	    _order = 7  # right after TaskTimeReminderProcessor (_order=6)
+63	
+64	    def __init__(self, warn_at: tuple[float, ...] = (0.65, 0.85)) -> None:
+65	        self._warn_at = sorted(float(w) for w in warn_at)
+66	        self._triggered: set[float] = set()
+67	
+68	    async def on_task_start(self, event: TaskStartEvent):
+69	        self._triggered = set()
+70	        yield event
+71	
+72	    async def on_step_start(self, event: StepStartEvent):
+73	        task = event.task
+74	        total = int(getattr(task, "max_steps", 0) or 0)
+75	        if total <= 0:
+76	            yield event
+77	            return
+78	
+79	        step = int(event.step_id or 0)
+80	        pct = step / total
+81	
+82	        warn: str | None = None
+83	        for threshold in reversed(self._warn_at):
+84	            if pct >= threshold and threshold not in self._triggered:
+85	                self._triggered.add(threshold)
+86	                template = _WARN_CRITICAL if threshold >= 0.8 else _WARN_EARLY
+87	                warn = template.format(pct=pct * 100, step=step, total=total)
+88	                break
+89	
+90	        if warn is None:
+91	            yield event
+92	            return
+93	
+94	        msg = Message(role="user", content=warn)
+95	        yield dataclasses.replace(
+96	            event,
+97	            messages=event.messages + (msg,),
+98	            raw_messages=event.raw_messages + (msg,),
+99	        )
+100	
+101	    async def on_task_end(self, event: TaskEndEvent):
+102	        self._triggered = set()
+103	        yield event

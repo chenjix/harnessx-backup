@@ -1,0 +1,81 @@
+
+    Older evolved configs still point ``SystemPromptProcessor`` at TB2's
+    ``_StaticSystemPromptBuilder`` (inert under the old thin Tmax loop). With the
+    full HarnessX path those would ignore the sidecar MetaAgent actually edited.
+    Prefer ``SiblingSystemPromptBuilder`` whenever the sidecar exists, unless the
+    YAML already wires that builder.
+    """
+    sibling = cfg_path.parent / "system_prompt.txt"
+    if not sibling.is_file():
+        return config
+    new_procs: list[Any] = []
+    changed = False
+    sibling_target = "recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder"
+    for proc in config.processors or []:
+        if not isinstance(proc, dict):
+            new_procs.append(proc)
+            continue
+        target = str(proc.get("_target_", ""))
+        if "system_prompt.SystemPromptProcessor" not in target:
+            new_procs.append(proc)
+            continue
+        builder = proc.get("system_builder") or {}
+        builder_target = ""
+        if isinstance(builder, dict):
+            builder_target = str(builder.get("_target_", ""))
+        if sibling_target in builder_target:
+            new_procs.append(proc)
+            continue
+        patched = dict(proc)
+        patched["system_builder"] = {"_target_": sibling_target}
+        new_procs.append(patched)
+        changed = True
+    if not changed:
+        return config
+    return config.copy(processors=new_procs)
+
+
+async def _run_async(
+    *,
+    harness_config: Path,
+    container: str,
+    instruction: str,
+    api_base: str,
+    model: str,
+    max_steps: int,
+    temperature: float,
+    api_key: str,
+    journal_dir: Path | None,
+    workspace_path: str = "/home/user",
+) -> HarnessAgentResult:
+    cfg_path = Path(harness_config).resolve()
+    if not cfg_path.is_file():
+        raise FileNotFoundError(f"harness config not found: {cfg_path}")
+
+    # SiblingSystemPromptBuilder + promote paths resolve via this env.
+    os.environ["TB2_HARNESS_CONFIG"] = str(cfg_path)
+    os.environ["TMAX_HARNESS_CONFIG"] = str(cfg_path)
+    sibling_prompt = cfg_path.parent / "system_prompt.txt"
+    if sibling_prompt.is_file():
+        os.environ["TMAX_SYSTEM_PROMPT_FILE"] = str(sibling_prompt)
+
+    base_config = _prefer_sibling_prompt_builder(
+        HarnessConfig.from_yaml_file(str(cfg_path)), cfg_path
+    )
+    tracer = None
+    if journal_dir is not None:
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        tracer = HarnessJournal(base_dir=str(journal_dir), export_jsonl=True)
+
+    harness_config_rt = base_config.copy(
+        sandbox_provider=TmaxDockerSandboxProvider(
+            container,
+            workspace_path=workspace_path,
+        ),
+        tracer=tracer,
+    )
+
+    provider_kwargs: dict[str, Any] = {
+        "base_url": api_base.rstrip("/"),
+        "api_key": api_key or "EMPTY",
+    }

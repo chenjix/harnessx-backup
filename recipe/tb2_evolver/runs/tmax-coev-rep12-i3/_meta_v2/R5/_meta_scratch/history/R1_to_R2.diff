@@ -1,0 +1,17 @@
+--- R1
++++ R2
+@@ -55,2 +55,14 @@
+   _hook_: '*'
++# R2: break identical-Bash-command loops. Observed across the R1 budget_exceeded
++# cluster: the agent issues the EXACT same Bash command 20-29 times in a row,
++# gets the same (often empty/failing) result each time, and burns the whole
++# 80-step budget on one unproductive command. LengthTruncationRecovery does not
++# catch this — those turns emit a well-formed tool call, so finish_reason != length.
++# This processor injects a firm redirect user message after the same command is
++# issued `repeat_threshold` times consecutively; it never blocks execution, so a
++# legitimately-slow retry is at worst nudged, never broken. Strategy/shape-only;
++# no task-specific commands or paths. See processors/repeat_command_breaker.py.
++- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep12-i3/_meta_v2/R2/processors/repeat_command_breaker.py::RepeatCommandBreakerProcessor
++  repeat_threshold: 3
++  _hook_: '*'
+ # R1: token_threshold lowered 140000 -> 40000. The eval model's true context

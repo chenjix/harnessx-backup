@@ -1,0 +1,403 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	from __future__ import annotations
+4	
+5	import ast
+6	import hashlib
+7	import importlib
+8	import importlib.util
+9	import inspect
+10	import re
+11	import shutil
+12	import sys
+13	import tempfile
+14	import types
+15	import uuid
+16	from pathlib import Path
+17	from typing import Any
+18	
+19	from harnessx.core.processor import MultiHookProcessor
+20	from harnessx.home import agent_home
+21	
+22	_BASE_DIR = agent_home() / "lab" / "custom_processors"
+23	_IMPORTED_DIR = _BASE_DIR / "imported"
+24	_LEGACY_PY_ROOT = _BASE_DIR / "py"
+25	_LEGACY_PACKAGE = "hx_custom_processors"
+26	_LEGACY_PACKAGE_ROOT = _LEGACY_PY_ROOT / _LEGACY_PACKAGE
+27	
+28	_MAX_FILES = 200
+29	_MAX_FILE_BYTES = 1024 * 1024
+30	
+31	
+32	def _sanitize_slug(raw: str) -> str:
+33	    s = re.sub(r"[^a-zA-Z0-9_]+", "_", (raw or "").strip())
+34	    s = re.sub(r"_+", "_", s).strip("_")
+35	    return s or "custom"
+36	
+37	
+38	def _ensure_dirs() -> None:
+39	    for d in (_BASE_DIR, _IMPORTED_DIR):
+40	        try:
+41	            d.mkdir(parents=True, exist_ok=True)
+42	        except OSError:
+43	            # Some runtimes (e.g. read-only sandboxes) cannot write AGENT_HOME.
+44	            # Callers that require write access will fail later with a clear error.
+45	            pass
+46	
+47	
+48	def ensure_import_path() -> None:
+49	    """Compatibility no-op.
+50	
+51	    Kept for backward compatibility with older code paths that expected this
+52	    helper when custom processors were installed into a managed package.
+53	    """
+54	    _ensure_dirs()
+55	    # Legacy compat for historical managed package targets:
+56	    #   hx_custom_processors.<slug>.processor.<ClassName>
+57	    p = str(_LEGACY_PY_ROOT.resolve())
+58	    if p not in sys.path:
+59	        sys.path.insert(0, p)
+60	
+61	    pkg_root = str(_LEGACY_PACKAGE_ROOT.resolve())
+62	    pkg = sys.modules.get(_LEGACY_PACKAGE)
+63	    if isinstance(pkg, types.ModuleType) and hasattr(pkg, "__path__"):
+64	        pkg_paths = list(getattr(pkg, "__path__", []))
+65	        if pkg_root not in pkg_paths:
+66	            pkg.__path__.append(pkg_root)  # type: ignore[attr-defined]
+67	    importlib.invalidate_caches()
+68	
+69	
+70	def managed_processors_dir() -> Path:
+71	    """Return AGENT_HOME managed custom-processor root."""
+72	    _ensure_dirs()
+73	    return _BASE_DIR
+74	
+75	
+76	def make_file_target(file_path: str | Path, class_name: str) -> str:
+77	    """Build canonical file-based _target_ string.
+78	
+79	    Format: ``file://<absolute_path>::<ClassName>``.
+80	    """
+81	    p = Path(file_path).expanduser().resolve()
+82	    return f"file://{p}::{class_name}"
+83	
+84	
+85	def parse_file_target(target: str) -> tuple[Path, str]:
+86	    """Parse ``file://...::ClassName`` target into ``(path, class_name)``."""
+87	    if not isinstance(target, str) or not target.startswith("file://"):
+88	        raise ValueError("target is not a file:// target")
+89	    spec = target[len("file://") :]
+90	    path_part, sep, class_name = spec.rpartition("::")
+91	    if not sep or not path_part.strip() or not class_name.strip():
+92	        raise ValueError("invalid file target; expected 'file:///abs/path.py::ClassName'")
+93	    path = Path(path_part).expanduser().resolve()
+94	    return path, class_name.strip()
+95	
+96	
+97	def _doc_first_line(node: ast.ClassDef) -> str:
+98	    doc = ast.get_docstring(node) or ""
+99	    return doc.strip().splitlines()[0].strip() if doc.strip() else ""
+100	
+101	
+102	def _collect_multihook_aliases(tree: ast.Module) -> set[str]:
+103	    aliases = {"MultiHookProcessor"}
+104	    for node in tree.body:
+105	        if isinstance(node, ast.ImportFrom):
+106	            mod = node.module or ""
+107	            if mod.endswith("core.processor") or mod == "harnessx.core.processor":
+108	                for name in node.names:
+109	                    if name.name == "MultiHookProcessor":
+110	                        aliases.add(name.asname or name.name)
+111	    return aliases
+112	
+113	
+114	def _base_name(base: ast.expr) -> str:
+115	    if isinstance(base, ast.Name):
+116	        return base.id
+117	    if isinstance(base, ast.Attribute):
+118	        return base.attr
+119	    return ""
+120	
+121	
+122	def _scan_python_text(text: str, file_path: str) -> list[dict[str, Any]]:
+123	    try:
+124	        tree = ast.parse(text, filename=file_path)
+125	    except SyntaxError:
+126	        return []
+127	
+128	    aliases = _collect_multihook_aliases(tree)
+129	    out: list[dict[str, Any]] = []
+130	    for node in tree.body:
+131	        if not isinstance(node, ast.ClassDef):
+132	            continue
+133	        bases = {_base_name(b) for b in node.bases}
+134	        if not bases.intersection(aliases):
+135	            continue
+136	        out.append(
+137	            {
+138	                "class_name": node.name,
+139	                "label": node.name,
+140	                "file_path": file_path,
+141	                "doc": _doc_first_line(node),
+142	            }
+143	        )
+144	    return out
+145	
+146	
+147	def _iter_python_files(path: Path) -> list[Path]:
+148	    if path.is_file():
+149	        return [path] if path.suffix == ".py" else []
+150	
+151	    files: list[Path] = []
+152	    for p in path.rglob("*.py"):
+153	        if any(part in {"__pycache__", ".git", ".venv", "node_modules"} for part in p.parts):
+154	            continue
+155	        files.append(p)
+156	        if len(files) >= _MAX_FILES:
+157	            break
+158	    return sorted(files)
+159	
+160	
+161	def scan_path_for_processors(path: str) -> list[dict[str, Any]]:
+162	    p = Path(path).expanduser().resolve()
+163	    if not p.exists():
+164	        raise FileNotFoundError(f"Path does not exist: {path}")
+165	
+166	    candidates: list[dict[str, Any]] = []
+167	    for f in _iter_python_files(p):
+168	        try:
+169	            if f.stat().st_size > _MAX_FILE_BYTES:
+170	                continue
+171	            text = f.read_text(encoding="utf-8")
+172	        except Exception:
+173	            continue
+174	        candidates.extend(_scan_python_text(text, str(f)))
+175	    return candidates
+176	
+177	
+178	def scan_text_for_processors(filename: str, content: str) -> list[dict[str, Any]]:
+179	    name = filename or "uploaded_processor.py"
+180	    return _scan_python_text(content, name)
+181	
+182	
+183	def _load_class_from_file(file_path: Path, class_name: str) -> type:
+184	    module_name = f"_hx_custom_scan_{uuid.uuid4().hex}"
+185	    spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+186	    if spec is None or spec.loader is None:
+187	        raise ImportError(f"Cannot build import spec from {file_path}")
+188	    module = importlib.util.module_from_spec(spec)
+189	    spec.loader.exec_module(module)
+190	    cls = getattr(module, class_name, None)
+191	    if cls is None:
+192	        raise AttributeError(f"Class '{class_name}' not found in {file_path}")
+193	    if not isinstance(cls, type):
+194	        raise TypeError(f"'{class_name}' is not a class in {file_path}")
+195	    if not issubclass(cls, MultiHookProcessor):
+196	        raise TypeError(f"'{class_name}' does not subclass MultiHookProcessor")
+197	    return cls
+198	
+199	
+200	def _ctor_required_params(cls: type) -> list[str]:
+201	    sig = inspect.signature(cls.__init__)
+202	    required: list[str] = []
+203	    for p in sig.parameters.values():
+204	        if p.name == "self":
+205	            continue
+206	        if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+207	            continue
+208	        if p.default is inspect._empty:
+209	            required.append(p.name)
+210	    return required
+211	
+212	
+213	def test_processor_from_path(path: str, class_name: str) -> dict[str, Any]:
+214	    p = Path(path).expanduser().resolve()
+215	    cls = _load_class_from_file(p, class_name)
+216	    required = _ctor_required_params(cls)
+217	    if required:
+218	        return {
+219	            "ok": True,
+220	            "instantiable": False,
+221	            "required_args": required,
+222	            "message": f"Import ok; constructor requires args: {required}",
+223	        }
+224	    try:
+225	        cls()
+226	    except Exception as exc:  # noqa: BLE001
+227	        return {
+228	            "ok": True,
+229	            "instantiable": False,
+230	            "required_args": [],
+231	            "message": f"Import ok; constructor check failed: {type(exc).__name__}: {exc}",
+232	        }
+233	    return {
+234	        "ok": True,
+235	        "instantiable": True,
+236	        "required_args": [],
+237	        "message": "Import and ctor check passed",
+238	    }
+239	
+240	
+241	def test_processor_from_content(filename: str, content: str, class_name: str) -> dict[str, Any]:
+242	    with tempfile.TemporaryDirectory(prefix="hx_custom_proc_") as td:
+243	        f = Path(td) / (filename or "uploaded_processor.py")
+244	        f.write_text(content, encoding="utf-8")
+245	        return test_processor_from_path(str(f), class_name)
+246	
+247	
+248	def _entry_for(
+249	    path: Path,
+250	    class_name: str,
+251	    label: str | None = None,
+252	    source_path: str | None = None,
+253	) -> dict[str, Any]:
+254	    target = make_file_target(path, class_name)
+255	    return {
+256	        "id": hashlib.sha1(target.encode("utf-8")).hexdigest()[:12],
+257	        "label": (label or class_name).strip() or class_name,
+258	        "class_name": class_name,
+259	        "target": target,
+260	        "source_path": source_path or str(path),
+261	        "installed_path": str(path),
+262	    }
+263	
+264	
+265	def _content_id(content: bytes) -> str:
+266	    """Return a 10-char content-based ID from the SHA-1 of *content*.
+267	
+268	    Using file content instead of a random UUID makes imports idempotent:
+269	    the same source file always produces the same managed filename, so
+270	    existing ``file://`` targets remain valid after agent_home is rebuilt.
+271	    """
+272	    return hashlib.sha1(content).hexdigest()[:10]
+273	
+274	
+275	def _copy_into_managed(file_path: Path, class_name: str) -> Path:
+276	    _ensure_dirs()
+277	    content = file_path.read_bytes()
+278	    file_stem = _sanitize_slug(file_path.stem)
+279	    class_stem = _sanitize_slug(class_name)
+280	    content_id = _content_id(content)
+281	    dst = _IMPORTED_DIR / f"{file_stem}_{class_stem}_{content_id}.py"
+282	    if not dst.exists():
+283	        shutil.copy2(file_path, dst)
+284	    return dst
+285	
+286	
+287	def import_processor_from_path(path: str, class_name: str, label: str | None = None) -> dict[str, Any]:
+288	    src = Path(path).expanduser().resolve()
+289	    _load_class_from_file(src, class_name)
+290	
+291	    _ensure_dirs()
+292	    base = _BASE_DIR.resolve()
+293	    try:
+294	        src.relative_to(base)
+295	        dst = src
+296	    except Exception:
+297	        dst = _copy_into_managed(src, class_name)
+298	
+299	    return _entry_for(dst, class_name, label=label, source_path=str(src))
+300	
+301	
+302	def import_processor_from_content(
+303	    filename: str,
+304	    content: str,
+305	    class_name: str,
+306	    label: str | None = None,
+307	) -> dict[str, Any]:
+308	    _ensure_dirs()
+309	
+310	    content_bytes = content.encode("utf-8")
+311	    stem = _sanitize_slug(Path(filename or "uploaded_processor.py").stem)
+312	    cls = _sanitize_slug(class_name)
+313	    content_id = _content_id(content_bytes)
+314	    dst = _IMPORTED_DIR / f"{stem}_{cls}_{content_id}.py"
+315	    if not dst.exists():
+316	        dst.write_bytes(content_bytes)
+317	
+318	    # Validate the saved file contains the requested class.
+319	    _load_class_from_file(dst, class_name)
+320	    return _entry_for(dst, class_name, label=label, source_path=str(dst))
+321	
+322	
+323	def list_custom_processors() -> list[dict[str, Any]]:
+324	    _ensure_dirs()
+325	    if not _BASE_DIR.exists():
+326	        return []
+327	    rows: list[dict[str, Any]] = []
+328	    for c in scan_path_for_processors(str(_BASE_DIR)):
+329	        p = Path(str(c.get("file_path", ""))).expanduser().resolve()
+330	        class_name = str(c.get("class_name", "")).strip()
+331	        if not class_name:
+332	            continue
+333	        rows.append(
+334	            _entry_for(
+335	                p,
+336	                class_name,
+337	                label=str(c.get("label", class_name)),
+338	                source_path=str(p),
+339	            )
+340	        )
+341	    return sorted(
+342	        rows,
+343	        key=lambda x: (str(x.get("label", "")).lower(), str(x.get("class_name", ""))),
+344	    )
+345	
+346	
+347	def remove_custom_processor(processor_id: str) -> bool:
+348	    rows = list_custom_processors()
+349	    row = next(
+350	        (r for r in rows if str(r.get("id")) == str(processor_id) or str(r.get("target")) == str(processor_id)),
+351	        None,
+352	    )
+353	    if row is None:
+354	        return False
+355	
+356	    p = Path(str(row.get("installed_path", ""))).expanduser().resolve()
+357	    base = _BASE_DIR.resolve()
+358	    try:
+359	        p.relative_to(base)
+360	    except Exception:
+361	        return False
+362	
+363	    if p.exists() and p.is_file():
+364	        p.unlink(missing_ok=True)
+365	
+366	    # Best-effort cache cleanup for same stem in __pycache__.
+367	    pyc_dir = p.parent / "__pycache__"
+368	    if pyc_dir.exists() and pyc_dir.is_dir():
+369	        stem = p.stem
+370	        for f in pyc_dir.glob(f"{stem}*.pyc"):
+371	            f.unlink(missing_ok=True)
+372	    return True
+373	
+374	
+375	def build_custom_dimension() -> dict[str, Any] | None:
+376	    entries = list_custom_processors()
+377	    if not entries:
+378	        return None
+379	
+380	    options: list[dict[str, Any]] = []
+381	    for e in entries:
+382	        target = str(e.get("target", "")).strip()
+383	        if not target:
+384	            continue
+385	        options.append(
+386	            {
+387	                "key": str(e.get("id", target)),
+388	                "label": str(e.get("label", e.get("class_name", "Custom Processor"))),
+389	                "description": f"{e.get('class_name', 'Processor')} · {e.get('installed_path', '')}",
+390	                "processors": [{"_target_": target}],
+391	            }
+392	        )
+393	    if not options:
+394	        return None
+395	
+396	    return {
+397	        "key": "custom_processors",
+398	        "label": "Custom Processors",
+399	        "description": "Processors imported from AGENT_HOME/lab/custom_processors.",
+400	        "icon": "flask",
+401	        "multi_select": True,
+402	        "options": options,
+403	    }

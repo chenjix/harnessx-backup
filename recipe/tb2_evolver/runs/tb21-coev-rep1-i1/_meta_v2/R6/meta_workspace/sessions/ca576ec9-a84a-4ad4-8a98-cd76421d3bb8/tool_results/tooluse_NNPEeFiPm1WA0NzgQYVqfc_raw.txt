@@ -1,0 +1,249 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""SemanticLoopBreaker — break an agent out of a repeated-reasoning loop.
+4	
+5	Motivation (harness deficiency, not a model-knowledge gap)
+6	----------------------------------------------------------
+7	On Terminal-Bench 2 the R1 context-overflow guard and R2 act-loop keepalive
+8	removed the "instant death" and "single prose stall" terminal failure shapes:
+9	every task now runs many Bash steps. A new dominant failure signature emerged
+10	in the R4 trajectories — a **semantic loop**. The agent emits the *same
+11	reasoning content repeatedly* (near-identical assistant turns), re-running the
+12	same class of command with tiny variations, making no forward progress, until
+13	it exhausts ``max_steps`` / the budget and never writes the required output
+14	file.
+15	
+16	The stock hash / exact-match loop detection does NOT catch this: the tool-call
+17	IDs and the exact command bytes differ slightly between iterations, so no two
+18	turns are byte-identical even though the agent's *reasoning* is verbatim
+19	identical. The model is frequently self-aware about it — the R4 logs contain
+20	assistant turns literally beginning:
+21	
+22	    "I'm stuck in a loop repeating the same command. Let me take ..."   (x41)
+23	    "I keep making the same mistake. Let me take a fundamentally ..."   (x10)
+24	    "Let me try a different approach. The issue is that the sample..."  (x32)
+25	    "Let me analyze the disassembly more carefully. I see that: ..."    (x25)
+26	
+27	— yet it cannot break out on its own, and the harness never intervenes.
+28	
+29	Empirical separation observed in R4 (max count of an identical assistant-content
+30	prefix within a run):
+31	
+32	    PASSING  tasks: <= 2   (configure-git-webserver, git-leak-recovery, kv-store-grpc)
+33	    FAILING  loops: 3..48  (write-compressor 48, vulnerable-secret 41,
+34	                            protein-assembly 39, adaptive-rejection-sampler 32,
+35	                            llm-inference-batching 10, sam-cell-seg 5, train-fasttext 5)
+36	
+37	so a repetition threshold in the 3..5 band cleanly separates the healthy
+38	clusters from the stuck ones.
+39	
+40	This is a *class* deficiency (a missing mechanical loop-break), not a
+41	domain-knowledge gap: the fix is a Control hook that watches assistant-turn
+42	reasoning signatures, and once the same signature recurs ``repeat_threshold``
+43	times, injects a single forceful redirect telling the agent to stop repeating,
+44	commit its current best result to the required output path, and change strategy.
+45	
+46	Distinction from the R2 keepalive / reverted R3 keepalive
+47	---------------------------------------------------------
+48	Those fired on a *terminal no-tool-call stall* (``finish_reason`` end/stop AND
+49	no tool calls) — a completely different trigger. This processor fires *mid-run
+50	while the agent is still emitting tool calls*, keyed on **content repetition**,
+51	not on the absence of a tool call. It never fabricates a synthetic keepalive
+52	tool call and never blocks the run from ending; it only appends one bounded
+53	user redirect when a loop is detected. Mechanically orthogonal.
+54	
+55	Mechanism
+56	---------
+57	``on_after_model`` (``_order=92`` — after the R2 keepalive at 91, so on a turn
+58	the keepalive is handling we still simply record the signature and, because the
+59	keepalive already queued its own nudge, we defer our own to a later step):
+60	
+61	  * Compute a *signature* of the assistant turn: a normalised prefix of the
+62	    text content (lowercased, whitespace-collapsed, first ``sig_chars`` chars).
+63	    Turns with empty content are ignored.
+64	  * Push the signature onto a bounded rolling deque per run and count how many
+65	    of the last ``window`` signatures equal the current one.
+66	  * When that count reaches ``repeat_threshold`` AND the per-run intervention
+67	    budget (``max_interventions``) is not spent AND no redirect is already
+68	    pending, queue exactly one redirect message and reset the local repeat
+69	    tally so the next intervention only fires after a *fresh* run of repeats.
+70	
+71	``on_before_model`` delivers the queued redirect as exactly one ``user``
+72	message, and only when the prior message role is not ``user`` (contract-safe
+73	+1 insertion). In a loop the prior turn ends on a ``tool`` result, so this
+74	holds. If the last role is already ``user`` (e.g. another processor just added
+75	one) we keep the redirect pending and deliver it next step rather than risk a
+76	+2 chain violation.
+77	
+78	Contract notes
+79	--------------
+80	- Only ``on_after_model`` reads the response; it never mutates message history
+81	  from that hook. It does not touch ``tool_calls`` — the agent's own command
+82	  still runs this step; the redirect lands on the *following* model call.
+83	- ``on_before_model`` appends at most one ``user`` message, guarded on the
+84	  last-role-not-user rule, satisfying the +1 insertion contract.
+85	- No task-specific literals: the signature logic and redirect text are generic
+86	  terminal-agent guidance keyed on repetition, applicable to any task.
+87	"""
+88	
+89	from __future__ import annotations
+90	
+91	import dataclasses
+92	import re
+93	from collections import deque
+94	
+95	from harnessx.core.events import (
+96	    ModelResponseEvent,
+97	    TaskStartEvent,
+98	    TaskEndEvent,
+99	    BeforeModelEvent,
+100	    Message,
+101	)
+102	from harnessx.core.processor import MultiHookProcessor
+103	
+104	_WS = re.compile(r"\s+")
+105	
+106	_REDIRECT_MSG = (
+107	    "STOP. You have repeated essentially the same analysis / command several "
+108	    "times now without making progress — you are in a loop. Repeating the same "
+109	    "reasoning will not change the result.\n\n"
+110	    "Break the loop now by doing BOTH of the following, in order:\n"
+111	    "  1. If the task names an output file you must produce, write your CURRENT "
+112	    "best answer to that exact path via the Bash tool immediately (a partial or "
+113	    "best-effort result is strictly better than no file), then `ls -l` it to "
+114	    "confirm it exists.\n"
+115	    "  2. Then take a GENUINELY DIFFERENT next step — do not re-run the command "
+116	    "you just ran. Change tool, inspect a different file, test a different "
+117	    "hypothesis, or simplify your approach. State in one short line what is new "
+118	    "about this attempt before running it.\n\n"
+119	    "Do not restate your previous reasoning; act differently."
+120	)
+121	
+122	
+123	class SemanticLoopBreaker(MultiHookProcessor):
+124	    """Detect a repeated-reasoning loop and inject a bounded strategy-change
+125	    redirect that also asks the agent to commit its best current output.
+126	
+127	    Args:
+128	        repeat_threshold: How many times the same assistant-content signature
+129	            must appear within the rolling ``window`` before a redirect fires.
+130	            R4 evidence: passing tasks stay <= 2; stuck tasks reach 3..48, so a
+131	            value of 4 sits above the healthy band and below the stuck band.
+132	        window: Size of the rolling signature history examined for repeats.
+133	        sig_chars: Number of leading characters (after normalisation) used to
+134	            form the content signature. Long enough to distinguish distinct
+135	            reasoning, short enough that trivial tail edits still collapse to
+136	            the same signature.
+137	        max_interventions: Per-run cap on how many redirects are injected. Kept
+138	            small so a genuinely-progressing agent that happens to phrase two
+139	            turns similarly is not spammed, and so we never spin forever.
+140	        min_sig_chars: Ignore turns whose normalised content is shorter than
+141	            this (empty / one-word acknowledgements are not loop evidence).
+142	    """
+143	
+144	    required_providers: frozenset = frozenset()
+145	
+146	    _singleton_group = "tb2_semantic_loop_breaker"
+147	    # After the R2 ActLoopKeepalive (_order=91): on a no-tool-call stall the
+148	    # keepalive handles the turn and queues its own nudge; we only record the
+149	    # signature there and defer our redirect, avoiding a +2 before_model chain.
+150	    _order = 92
+151	
+152	    def __init__(
+153	        self,
+154	        repeat_threshold: int = 4,
+155	        window: int = 8,
+156	        sig_chars: int = 80,
+157	        max_interventions: int = 3,
+158	        min_sig_chars: int = 12,
+159	    ) -> None:
+160	        self.repeat_threshold = max(2, int(repeat_threshold))
+161	        self.window = max(self.repeat_threshold, int(window))
+162	        self.sig_chars = max(16, int(sig_chars))
+163	        self.max_interventions = max(0, int(max_interventions))
+164	        self.min_sig_chars = max(0, int(min_sig_chars))
+165	        # Per-run state, keyed by run_id so parallel workers sharing the
+166	        # singleton track independently.
+167	        self._history: dict[str, deque] = {}
+168	        self._interventions: dict[str, int] = {}
+169	        self._pending: dict[str, str] = {}
+170	
+171	    # -- helpers ---------------------------------------------------------
+172	
+173	    def _signature(self, content: str) -> str:
+174	        norm = _WS.sub(" ", (content or "").strip().lower())
+175	        if len(norm) < self.min_sig_chars:
+176	            return ""
+177	        return norm[: self.sig_chars]
+178	
+179	    # -- lifecycle -------------------------------------------------------
+180	
+181	    async def on_task_start(self, event: TaskStartEvent):
+182	        self._history.pop(event.run_id, None)
+183	        self._interventions.pop(event.run_id, None)
+184	        self._pending.pop(event.run_id, None)
+185	        yield event
+186	
+187	    async def on_task_end(self, event: TaskEndEvent):
+188	        self._history.pop(event.run_id, None)
+189	        self._interventions.pop(event.run_id, None)
+190	        self._pending.pop(event.run_id, None)
+191	        yield event
+192	
+193	    # -- deliver queued redirect ----------------------------------------
+194	
+195	    async def on_before_model(self, event: BeforeModelEvent):
+196	        msg = self._pending.get(event.run_id, "")
+197	        if not msg:
+198	            yield event
+199	            return
+200	        msgs = tuple(event.messages)
+201	        # Contract-safe +1: only add when the last role is not already 'user'
+202	        # (avoids a +2 chain if another processor added a user message first).
+203	        if msgs and msgs[-1].role == "user":
+204	            # Keep it pending; deliver on a later step.
+205	            yield event
+206	            return
+207	        self._pending.pop(event.run_id, None)
+208	        yield dataclasses.replace(
+209	            event,
+210	            messages=msgs + (Message(role="user", content=msg),),
+211	        )
+212	
+213	    # -- detect repeated-reasoning loop ---------------------------------
+214	
+215	    async def on_after_model(self, event: ModelResponseEvent):
+216	        run_id = event.run_id
+217	        sig = self._signature(event.content or "")
+218	        if not sig:
+219	            yield event
+220	            return
+221	
+222	        hist = self._history.get(run_id)
+223	        if hist is None:
+224	            hist = deque(maxlen=self.window)
+225	            self._history[run_id] = hist
+226	
+227	        # Count occurrences of this signature already in the recent window
+228	        # (before appending the current turn), then append.
+229	        recent_count = sum(1 for s in hist if s == sig)
+230	        hist.append(sig)
+231	        occurrences = recent_count + 1  # including the current turn
+232	
+233	        if occurrences < self.repeat_threshold:
+234	            yield event
+235	            return
+236	
+237	        # Loop detected. Respect the per-run intervention budget and avoid
+238	        # stacking a second pending redirect.
+239	        used = self._interventions.get(run_id, 0)
+240	        if used >= self.max_interventions or self._pending.get(run_id):
+241	            yield event
+242	            return
+243	
+244	        self._interventions[run_id] = used + 1
+245	        self._pending[run_id] = _REDIRECT_MSG
+246	        # Reset the signature history so the next intervention only fires after
+247	        # a fresh run of repeats (prevents firing every subsequent turn).
+248	        hist.clear()
+249	        yield event

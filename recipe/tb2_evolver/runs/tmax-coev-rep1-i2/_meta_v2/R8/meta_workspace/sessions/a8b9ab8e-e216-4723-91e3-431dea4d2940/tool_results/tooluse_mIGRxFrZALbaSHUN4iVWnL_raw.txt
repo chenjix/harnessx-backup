@@ -1,0 +1,232 @@
+1	---
+2	name: journal
+3	description: Cross-round journal format — the multi-round memory that tells the next meta-agent what's been tried, what landed, and what got reverted. One `## Round N` section per evolve, with machine-parseable YAML frontmatter + free prose body. Read at the start of every evolve to avoid re-discovering doomed hypotheses; append one new section before stopping.
+4	---
+5	
+6	# Journal — cross-round memory
+7	
+8	A markdown file (the caller passes its path as `memo_path`). Each
+9	evolve appends one `## Round N — <label>` section. The file is the
+10	meta-agent's only memory across rounds — there is no persistent
+11	conversation, and the orchestrator fills in gating outcomes between
+12	rounds so the next agent can see which past bets paid off.
+13	
+14	The orchestrator pre-renders a machine index at
+15	`_meta_scratch/CONTEXT.md` (when the journal has prior entries):
+16	lever scoreboard, recent hypotheses, reverted bets. Read that
+17	first — it's a cheap way to see what's been tried without scanning
+18	the full journal prose.
+19	
+20	## On entry — read once
+21	
+22	1. `Read <memo_path>` — full cross-round history, prose included.
+23	2. `Read _meta_scratch/CONTEXT.md` (when present) — compact index of
+24	   lever usage, attribution, and reverted hypotheses.
+25	
+26	Look for:
+27	- Hypotheses with `gating_outcome: reverted` → do not re-propose
+28	  without new evidence (hard invariant #4 variant).
+29	- The lever scoreboard's prediction hit rate → if Action landed
+30	  1/12 times while Instruction landed 4/6, update your prior.
+31	- Outstanding `needs_from_human` items (free-prose; scan for them).
+32	
+33	## On exit — append one section
+34	
+35	Required shape:
+36	
+37	```markdown
+38	## Round N — <short label in 2-5 words>
+39	
+40	<!-- journal:frontmatter
+41	round: N
+42	timestamp: 2026-04-27T15:30:00Z    # ISO-8601 UTC; orchestrator can override
+43	hypothesis_id: h_<short slug>      # stable across related rounds
+44	levers: [action]                   # subset of {configuration, control, action, instruction}
+45	predicted_affected: [task_a, task_b]
+46	gating_outcome: pending             # orchestrator back-fills next round
+47	gating_attribution: pending         # orchestrator back-fills next round
+48	expected_global_gain: "<one-line cluster-level upside>"
+49	regression_risk: "<main risk outside predicted_affected>"
+50	cost_shift: "<expected token/cost delta or direction>"
+51	rollback_trigger: "<observable signal to revert next round>"
+52	-->
+53	
+54	### Why
+55	
+56	One paragraph on the pattern that motivated the round — the
+57	cluster of trajectories and the shape they share.
+58	
+59	### Changes
+60	
+61	- `tools/<name>.py` — new @tool, one-line signature description
+62	- `config.yaml` — register above under `tools.custom`
+63	
+64	### Evidence
+65	
+66	- `task_a` frontmatter: `judge_missing_capability.summary: "<gap phrase>"`
+67	- `task_a` step <n> body: `<40-char quote showing the failure shape>`
+68	- `task_b` exit_reason=max_steps, <n>/<max_steps> spent on the same
+69	  pattern
+70	
+71	### Uncertainty
+72	
+73	One-liner on what might go wrong and how you'd know.
+74	```
+75	
+76	## Frontmatter keys — all required
+77	
+78	- **`round`** (int) — monotonic round index.
+79	- **`timestamp`** (ISO-8601 UTC string) — when appended.
+80	- **`hypothesis_id`** (string slug) — short, stable across related
+81	  rounds. Prefer semantic ids that name the intervention shape
+82	  (e.g. `h_<cluster>_v1`, `h_<tool_name>_retry_v2`) over
+83	  auto-generated ones. If a later round extends the same
+84	  hypothesis, reuse the same id with a version suffix.
+85	- **`levers`** (list) — subset of
+86	  `{configuration, control, action, instruction}`.
+87	- **`predicted_affected`** (list of task_ids) — the task ids you
+88	  claim this round's change should flip from F to T (for
+89	  corrective / preservative-transfer candidates) or protect from
+90	  T→F regression (for preservative-lock candidates). Lists with
+91	  zero entries are legitimate when the claim is about cost, not
+92	  pass-rate. Preservative-lock candidates can list their
+93	  currently-passing cluster here to make the "don't regress these"
+94	  claim explicit. Over-predicting hurts your attribution score;
+95	  the orchestrator grades this.
+96	- **`gating_outcome`** (string) — `pending` on first write. The
+97	  orchestrator fills with `accepted` / `reverted` / `noop` after
+98	  the benchmark round runs.
+99	- **`gating_attribution`** (dict | string) — `pending` on first
+100	  write. The orchestrator fills with
+101	  `{task_id: flipped|still_F|regressed|still_T}` after evaluation.
+102	- **`expected_global_gain`** (string) — one-line claim of global
+103	  upside (cluster-level, not single-task anecdote). For
+104	  corrective / preservative-transfer candidates: "flips N tasks
+105	  in cluster X". For preservative-lock candidates: "prevents
+106	  expected regression of N tasks if future rounds drift" — this
+107	  is a legitimate gain even with zero flips.
+108	- **`regression_risk`** (string) — primary collateral risk outside
+109	  `predicted_affected`.
+110	- **`cost_shift`** (string) — expected cost/tokens movement if this
+111	  change lands.
+112	- **`rollback_trigger`** (string) — concrete signal that means "revert
+113	  this hypothesis" next round.
+114	
+115	## Frontmatter keys — required conditionally
+116	
+117	- **`cited_candidates`** (list of strings) — **required when the
+118	  round's config changes** (the orchestrator's evidence gate
+119	  enforces it). Lists the `C-NNN` IDs from `_meta_scratch/candidates.md`
+120	  that motivated this round's changes. Example:
+121	  `cited_candidates: [C-001, C-004]`. See the `analyze` skill for
+122	  the `candidates.md` format. Omit entirely on noop rounds (byte-
+123	  identical config copy) — they don't need evidence.
+124	- **`retry_rationale`** (string) — required only if your
+125	  `(levers, predicted_affected)` signature matches a reverted round.
+126	  One-line explanation of what evidence is new since the last try,
+127	  e.g. `retry_rationale: "R3 tried instruction-only; this round
+128	  found tool_error_counts spike for WebFetch that the prior attempt
+129	  ignored"`. Skip when your signature is novel. See the novelty
+130	  findings file (`_meta_scratch/NOVELTY_FAIL.md`) if the gate
+131	  rejects your round — it names the colliding prior round.
+132	
+133	## Prose body — four suggested headings, not enforced
+134	
+135	The parser ignores the prose. These headings exist for consistency:
+136	
+137	- **`### Why`** — the cluster of trajectories and the pattern
+138	  they share. For corrective rounds: the failure shape. For
+139	  preservative-lock rounds: the habit present in the passing
+140	  cluster that would be at risk without the encoding. For
+141	  preservative-transfer rounds: the habit fired on the passing
+142	  cluster + absent on the failing cluster.
+143	- **`### Changes`** — bulleted list, one bullet per authored file
+144	  or config edit.
+145	- **`### Evidence`** — quoted frontmatter or body excerpts with
+146	  `task_id` citations. Hand-wavy "several tasks did X" is not
+147	  evidence. Preservative-transfer rounds must cite both ends
+148	  (passing cluster body + failing cluster body), consistent with
+149	  `candidates.md`.
+150	- **`### Uncertainty`** — what might fail and how you'd tell.
+151	
+152	Include the same four signals in prose when stakes are high:
+153	`expected_global_gain`, `regression_risk`, `cost_shift`,
+154	`rollback_trigger`. This makes Pareto-style tradeoffs explicit across
+155	rounds instead of implicit in vague narratives.
+156	
+157	Write more when the round is high-stakes, less when it's a small
+158	config nudge. Don't abbreviate the frontmatter — that's what the
+159	orchestrator reads.
+160	
+161	## Rules
+162	
+163	- **Append, never edit prior sections.** The orchestrator DOES edit
+164	  prior sections — it back-fills `gating_outcome` and
+165	  `gating_attribution` surgically without touching prose. You, as
+166	  the agent, never rewrite an old round.
+167	- **Cite task ids + field or body quote** in Evidence. Vague is bad.
+168	- **Do not re-propose reverted hypotheses** without a specific
+169	  reason the prior attempt was buggy (not "the idea was right but
+170	  my implementation wasn't" — come back with a different shape, a
+171	  different lever, or more evidence).
+172	- **Multi-lever rounds are allowed** when the evidence warrants
+173	  (see `analyze` skill → *Multi-lever rounds*). List each change
+174	  under its own bullet in Changes and cite one candidate ID per
+175	  change in `cited_candidates`. Attribution is per-round, so
+176	  bundling *does* widen the ambiguity when gating — that's a
+177	  reason to keep each change independently supported (own
+178	  candidate, own cluster, own retroactive-check variant), not a
+179	  reason to drop to a single change per round.
+180	
+181	## Legacy compat
+182	
+183	Entries without the `<!-- journal:frontmatter ... -->` block are
+184	skipped by the machine parser but still render as prose for readers.
+185	Early rounds that predate the journal format will be invisible in
+186	`CONTEXT.md`'s scoreboard — that's fine, new rounds start fresh.
+187	
+188	## Example minimal append
+189	
+190	Small config tune, one gap, one lever. Because this changes the
+191	config (CostGuardProcessor kwargs), the entry must cite a candidate
+192	from `_meta_scratch/candidates.md`:
+193	
+194	```markdown
+195	## Round 3 — loosen cost guard
+196	
+197	<!-- journal:frontmatter
+198	round: 3
+199	timestamp: 2026-04-27T10:12:00Z
+200	hypothesis_id: h_cost_guard_v1
+201	levers: [configuration]
+202	predicted_affected: [task_42]
+203	cited_candidates: [C-001]
+204	gating_outcome: pending
+205	gating_attribution: pending
+206	expected_global_gain: "Should reduce budget_exceeded cluster on long-horizon tasks"
+207	regression_risk: "May increase cost on easy tasks that already pass"
+208	cost_shift: "+5-10% tokens expected on median run"
+209	rollback_trigger: "If pass_rate is flat/down and cost rises >10%, revert"
+210	-->
+211	
+212	### Why
+213	
+214	task_42 hit budget_exceeded at step 18/30 while still productively
+215	calling tools. CostGuardProcessor max_usd=0.5 is too tight for
+216	Level-3 tasks that require >20 WebFetch calls.
+217	
+218	### Changes
+219	
+220	- `config.yaml` — CostGuardProcessor max_usd 0.5 → 1.0
+221	
+222	### Evidence
+223	
+224	- `task_42` frontmatter: `exit_reason: budget_exceeded`, cost_usd: 0.51
+225	- `task_42` step 18 body: still making progress ("Found the relevant
+226	  Wikipedia section — let me fetch one more to confirm").
+227	
+228	### Uncertainty
+229	
+230	Looser cap may push the per-round bill up ~10%. If R4 pass_rate
+231	drops while cost climbs, revert.
+232	```

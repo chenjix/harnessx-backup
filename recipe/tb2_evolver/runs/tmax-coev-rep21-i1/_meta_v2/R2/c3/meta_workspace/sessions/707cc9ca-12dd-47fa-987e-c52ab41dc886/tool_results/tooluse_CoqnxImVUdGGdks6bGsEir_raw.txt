@@ -1,0 +1,117 @@
+73	
+74	## Round 2 — infra container conflict, no-op
+75	
+76	<!-- journal:frontmatter
+77	round: 2
+78	timestamp: 2026-04-27T15:30:00Z
+79	hypothesis_id: h_no_harness_fix_container_conflict_v1
+80	levers: []
+81	predicted_affected: []
+82	gating_outcome: noop
+83	gating_attribution: noop
+84	expected_global_gain: "None — the assigned failure is a pre-harness docker startup error, not addressable by config; no-op protects the 30 currently-running tasks from a fabricated change."
+85	regression_risk: "None — byte-for-byte copy of current_config."
+86	cost_shift: "Zero — no change."
+87	rollback_trigger: "N/A (no-op)."
+88	-->
+89	
+90	### Why
+91	
+92	Assigned focus `task_000140_01c78b42` fails with `status: error`,
+93	`elapsed_s: 0.7`, `agent: null`, `final_pytest: null`, and NO
+94	`messages.json` — the agent phase never ran. The error is a Docker
+95	container-name conflict at `docker run` time:
+96	`Conflict. The container name "/tmax-task00014001c78b42-<ts>" is
+97	already in use ...`. A stale container from a prior run was not reaped
+98	before re-launch. This happens in `recipe/tmax_eval/docker_env.py`
+99	(read-only), strictly *before* any HarnessConfig processor / tool /
+100	system prompt loads. It is the SAME error on 19/50 tasks this round
+101	(000028, 000140, 000264, 000329, 000338, 000505, 000536, 000748,
+102	000760, 000863, 000912, 000956, 001088, 001264, 001653, 001697,
+103	001701, 001706, 001761) — systemic infra, not a per-task capability
+104	or harness-mechanism gap.
+105	
+106	### Changes
+107	
+108	- `config.yaml` — byte-for-byte copy of R1 `current_config` (explicit
+109	  no-op). Canonicalizes: `{"ok": true, "checked_templates": 0}`.
+110	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — flags the runner
+111	  stale-container-reap bug and its 19 affected tasks for a human fix
+112	  outside the evolvable surface.
+113	
+114	### Evidence
+115	
+116	- `task_000140_01c78b42.result.json`: `"status": "error"`,
+117	  `"elapsed_s": 0.7`, `"agent": null`, `"error": "RuntimeError: docker
+118	  run failed ... Conflict. The container name ... is already in use"`.
+119	- No `task_000140_01c78b42.messages.json` exists — agent never
+120	  executed, so no processor/prompt hook could have fired.
+121	- 19/50 result.json files share the identical `docker run failed ...
+122	  Conflict` error string — confirms systemic, not task-local.
+123	
+124	### Uncertainty
+125	
+126	If a future round's runner reaps stale containers, these 19 tasks will
+127	begin actually executing the agent and their *real* pass/fail behaviour
+128	(and any genuine harness gaps) will become visible for the first time.
+129	Until then, no config lever can move `task_000140`.
+130	
+131	## Round 2 — docker infra flake, no-op
+132	
+133	<!-- journal:frontmatter
+134	round: 2
+135	timestamp: 2026-04-27T15:30:00Z
+136	hypothesis_id: h_docker_conflict_noop_v1
+137	levers: []
+138	predicted_affected: []
+139	gating_outcome: noop
+140	gating_attribution: noop
+141	expected_global_gain: "None — assigned failure is infra, not config-addressable; no-op protects the 30 tasks that ran"
+142	regression_risk: "None — config + system_prompt copied byte-for-byte from R1"
+143	cost_shift: "Zero"
+144	rollback_trigger: "N/A (no-op)"
+145	-->
+146	
+147	### Why
+148	
+149	Assigned focus `task_000028_7fe033ac` did NOT fail on a model or harness
+150	capability gap. Its `result.json` is `status=error`, `elapsed_s=0.8`,
+151	`agent=null`, `final_pytest=null`, with error `docker run failed ... Conflict.
+152	The container name "/tmax-task0000287fe033ac-1788159877" is already in use`.
+153	The agent phase never started. `config.yaml` governs only the in-agent
+154	processor/prompt surface; nothing it can express touches a container that
+155	dies before the run loop boots. This is a docker orchestration flake, not a
+156	harness deficiency. It is systemic: **19 of 50 tasks (38%)** errored with the
+157	identical container-name Conflict this round (full list in
+158	`_meta_scratch/NEEDS_FROM_HUMAN.md`). Notably `task_000140_01c78b42` — R1's
+159	sole predicted-affected task — is among the 19, so R1's attribution for the
+160	lingering-process guard is unreliable: that task never ran the agent this
+161	round.
+162	
+163	### Changes
+164	
+165	- `config.yaml` — copied byte-for-byte from R1 (md5 f3266f41...). Explicit no-op.
+166	- `system_prompt.txt` — copied byte-for-byte from R1 (md5 914fb4a8...).
+167	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — diagnosis + suggested human-side fixes
+168	  (all in read-only `recipe/tmax_eval/docker_env.py::start_container`: pre-run
+169	  `docker rm -f`, uuid suffix instead of `int(time.time())`, between-run
+170	  sweep, or retry-on-Conflict).
+171	
+172	### Evidence
+173	
+174	- `task_000028_7fe033ac` result.json: `status="error"`, `elapsed_s=0.8`,
+175	  `agent=null`, `error="... Conflict. The container name ... already in use"`.
+176	- Root cause: `docker_env.py::start_container` names containers
+177	  `f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"[:63]` — collides
+178	  when a prior attempt's container wasn't `docker rm`'d or two attempts land in
+179	  the same integer second.
+180	- Batch: 19/50 error tasks share the identical Conflict signature (ok=30,
+181	  error=19, agent_error=1).
+182	
+183	### Uncertainty
+184	
+185	If the human applies a docker-cleanup fix, several of these 19 "failures" may
+186	resolve to genuine pass/fail and the real config gaps become visible. Until
+187	then, ~38% of this benchmark's failures are infra noise that corrupts every
+188	hypothesis's attribution signal — including R1's. No config change is
+189	warranted this round.

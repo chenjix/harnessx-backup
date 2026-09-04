@@ -1,0 +1,47 @@
+57	    async def exec(
+58	        self,
+59	        command: str,
+60	        cwd: str | None = None,
+61	        timeout: float = 30.0,
+62	    ) -> str:
+63	        """Run a shell command.  Returns combined stdout + stderr string."""
+64	
+65	    async def read_file(self, path: str) -> str:
+66	        """Return file contents.  *path* must be an absolute path."""
+67	        return await self.exec(f"cat -- {path!r}", cwd="/")
+68	
+69	    async def write_file(self, path: str, content: str) -> None:
+70	        """Write *content* to *path*.  Creates parent directories as needed.
+71	        *path* must be an absolute path."""
+72	        parent = str(Path(path).parent)
+73	        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+74	        await self.exec(f"mkdir -p {parent!r} && echo {encoded!r} | base64 -d > {path!r}", cwd="/")
+75	
+76	    async def list_dir(self, path: str) -> list[str]:
+77	        """Return directory entries as strings (dirs suffixed with ``/``).
+78	        *path* must be an absolute path."""
+79	        result = await self.exec(f"ls -p -- {path!r}", cwd="/")
+80	        return [line.strip() for line in result.splitlines() if line.strip()]
+81	
+82	    async def kill_running(self) -> None:
+83	        """Best-effort: kill all processes currently running inside this sandbox.
+84	
+85	        Called by the Bash tool after a command timeout to prevent orphaned
+86	        processes (e.g. a training loop) from consuming resources and eventually
+87	        crashing the container via OOM.
+88	
+89	        Default implementation is a no-op.  Container-backed sandboxes should
+90	        override this to send SIGTERM/SIGKILL to all container processes.
+91	        """
+92	
+93	    def resolve(self, path: str) -> str:
+94	        """Resolve *path* relative to :attr:`workspace_path`.
+95	
+96	        If *path* is already absolute it is returned as-is.
+97	        Subclasses may add jail-checking here (see ``LocalSandbox``).
+98	        """
+99	        if Path(path).is_absolute():
+100	            return path
+101	        return str(Path(self.workspace_path) / path)
+
+[Showing lines 57–101 of 190 total. Use offset=101 to read the next section.]

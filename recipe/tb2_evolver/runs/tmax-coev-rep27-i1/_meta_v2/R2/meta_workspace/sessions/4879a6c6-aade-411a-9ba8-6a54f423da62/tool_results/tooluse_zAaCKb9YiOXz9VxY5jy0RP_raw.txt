@@ -1,0 +1,35 @@
+=== task_000140 messages (task desc + last steps) ===
+num msgs 42
+--- user
+You are a site administrator responsible for managing user accounts and provisioning virtual machines. You have inherited a partially written Go service that is supposed to act as an internal network API to provision user VMs using a QEMU mock script. However, the service fails to run correctly due to network routing issues in the Go code, and when it does run, it fails to execute the provisioning script properly because of environment differences (a PATH issue).
+
+Your task is to fix the service, its deployment script, and create a CI/CD test script to verify it.
+
+1. **Fix the Go Service (`/home/user/app/main.go`)**:
+   - The Go application should listen on TCP port `8080`.
+   - It needs an HTTP POST endpoint at `/provision` that accepts a form value named `username`.
+   - Upon receiving a request, the handler must execute the external command `qemu-mock` with the `username` as its single argument.
+   - Wait for the command to complete and return an HTTP 200 status.
+
+2. **Fix the Service Supervisor Script (`/home/user/start_service.sh`)**:
+   - This script acts as our service lifecycle manager (init script).
+   - It currently builds the Go app and runs it in the background, but the Go app fails to find `qemu-mock` when executed.
+   - The `qemu-mock` binary is located in `/home/user/bin/`. You must modify `start_service.sh` to ensure the Go application's environment has `/home/user/bin/` prioritized in its `PATH`.
+   - The script must save the running Go application's process ID (PID) to `/home/user/service.pid`.
+
+3. **Construct a CI/CD Test Pipeline (`/home/user/test_pipeline.sh`)**:
+   - Create a bash script that automates the deployment and testing process.
+   - It must execute `/home/user/start_service.sh`.
+   - It must wait for the service to start listening on port 8080 (e.g., using a short sleep or a loop).
+   - It must use `curl` to send a POST request to `http://localhost:8080/provision` with the form data `username=admin_alice`.
+   - Finally, it must gracef
+--- assistant
+Let me break down the task:
+
+1. Fix the Go service (`/home/user/app/main.go`) - needs to listen on port 8080, have a POST endpoint at `/provision` that accepts `username` form value, execute `qemu-mock` with username as argument, return HTTP 200.
+
+2. Fix the service supervisor script (`/home/user/start_service.sh`) - needs to build the Go app, run it in background, ensure PATH includes `/home/user/bin/`, save PID to `/home/user/service.pid`.
+
+3. Create CI/CD test pipeline (`/home/user/test_pipeline.sh`) - runs start_service.sh, waits for service, curls POST request, kills service.
+
+Let me first inspect the existing files to understand what's there.

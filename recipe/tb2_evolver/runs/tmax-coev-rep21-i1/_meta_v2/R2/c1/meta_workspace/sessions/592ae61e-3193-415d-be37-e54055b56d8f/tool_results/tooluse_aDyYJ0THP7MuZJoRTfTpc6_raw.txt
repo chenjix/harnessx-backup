@@ -1,0 +1,196 @@
+65	The guard depends on the agent acting on the injected warning within its
+66	remaining turn budget; a very-late exit could leave no room to `kill`. It is
+67	strictly informational to avoid regressing tasks that must keep a single
+68	service alive (system prompt explicitly instructs that), and it fires only on
+69	duplicates, so false positives on legitimate single-service tasks are
+70	unit-test-confirmed to be zero. If R2 shows a background-service task
+71	flipping T->F, the ordering/keepalive interaction with self-verify is the
+72	first suspect — revert.
+73	
+74	## Round 2 — infra container conflict, no-op
+75	
+76	<!-- journal:frontmatter
+77	round: 2
+78	timestamp: 2026-04-27T15:30:00Z
+79	hypothesis_id: h_no_harness_fix_container_conflict_v1
+80	levers: []
+81	predicted_affected: []
+82	gating_outcome: noop
+83	gating_attribution: noop
+84	expected_global_gain: "None — the assigned failure is a pre-harness docker startup error, not addressable by config; no-op protects the 30 currently-running tasks from a fabricated change."
+85	regression_risk: "None — byte-for-byte copy of current_config."
+86	cost_shift: "Zero — no change."
+87	rollback_trigger: "N/A (no-op)."
+88	-->
+89	
+90	### Why
+91	
+92	Assigned focus `task_000140_01c78b42` fails with `status: error`,
+93	`elapsed_s: 0.7`, `agent: null`, `final_pytest: null`, and NO
+94	`messages.json` — the agent phase never ran. The error is a Docker
+95	container-name conflict at `docker run` time:
+96	`Conflict. The container name "/tmax-task00014001c78b42-<ts>" is
+97	already in use ...`. A stale container from a prior run was not reaped
+98	before re-launch. This happens in `recipe/tmax_eval/docker_env.py`
+99	(read-only), strictly *before* any HarnessConfig processor / tool /
+100	system prompt loads. It is the SAME error on 19/50 tasks this round
+101	(000028, 000140, 000264, 000329, 000338, 000505, 000536, 000748,
+102	000760, 000863, 000912, 000956, 001088, 001264, 001653, 001697,
+103	001701, 001706, 001761) — systemic infra, not a per-task capability
+104	or harness-mechanism gap.
+105	
+106	### Changes
+107	
+108	- `config.yaml` — byte-for-byte copy of R1 `current_config` (explicit
+109	  no-op). Canonicalizes: `{"ok": true, "checked_templates": 0}`.
+110	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — flags the runner
+111	  stale-container-reap bug and its 19 affected tasks for a human fix
+112	  outside the evolvable surface.
+113	
+114	### Evidence
+115	
+116	- `task_000140_01c78b42.result.json`: `"status": "error"`,
+117	  `"elapsed_s": 0.7`, `"agent": null`, `"error": "RuntimeError: docker
+118	  run failed ... Conflict. The container name ... is already in use"`.
+119	- No `task_000140_01c78b42.messages.json` exists — agent never
+120	  executed, so no processor/prompt hook could have fired.
+121	- 19/50 result.json files share the identical `docker run failed ...
+122	  Conflict` error string — confirms systemic, not task-local.
+123	
+124	### Uncertainty
+125	
+126	If a future round's runner reaps stale containers, these 19 tasks will
+127	begin actually executing the agent and their *real* pass/fail behaviour
+128	(and any genuine harness gaps) will become visible for the first time.
+129	Until then, no config lever can move `task_000140`.
+130	
+131	## Round 2 — docker infra flake, no-op
+132	
+133	<!-- journal:frontmatter
+134	round: 2
+135	timestamp: 2026-04-27T15:30:00Z
+136	hypothesis_id: h_docker_conflict_noop_v1
+137	levers: []
+138	predicted_affected: []
+139	gating_outcome: noop
+140	gating_attribution: noop
+141	expected_global_gain: "None — assigned failure is infra, not config-addressable; no-op protects the 30 tasks that ran"
+142	regression_risk: "None — config + system_prompt copied byte-for-byte from R1"
+143	cost_shift: "Zero"
+144	rollback_trigger: "N/A (no-op)"
+145	-->
+146	
+147	### Why
+148	
+149	Assigned focus `task_000028_7fe033ac` did NOT fail on a model or harness
+150	capability gap. Its `result.json` is `status=error`, `elapsed_s=0.8`,
+151	`agent=null`, `final_pytest=null`, with error `docker run failed ... Conflict.
+152	The container name "/tmax-task0000287fe033ac-1788159877" is already in use`.
+153	The agent phase never started. `config.yaml` governs only the in-agent
+154	processor/prompt surface; nothing it can express touches a container that
+155	dies before the run loop boots. This is a docker orchestration flake, not a
+156	harness deficiency. It is systemic: **19 of 50 tasks (38%)** errored with the
+157	identical container-name Conflict this round (full list in
+158	`_meta_scratch/NEEDS_FROM_HUMAN.md`). Notably `task_000140_01c78b42` — R1's
+159	sole predicted-affected task — is among the 19, so R1's attribution for the
+160	lingering-process guard is unreliable: that task never ran the agent this
+161	round.
+162	
+163	### Changes
+164	
+165	- `config.yaml` — copied byte-for-byte from R1 (md5 f3266f41...). Explicit no-op.
+166	- `system_prompt.txt` — copied byte-for-byte from R1 (md5 914fb4a8...).
+167	- `_meta_scratch/NEEDS_FROM_HUMAN.md` — diagnosis + suggested human-side fixes
+168	  (all in read-only `recipe/tmax_eval/docker_env.py::start_container`: pre-run
+169	  `docker rm -f`, uuid suffix instead of `int(time.time())`, between-run
+170	  sweep, or retry-on-Conflict).
+171	
+172	### Evidence
+173	
+174	- `task_000028_7fe033ac` result.json: `status="error"`, `elapsed_s=0.8`,
+175	  `agent=null`, `error="... Conflict. The container name ... already in use"`.
+176	- Root cause: `docker_env.py::start_container` names containers
+177	  `f"tmax-{task_id.replace('_','')[:20]}-{int(time.time())}"[:63]` — collides
+178	  when a prior attempt's container wasn't `docker rm`'d or two attempts land in
+179	  the same integer second.
+180	- Batch: 19/50 error tasks share the identical Conflict signature (ok=30,
+181	  error=19, agent_error=1).
+182	
+183	### Uncertainty
+184	
+185	If the human applies a docker-cleanup fix, several of these 19 "failures" may
+186	resolve to genuine pass/fail and the real config gaps become visible. Until
+187	then, ~38% of this benchmark's failures are infra noise that corrupts every
+188	hypothesis's attribution signal — including R1's. No config change is
+189	warranted this round.
+190	
+191	## Round 2 — command-keyed loop breaker (c3)
+192	
+193	<!-- journal:frontmatter
+194	round: 2
+195	timestamp: 2026-04-27T15:30:00Z
+196	hypothesis_id: h_repeated_toolcall_recovery_v1
+197	levers: [control]
+198	predicted_affected: [task_000118_3043e92d]
+199	cited_candidates: [C-002]
+200	gating_outcome: pending
+201	gating_attribution: pending
+202	expected_global_gain: "Closes the drift-immune subset of the stuck-loop cluster: loops on polling commands (ps/du/top/date/tail) whose output ticks a PID/RSS/timestamp so the existing result-keyed guard never fires; returns wasted step budget so the agent can iterate"
+203	regression_risk: "False-positive nudge if a task legitimately re-runs the same command 3 times in a row; mitigated by threshold=3 (any interleaved different command resets), advisory-only injection, contract-clean"
+204	cost_shift: "Net negative-to-neutral: saves ~15-20 wasted model turns on loop-path tasks; adds nothing on the common path; worst case one short message on a rare legit-repeat-poll task"
+205	rollback_trigger: "If R3 pass_rate flat/down AND a previously-passing task regresses T-to-F with evidence the nudge interrupted a legitimate repeated poll, revert"
+206	-->
+207	
+208	### Why
+209	
+210	Assigned focus task_000118_3043e92d (system_administration) DID run the agent
+211	(this one is not an infra-conflict no-op). It fails final_pytest with peak log
+212	dir 203915264 bytes over the 45000000 threshold, but the harness deficiency is
+213	upstream: the agent spent about 20 consecutive turns emitting the byte-for-byte
+214	identical Bash call (ps aux piped to grep for worker_sim/python3) with identical
+215	narration and never fixed the monitor. The existing
+216	RepeatedCommandRecoveryProcessor did NOT catch this because it keys its
+217	fingerprint on the RESULT text, and the ps result drifted every call (monitor
+218	RSS column ticked 10288 up through 10380, STAT flipped between S and R). It saw
+219	about 20 distinct fingerprints, run-length stayed at 1, and it stayed silent.
+220	The loop only broke when PostCompaction fired, by which point most of the step
+221	budget was gone. This is the drift-immune subset of the stuck-loop cluster the
+222	R1 journal flagged as systemic (15/25 r0 failures had 4-plus consecutive
+223	identical calls).
+224	
+225	### Changes
+226	
+227	- processors/repeat_toolcall_recovery.py: new RepeatedToolCallRecoveryProcessor.
+228	  Fingerprints each call by (tool_name, tool_input) at on_before_tool (the cause
+229	  side), independent of result drift. Counts consecutive identical commands; at
+230	  repeat_threshold=3 injects one generic corrective user message (escalating
+231	  form after 2 more) telling the agent the repeated command is not advancing the
+232	  task and to take a materially different action. Message-injection only; never
+233	  blocks or kills; merges onto a trailing user message (contract-clean). Order 7,
+234	  adjacent to the existing result-keyed guard, before compaction.
+235	- config.yaml: copied from R1, added the new processor via absolute file:// path
+236	  right after RepeatedCommandRecoveryProcessor.
+237	- system_prompt.txt: copied byte-for-byte from R1 (unchanged).
+238	
+239	### Evidence
+240	
+241	- task_000118_3043e92d.messages.json steps ~1-28: identical assistant message
+242	  plus identical ps-grep call about 20 times; each tool result differs only in
+243	  the RSS column (10288..10380) and STAT flag, so the result-keyed guard
+244	  structurally cannot fire.
+245	- task_000118_3043e92d.result.json: agent.steps=56, finished=no_tool_calls,
+246	  final_pytest peak 203915264 over 45000000; the agent never re-ran the
+247	  deployment end-to-end to notice the overshoot.
+248	- Retroactive: keying on (tool_name, tool_input) reaches run-length 3 at the
+249	  3rd identical call, so the nudge fires after about 3 turns instead of 20-plus.
+250	
+251	### Uncertainty
+252	
+253	Fixing the loop returns budget but does not guarantee the model then writes a
+254	correct monitor (the 40MB-truncate-then-resume design still overshoots the 45MB
+255	peak on 20 workers times 10MB; that residual is a capability gap, not a harness
+256	one). The bet is that reclaimed iteration turns raise the odds the agent
+257	notices and fixes the overshoot, and more importantly that the guard
+258	generalizes across the polling-loop cluster benchmark-wide. If R3 shows a task
+259	regressing because a legitimate repeated poll got interrupted, that is the first
+260	suspect, revert.

@@ -1,0 +1,69 @@
+14:def _run(
+29:def image_tag(task_id: str, container_def: str) -> str:
+38:def _shared_base_tag() -> str | None:
+39:    """Tag of an image holding the preamble every taxonomy def repeats, if usable.
+42:    SHARED_BASE=1) to rebase task images onto it. Every taxonomy container_def is
+58:def _maybe_rebase(dockerfile: Path) -> None:
+72:def build_image(
+103:def start_container(task_id: str, image: str, *, network: str = "bridge") -> str:
+130:def stop_container(container: str, *, remove: bool = True) -> None:
+131:    _run(["docker", "kill", container], timeout=60)
+136:def exec_in(
+163:def write_file(container: str, path: str, content: str) -> None:
+183:def run_pytest(container: str, test_src: str, *, dest: str) -> dict[str, Any]:
+=== TOP of sandbox ===
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""Sandbox adapter: route HarnessX Bash tool calls into a live Tmax Docker container.
+
+Tmax owns container lifecycle (``docker_env.start_container`` / ``stop_container``);
+this provider is a no-op acquire/release wrapper, same pattern as HarborSandbox.
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+from harnessx.sandbox.base import Sandbox, SandboxProvider
+
+from . import docker_env
+
+if TYPE_CHECKING:
+    from harnessx.workspace.workspace import Workspace
+
+_OUTPUT_LIMIT = 12000
+_PGID_FILE = "/tmp/_hx_exec_pgid"
+
+
+class TmaxDockerSandbox(Sandbox):
+    """``Sandbox.exec`` → ``docker_env.exec_in`` on a pre-started container."""
+
+    def __init__(
+        self,
+        container: str,
+        workspace_path: str = "/home/user",
+        output_limit: int | None = _OUTPUT_LIMIT,
+    ) -> None:
+        self._container = container
+        self._workspace_path = workspace_path
+        self._output_limit = output_limit
+
+    @property
+    def workspace_path(self) -> str:
+        return self._workspace_path
+
+    def _trim(self, text: str) -> str:
+        if self._output_limit and len(text) > self._output_limit:
+            removed = len(text) - self._output_limit
+            return (
+                text[: self._output_limit]
+                + f"\n[...output truncated: {removed} chars not shown. "
+                "Use head/tail/grep to target specific output.]"
+            )
+        return text
+
+    async def kill_running(self) -> None:
+        try:
+            await asyncio.to_thread(
+                docker_env.exec_in,
+                self._container,

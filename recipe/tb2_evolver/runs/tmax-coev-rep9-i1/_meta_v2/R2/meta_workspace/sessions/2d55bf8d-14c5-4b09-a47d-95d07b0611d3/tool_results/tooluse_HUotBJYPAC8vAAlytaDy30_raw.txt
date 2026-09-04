@@ -1,0 +1,61 @@
+1	# Evolve Journal — tmax-coev-rep9-i1
+2	
+3	## Round 1 — hard-stop identical-command loops
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-06-27T00:00:00Z
+8	hypothesis_id: h_loop_detection_v1
+9	levers: [configuration]
+10	predicted_affected: [task_001031_a8f0eb37, task_000863_7acceb19, task_001321_658ce4a8]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=30/50; +2/-1 gained=task_000863_7acceb19,task_001090_c61c71f2 lost=task_001089_220cc46b; score 0.6000 >= incumbent(mean) 0.5800 - tol 0.0400
+14	expected_global_gain: "0 direct flips; eliminates a 98-min exit_reason=error runaway (task_001031) and ~1300s of budget-loop compute on 2 more tasks, freeing wall-clock and removing an error-exit that degrades run stability"
+15	regression_risk: "A false-positive loop trip on a legit passing task; measured max consecutive-identical Bash calls on any passing task = 3 (task_001089), raise threshold = 6, so risk is near-zero"
+16	cost_shift: "Strongly negative — truncates 20-38 wasted 120s-timeout tool calls; no added cost on passing tasks"
+17	rollback_trigger: "If pass_rate drops or any previously-passing task now exits loop_detected, revert"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 29/50 (0.58). Beyond the diverse capability failures (sysadmin 0/5,
+23	etc.), one structural harness deficiency dominated the wall-clock and stability
+24	picture: **byte-identical tool-call stalls with no hard stop**. task_001031
+25	ran for 5868s (98 min) and ended in `exit_reason=error` after emitting the
+26	exact same 2133-char reasoning + the byte-identical `cat > analyze.py` Bash
+27	command 38 times consecutively, each timing out at 120s. Two more tasks
+28	(task_000863, task_001321) hit the 80-step budget cap the same way (33x and
+29	20x identical consecutive Bash calls). The pipeline's `CustomEditToolProcessor`
+30	only emits a soft warning, which the model demonstrably ignored — it even
+31	narrated "I've been stuck in a loop" and kept issuing the identical command.
+32	
+33	### Changes
+34	
+35	- `config.yaml` — added `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+36	  with `warn_threshold=4`, `threshold=6`, `name_warn_threshold=10`,
+37	  `compaction_drop_threshold=5`. Strategy-1 (exact name+inputs fingerprint)
+38	  raises `LoopDetectedError` on the 6th consecutive byte-identical tool call →
+39	  clean `exit_reason=loop_detected` (runloop.py:781). No new code authored;
+40	  wiring an existing, tested processor.
+41	
+42	### Evidence
+43	
+44	- `task_001031_a8f0eb37`: `exit_reason=error`, `elapsed_s=5868`; messages.json
+45	  Counter shows the identical Bash arg repeated 38× (max_consec_identical=21),
+46	  each returning `Error: command timed out after 120s`.
+47	- `task_000863_7acceb19`: `budget_exceeded`, 80 steps, 741s; single Bash
+48	  command repeated 33× consecutively.
+49	- `task_001321_658ce4a8`: `budget_exceeded`, 80 steps, 620s; single command
+50	  repeated 20× consecutively.
+51	- Regression measurement across all 50 tasks: the only PASSING task reaching
+52	  ≥3 consecutive identical Bash args is `task_001089_220cc46b` at exactly 3;
+53	  none reach 4. raise=6 leaves a 2-call margin above the highest passing case.
+54	
+55	### Uncertainty
+56	
+57	These 3 tasks are capability failures and will still score 0 — the change is a
+58	containment/efficiency win, not a flip. The bet is that removing a 98-min
+59	error-runaway and 1300s of wasted loops improves overall run health with
+60	near-zero regression surface. If any previously-passing task now exits
+61	`loop_detected`, threshold=6 was too tight — revert or raise to 8.

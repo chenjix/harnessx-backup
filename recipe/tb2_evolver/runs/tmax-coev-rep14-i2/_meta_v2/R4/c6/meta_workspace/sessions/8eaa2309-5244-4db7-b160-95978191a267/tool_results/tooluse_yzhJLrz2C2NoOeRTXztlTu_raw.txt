@@ -1,0 +1,74 @@
+771	    event: Event,
+772	    processors: "list[Processor]",
+773	    tracer: "object | None" = None,
+774	    hook: str = "",
+775	) -> "list[Event]":
+776	    """Pass *event* through processors; return **every** yielded event.
+777	
+778	    Unlike ``pipe()``, no intermediate events are discarded.  Necessary when a
+779	    hook point may produce heterogeneous output — for example when a custom
+780	    ``after_model`` processor yields a ``ModelResponseEvent`` plus one or more
+781	    ``SpawnSubAgentEvent`` values.
+782	
+783	    Returns ``[event]`` when *processors* is empty (pass-through).
+784	    """
+785	    chain = ProcessorChain(*processors)
+786	    return [ev async for ev in chain.process(event, tracer=tracer, hook=hook)]
+787	
+788	
+789	# ─── Hook Decorators (syntax sugar for single-node Processors) ─────────────────
+790	
+791	
+792	def _make_hook_processor(fn: Callable, event_type: type) -> Processor:
+793	    """Wrap an async generator function into a Processor object."""
+794	
+795	    class HookProcessor:
+796	        async def process(self, event: Event) -> AsyncIterator[Event]:
+797	            if isinstance(event, event_type):
+798	                async for out in fn(event):
+799	                    yield out
+800	            else:
+801	                yield event
+802	
+803	    HookProcessor.__name__ = getattr(fn, "__name__", "HookProcessor")
+804	    return HookProcessor()
+805	
+806	
+807	def task_start(fn: Callable) -> Processor:
+808	    """Decorator: wrap async generator into TaskStartEvent processor."""
+809	    return _make_hook_processor(fn, TaskStartEvent)
+810	
+811	
+812	def step_start(fn: Callable) -> Processor:
+813	    """Decorator: wrap async generator into StepStartEvent processor."""
+814	    return _make_hook_processor(fn, StepStartEvent)
+815	
+816	
+817	def before_model(fn: Callable) -> Processor:
+818	    """Decorator: wrap async generator into BeforeModelEvent processor."""
+819	    return _make_hook_processor(fn, BeforeModelEvent)
+820	
+821	
+822	def after_model(fn: Callable) -> Processor:
+823	    """Decorator: wrap async generator into ModelResponseEvent processor."""
+824	    return _make_hook_processor(fn, ModelResponseEvent)
+825	
+826	
+827	def before_tool(fn: Callable) -> Processor:
+828	    """Decorator: wrap async generator into ToolCallEvent processor."""
+829	    return _make_hook_processor(fn, ToolCallEvent)
+830	
+831	
+832	def after_tool(fn: Callable) -> Processor:
+833	    """Decorator: wrap async generator into ToolResultEvent processor."""
+834	    return _make_hook_processor(fn, ToolResultEvent)
+835	
+836	
+837	def on_step_end(fn: Callable) -> Processor:
+838	    """Decorator: wrap async generator into StepEndEvent processor."""
+839	    return _make_hook_processor(fn, StepEndEvent)
+840	
+841	
+842	def on_task_end(fn: Callable) -> Processor:
+843	    """Decorator: wrap async generator into TaskEndEvent processor."""
+844	    return _make_hook_processor(fn, TaskEndEvent)

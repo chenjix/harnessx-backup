@@ -1,0 +1,102 @@
+161	            return chain_user_additions
+162	
+163	        len_delta = len(after_msgs) - len(before_msgs)
+164	
+165	        if len_delta < 0:
+166	            _handle_violation(
+167	                f"before_model: processor removed {-len_delta} message(s)",
+168	                processor=processor_name,
+169	                hook=hook,
+170	                violation_type=_VT_LENGTH_EXCEEDED,
+171	                step_id=step_id,
+172	            )
+173	        elif len_delta > 1:
+174	            _handle_violation(
+175	                f"before_model: processor added {len_delta} messages in a single step (max +1)",
+176	                processor=processor_name,
+177	                hook=hook,
+178	                violation_type=_VT_LENGTH_EXCEEDED,
+179	                step_id=step_id,
+180	            )
+181	        elif len_delta == 1:
+182	            # Adding a message is only allowed when the original last role is NOT user
+183	            if before_msgs and before_msgs[-1].role == "user":
+184	                _handle_violation(
+185	                    "before_model: processor added a message when last role is already 'user' "
+186	                    "(only content modification of the last user is allowed in that case)",
+187	                    processor=processor_name,
+188	                    hook=hook,
+189	                    violation_type=_VT_LENGTH_EXCEEDED,
+190	                    step_id=step_id,
+191	                )
+192	            # Cross-processor constraint: only one insertion per chain
+193	            if chain_user_additions >= 1:
+194	                _handle_violation(
+195	                    "before_model: second processor attempted to add user message "
+196	                    "(chain already has +1 user insertion)",
+197	                    processor=processor_name,
+198	                    hook=hook,
+199	                    violation_type=_VT_LENGTH_EXCEEDED,
+200	                    step_id=step_id,
+201	                )
+202	            new_msg = after_msgs[-1]
+203	            if new_msg.role != "user":
+204	                _handle_violation(
+205	                    f"before_model: new tail message has role={new_msg.role!r} (must be 'user')",
+206	                    processor=processor_name,
+207	                    hook=hook,
+208	                    violation_type=_VT_FORBIDDEN_ROLE_MUTATION,
+209	                    step_id=step_id,
+210	                )
+211	            chain_user_additions += 1
+212	        else:  # len_delta == 0
+213	            if before_msgs and after_msgs:
+214	                if before_msgs[-1].role == "user":
+215	                    # Only the last user content may change; history must be untouched
+216	                    if before_msgs[:-1] != after_msgs[:-1]:
+217	                        _handle_violation(
+218	                            "before_model: processor modified messages other than the last user",
+219	                            processor=processor_name,
+220	                            hook=hook,
+221	                            violation_type=_VT_WINDOW_OUT_OF_SCOPE,
+222	                            step_id=step_id,
+223	                        )
+224	                else:
+225	                    # last is not user and no length change: no content change allowed
+226	                    if before_msgs != after_msgs:
+227	                        _handle_violation(
+228	                            "before_model: processor modified messages when last role is not "
+229	                            "'user' and no user was appended",
+230	                            processor=processor_name,
+231	                            hook=hook,
+232	                            violation_type=_VT_WINDOW_OUT_OF_SCOPE,
+233	                            step_id=step_id,
+234	                        )
+235	
+236	    # after_model / before_tool / after_tool / step_end / task_end carry no
+237	    # ``messages`` field — _get_event_messages returns None so this function is
+238	    # never called for those hooks. Structural enforcement suffices.
+239	
+240	    return chain_user_additions
+241	
+242	
+243	def check_post_hook_invariants(
+244	    hook: str,
+245	    initial_msgs: "tuple",
+246	    final_msgs: "tuple",
+247	    *,
+248	    step_id: int = -1,
+249	    raw_msgs: "tuple | None" = None,
+250	) -> None:
+251	    """Check all post-hook-chain invariants (草案 §Post-hook 不变量).
+252	
+253	    Called once after the **entire** hook-chain completes.  Enforces structural
+254	    guarantees that must hold regardless of how many processors ran.
+255	
+256	    Invariants checked:
+257	    1. system count ≤ 1 and at position 0 when present.
+258	    2. ``len(raw_track) == len(effective_track)`` (when ``raw_msgs`` provided).
+259	    3. Same-index role match between raw and effective tracks.
+260	    4. Same-index ``tool_call_id`` for ``role=tool`` messages.
+
+[Showing lines 161–260 of 844 total. Use offset=260 to read the next section.]

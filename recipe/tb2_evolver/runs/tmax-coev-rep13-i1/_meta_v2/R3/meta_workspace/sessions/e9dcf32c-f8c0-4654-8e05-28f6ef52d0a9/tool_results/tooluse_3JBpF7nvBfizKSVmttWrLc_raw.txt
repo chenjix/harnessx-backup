@@ -1,0 +1,118 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepeatCommandGuard — break exact-identical Bash command loops.
+4	
+5	Closes a systemic failure mode observed on the tmax/TB2 task set: an agent
+6	that has stalled keeps re-issuing the *same* Bash command verbatim (a query
+7	that returns "no output captured", a build that keeps failing, a cat of a
+8	file that never changes). The existing recovery processors miss this shape:
+9	
+10	* ``LengthTruncationRecoveryProcessor`` only fires on ``finish_reason=length``
+11	  (a token-limit runaway), not on ordinary tool loops.
+12	* ``CustomEditToolProcessor`` only counts *file writes* to the same path, so a
+13	  read/query/build command repeated verbatim slides straight past it.
+14	
+15	Both leave the exact-repeat-command loop untouched, and every one of the
+16	budget_exceeded failures in the baseline round burned all 80 steps re-running
+17	a handful of identical commands while narrating "I'm stuck in a loop."
+18	
+19	This processor keys on the *exact normalised command string*. It only fires
+20	when the identical command has been run at least ``threshold`` times, so
+21	healthy runs that iterate through many distinct commands (the passing
+22	high-step tasks) are never touched — they never repeat a single command that
+23	often. On each further repeat past the threshold the injected message
+24	escalates: first a redirect ("this exact command produced the same result;
+25	change the command or the approach"), then a hard stop that tells the agent to
+26	either write the required output or take a genuinely different action.
+27	
+28	Purely additive: appends a bracketed advisory to the tool result. It never
+29	blocks execution and never mutates message history, so it cannot violate the
+30	message contract.
+31	"""
+32	
+33	from __future__ import annotations
+34	
+35	import dataclasses
+36	
+37	from harnessx.core.events import (
+38	    TaskEndEvent,
+39	    TaskStartEvent,
+40	    ToolCallEvent,
+41	    ToolResultEvent,
+42	)
+43	from harnessx.core.processor import MultiHookProcessor
+44	
+45	_REDIRECT = (
+46	    "\n\n[RepeatCommandGuard] You have now run this EXACT command {count} times "
+47	    "and it keeps producing the same result. Repeating it again will not change "
+48	    "anything. Do NOT run it a {nextcount}th time. Instead, either (a) change the "
+49	    "command itself (different flags, a smaller diagnostic step, inspect the "
+50	    "inputs it depends on), or (b) change your approach to the task entirely. "
+51	    "State in one sentence what specifically was wrong with the previous attempts "
+52	    "before your next tool call."
+53	)
+54	
+55	_HARD_STOP = (
+56	    "\n\n[RepeatCommandGuard] STOP — this identical command has now been executed "
+57	    "{count} times with no change in outcome. You are in a loop that is wasting "
+58	    "your step budget and will end the task with a score of 0 if it continues. "
+59	    "Abandon this exact command. Take ONE of these actions now: (a) if the "
+60	    "required output file(s) can be written from what you already know, write "
+61	    "them to the exact path named in the task; (b) otherwise run a DIFFERENT, "
+62	    "concrete diagnostic command that tests a new hypothesis about why the "
+63	    "previous attempts failed. Never issue the same failing command again."
+64	)
+65	
+66	
+67	def _normalise(cmd: str) -> str:
+68	    """Collapse whitespace so trivially-reformatted repeats still match."""
+69	    return " ".join(cmd.split())
+70	
+71	
+72	class RepeatCommandGuard(MultiHookProcessor):
+73	    """Detect an exact-identical Bash command loop and escalate a break-out nudge."""
+74	
+75	    _singleton_group = "tb2_repeat_command_guard"
+76	    _order = 31  # right after CustomEditToolProcessor (_order=30)
+77	
+78	    def __init__(self, threshold: int = 3, hard_stop_extra: int = 2) -> None:
+79	        # threshold: first advisory fires on the Nth identical execution.
+80	        self.threshold = max(2, int(threshold))
+81	        # hard_stop_extra: after this many repeats past threshold, escalate to STOP.
+82	        self.hard_stop_extra = max(1, int(hard_stop_extra))
+83	        self._counts: dict[str, int] = {}
+84	        self._pending: dict[str, str] = {}
+85	
+86	    async def on_task_start(self, event: TaskStartEvent):
+87	        self._counts.clear()
+88	        self._pending.clear()
+89	        yield event
+90	
+91	    async def on_before_tool(self, event: ToolCallEvent):
+92	        if event.tool_name == "Bash":
+93	            cmd = _normalise(str((event.tool_input or {}).get("command", "")))
+94	            if cmd:
+95	                count = self._counts.get(cmd, 0) + 1
+96	                self._counts[cmd] = count
+97	                self._pending[event.tool_call_id] = cmd
+98	        yield event
+99	
+100	    async def on_after_tool(self, event: ToolResultEvent):
+101	        cmd = self._pending.pop(event.tool_call_id, None)
+102	        if cmd is None:
+103	            yield event
+104	            return
+105	        count = self._counts.get(cmd, 0)
+106	        if count < self.threshold:
+107	            yield event
+108	            return
+109	        if count >= self.threshold + self.hard_stop_extra:
+110	            msg = _HARD_STOP.format(count=count)
+111	        else:
+112	            msg = _REDIRECT.format(count=count, nextcount=count + 1)
+113	        yield dataclasses.replace(event, result=(event.result or "") + msg)
+114	
+115	    async def on_task_end(self, event: TaskEndEvent):
+116	        self._counts.clear()
+117	        self._pending.clear()
+118	        yield event

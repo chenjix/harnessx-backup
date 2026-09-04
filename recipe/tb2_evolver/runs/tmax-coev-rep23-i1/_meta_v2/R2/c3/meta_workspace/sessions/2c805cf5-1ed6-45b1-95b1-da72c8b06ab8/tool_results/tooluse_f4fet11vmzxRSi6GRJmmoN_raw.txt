@@ -1,0 +1,354 @@
+1	# Evolve Journal — tmax-coev-rep23-i1
+2	
+3	## Round 1 — verifier requests import
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-09-01T18:00:00Z
+8	hypothesis_id: h_verifier_client_ready_v1
+9	levers: [control]
+10	predicted_affected: [task_000028_7fe033ac, task_000958_4bb2b05d]
+11	cited_candidates: [C-001]
+12	gating_outcome: accepted
+13	gating_attribution: score=28/50; +1/-2 gained=task_000344_e265c898 lost=task_000740_59416444,task_001673_86224c91; score 0.5600 >= incumbent(mean) 0.5800 - tol 0.0400
+14	expected_global_gain: "Flips the network-service failures whose Python verifier crashes at `import requests`; generalizes to any TB2 HTTP-service task with a requests-based test module"
+15	regression_risk: "Low — one-shot appended user message gated on network-service + verifier regex; never blocks a tool call, so cannot break a passing task. Worst case: ~250 wasted tokens on a service task that already has requests"
+16	cost_shift: "+~250 tokens context + one short idempotent install on matched service tasks only; non-service tasks untouched"
+17	rollback_trigger: "If R2 shows no flip on task_000028/task_000958 AND any regression on previously-passing service tasks, revert"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus task_000028_7fe033ac: the agent fully solved the task — fixed
+23	nginx.conf to `/tmp/video_backend.sock`, rewrote and compiled server.cpp, ran it
+24	in background, wrote logrotate.conf, started nginx, and its final probe returned
+25	`HTTP/1.1 200 OK ... 150` through the proxy. reward=0 anyway. The sole cause: the
+26	verifier's `test_final_state.py` does `import requests`, which is not installed
+27	in the container, so pytest fails at collection with
+28	`ModuleNotFoundError: No module named 'requests'`. This is a structural TB2
+29	gap: the verifier's test module is injected after the agent session ends and the
+30	agent never sees it, so it has no way to learn the verifier needs `requests`.
+31	Grep over all 21 failing tasks: exactly task_000028 and task_000958 carry this
+32	`No module named 'requests'` collection failure — a small but genuine
+33	network-service cluster with an identical root cause.
+34	
+35	### Changes
+36	
+37	- `processors/verifier_client_ready.py` — new `VerifierClientReadyProcessor`
+38	  (MultiHookProcessor). On `on_task_start` it arms only if the task description
+39	  matches a network-service regex AND a verifier regex; on the first
+40	  `on_step_start` it appends one user message telling the agent that TB2 network
+41	  verifiers commonly `import requests` and to make the Python HTTP client
+42	  importable before finishing (idempotent, offline-friendly install snippet).
+43	  Fires at most once per task.
+44	- `config.yaml` — register the processor via absolute `file://` path at order 7
+45	  (after env/time setup, before length/compaction control).
+46	
+47	### Evidence
+48	
+49	- `task_000028_7fe033ac` result.json final_pytest tail: `test_final_state.py:6:
+50	  import requests` → `E ModuleNotFoundError: No module named 'requests'` →
+51	  `Interrupted: 1 error during collection`. messages.json final probe:
+52	  `HTTP/1.1 200 OK ... Content-Length: 150 ... 150` — service was correct.
+53	- `task_000958_4bb2b05d` result.json final_pytest tail: same `import requests` /
+54	  `ModuleNotFoundError` at `test_final_state.py:4`. Agent had built and
+55	  curl-tested the C++ microservice on `127.0.0.1:9090`.
+56	- Description match: both contain HTTP/reverse-proxy/`127.0.0.1:PORT` vocabulary
+57	  and an explicit "automated verifier will make HTTP requests"/checker mention,
+58	  so `_SERVICE_RE` + `_VERIFIER_RE` both fire.
+59	
+60	### Uncertainty
+61	
+62	Open question: whether `pip install requests` / `apt-get install -y
+63	python3-requests` succeeds under the default network-blocked agent phase. The
+64	snippet tries `import` first (no-op if present), then pip, then apt against
+65	pre-cached package lists (the base image pre-caches apt indices per the system
+66	prompt). If none of these channels can produce `requests` offline, the reminder
+67	cannot flip these tasks — that would show as `still_F` on both predicted tasks
+68	with no regression, and is the signal to escalate (e.g. request the base image
+69	pre-stage `requests`) via NEEDS_FROM_HUMAN next round rather than re-ship this
+70	shape.
+71	
+72	## Round 1 (c3) — heredoc-aware edit detector
+73	
+74	<!-- journal:frontmatter
+75	round: 1
+76	timestamp: 2026-09-02T19:30:00Z
+77	hypothesis_id: h_heredoc_edit_detector_v1
+78	levers: [control]
+79	predicted_affected: [task_000118_3043e92d, task_001937_ac874115]
+80	cited_candidates: [C-001]
+81	gating_outcome: pending
+82	gating_attribution: pending
+83	expected_global_gain: "Removes a false-positive [EditDetection] signal class that fires on any TB2 task authoring multi-line files via heredoc whose body contains `>` (Python/awk comparisons, pipes). Bash-only TB2 makes heredoc the dominant file-write idiom, so this touches the whole code-authoring cluster, not one task."
+84	regression_risk: "Very low — on non-heredoc commands the extractor is byte-identical to the stock parser (same 3 regexes, same skip filter), so genuine over-edit detection on repeated >/sed -i/tee writes is unchanged. Only heredoc bodies stop producing write targets, which is strictly correct."
+85	cost_shift: "Neutral-to-slightly-negative. Fewer phantom warnings → fewer confused delete/recreate recovery turns → fewer tokens on tasks that thrashed on spurious over-edit alerts. Per-step cost is one linear body strip."
+86	rollback_trigger: "If R2 shows global pass_rate down OR the code-authoring cluster regresses (a previously-passing heredoc task flips to F), revert to benchmarks.terminal_bench_2.harness.CustomEditToolProcessor."
+87	-->
+88	
+89	### Why
+90	
+91	Assigned focus task_000118_3043e92d (system_administration): the true reward
+92	failure is a logic/timing bug — the agent's `deployment_monitor.py` never
+93	truncated logs during the grader's run, so peak log-dir size hit 209,715,200
+94	bytes vs the 45,000,000 threshold. But the harness actively made this harder:
+95	the stock `CustomEditToolProcessor` scans the ENTIRE Bash command for `>`
+96	write redirects, heredoc body included. The agent wrote its monitor via
+97	`cat > deployment_monitor.py << 'EOF' ... EOF` whose body contains
+98	`SIZE_THRESHOLD = ...` and `if size > max_size:`. The `>` inside the body was
+99	misread as a redirect, so each write produced phantom "written files"
+100	(`SIZE_THRESHOLD:`, `=`, `max_size:`) alongside the real file. All of them
+101	accumulated in the per-file edit counter and fired THREE simultaneous
+102	`[EditDetection]` over-edit warnings. The model's own summary shows it read
+103	these as "The system is detecting excessive edits" and reacted by deleting and
+104	recreating the file — an unproductive loop that consumed steps it needed for
+105	the real timing bug. This is a genuine harness deficiency (a mechanical parser
+106	false-positive injected into tool results), not a model knowledge gap, so it is
+107	fixable in the harness regardless of whether it alone flips the task.
+108	
+109	### Changes
+110	
+111	- `processors/heredoc_aware_edit_detector.py` — new
+112	  `HeredocAwareEditToolProcessor` (MultiHookProcessor). Drop-in replacement for
+113	  the stock `CustomEditToolProcessor`: same singleton group
+114	  (`bash_edit_detector`), same `_order` 30, same `threshold` knob, same hook
+115	  surface and warning text. Only difference: `_strip_heredoc_bodies` removes
+116	  every heredoc body (keeping the opener line so the redirect target is still
+117	  counted) before running the stock redirect/sed/tee regexes, so body `>`
+118	  characters are treated as data.
+119	- `config.yaml` — replace `benchmarks.terminal_bench_2.harness.CustomEditToolProcessor`
+120	  with the new processor via absolute `file://` path, `threshold: 7`.
+121	
+122	### Evidence
+123	
+124	- `task_000118_3043e92d.result.json` final_pytest:
+125	  `AssertionError: Peak log directory size was 209715200 bytes, which exceeds
+126	  the threshold of 45000000 bytes` — the real reward failure (timing bug).
+127	- `task_000118_3043e92d.messages.json`: 4 tool results carry
+128	  ``[EditDetection] File `/home/user/deployment_monitor.py` ...`` PLUS phantom
+129	  ``File `SIZE_THRESHOLD:` ...`` and ``File `=` ...``. The model's later
+130	  summary: "The system is detecting excessive edits ... decided to delete the
+131	  file and create it fresh" — the phantom warnings drove a delete/recreate loop.
+132	- Offline reproduction: on the exact task_000118 heredoc the stock extractor
+133	  yields `['/home/user/deployment_monitor.py', 'max_size:']`; the new extractor
+134	  yields only `['/home/user/deployment_monitor.py']`. Non-heredoc commands
+135	  (`echo > f`, `sed -i`, `cat >> f`, `tee f`) extract identically to stock.
+136	- Validators: canonicalize ok; dry_fire likely_bugs=0; contract violations=0
+137	  (processor only appends to tool-result strings, never mutates event.messages);
+138	  literals findings=0.
+139	
+140	### Uncertainty
+141	
+142	The phantom-warning removal clears the harness-induced derailer, but the
+143	underlying monitor-timing bug is a model reasoning gap the harness must not
+144	encode. So task_000118 may still fail on the real bug (would show `still_F`
+145	with no regression) even though the confusion source is gone. Regression risk
+146	is near-zero given byte-identical non-heredoc behaviour. If R2 shows any
+147	previously-passing heredoc task flip to F, revert.
+148	
+149	## Round 2 — identical-call loop guard
+150	
+151	<!-- journal:frontmatter
+152	round: 2
+153	timestamp: 2026-09-01T19:00:00Z
+154	hypothesis_id: h_loop_detection_pipeline_v1
+155	levers: [configuration]
+156	predicted_affected: [task_000010_644ab1c2]
+157	cited_candidates: [C-001]
+158	gating_outcome: pending
+159	gating_attribution: pending
+160	expected_global_gain: "Closes the identical-Bash-call repetition-loop -> budget_exceeded failure class benchmark-wide by registering the already-implemented LoopDetectionProcessor; early warning returns recovery budget, backstop raise caps runaway compute"
+161	regression_risk: "Low — warn-first (append text to tool result); raise only after 8 consecutive byte-identical (call, output) pairs; any interleaved different call resets the counter; compaction-aware so post-compaction drops clear stale fingerprints. No passing cluster relies on repeating one command 8x"
+162	cost_shift: "Net negative — early warning shortens loops; backstop caps stuck tasks at ~8 steps vs full 80-step budget; per-step overhead is one sha256 of the tool-call summary"
+163	rollback_trigger: "If R3 shows task_000010 still fails AND any previously-passing task regresses to loop_detected (false-positive termination of legitimate repeated work), revert"
+164	-->
+165	
+166	### Why
+167	
+168	Assigned focus task_000010_644ab1c2 (system_administration, k8s operator
+169	script) failed with exit_reason=budget_exceeded at 80 steps. messages.json
+170	steps 2–59 are the *exact same* assistant turn ("The zombie processes are
+171	still there. Let me try a different approach…") emitting the *identical* Bash
+172	command (`ps aux | grep -E "python|socat" ... xargs -r kill -9 ...; sleep 2;
+173	...`) and receiving *identical* tool output (defunct PIDs 115/130/139) ~27
+174	times in a row. The model even narrates "I've been repeating the same command
+175	many times" (step 56) and "I've been stuck in a loop" (step 58) — it
+176	recognises the loop but the passive run-loop continuation never forces it out.
+177	Only at step 60 does it abandon the loop, write the operator script, run it,
+178	create the backup and port-forward — but ~20 steps of budget remain and the
+179	run ends with only one of two manifests applied. This is a benchmark-wide
+180	failure class: an identical-tool-call-with-identical-output loop that neither
+181	LengthTruncationRecovery (fires only on finish_reason=length with NO tool
+182	call) nor ParseRetry (parse errors only) can catch. The pipeline simply lacks
+183	the guard that would break it.
+184	
+185	### Changes
+186	
+187	- `config.yaml` — register the existing, contract-clean
+188	  `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+189	  (_order=20, compaction-aware) into the pipeline with `warn_threshold=3`,
+190	  `threshold=8` (raise). Warn appends a corrective "you are stuck in a loop,
+191	  try something fundamentally different" nudge into the tool result at 3
+192	  consecutive identical calls so the agent recovers early and spends its
+193	  remaining budget productively; the raise at 8 is a compute backstop that
+194	  turns a full-budget burn into a clean loop_detected exit. No new code
+195	  authored — the deficiency was that this component was absent from the
+196	  recipe pipeline, not that it needed to be written.
+197	
+198	### Evidence
+199	
+200	- result.json: `agent.exit_reason="budget_exceeded"`, `steps=80`,
+201	  `reward=0`, final_pytest fails on `operator.py` missing (renamed to
+202	  k8s_operator.py) and deploy-v2.yaml not in the API success log.
+203	- messages.json steps 2,4,6,9,…,59: byte-identical assistant content AND
+204	  byte-identical tool output (three `[python3] <defunct>` lines).
+205	- step 60 onward: loop abandoned, script written and run, backup + port
+206	  forward created — proof the agent makes real progress once unstuck.
+207	
+208	### Uncertainty
+209	
+210	Whether the warn nudge alone flips this specific task to pass depends on the
+211	model using the freed ~50 steps to (a) rename operator.py correctly and (b)
+212	apply BOTH manifests. If it flips: strong signal. If task_000010 stays
+213	`loop_detected`/fail but no regressions: the guard is still a net-positive
+214	compute cap and the residual failure is a model capability gap (the agent
+215	must fix the `import operator` naming collision and iterate both manifests) —
+216	note as capability gap next round rather than re-shipping.
+217	
+218	## Round 2 (c4) — repeat-command loop breaker (nudge-only)
+219	
+220	<!-- journal:frontmatter
+221	round: 2
+222	timestamp: 2026-09-02T21:00:00Z
+223	hypothesis_id: h_repeat_command_breaker_nudge_v1
+224	levers: [control]
+225	predicted_affected: [task_000140_01c78b42, task_000010_644ab1c2, task_000015_89886d8d, task_001818_b251e5ea]
+226	cited_candidates: [C-002]
+227	gating_outcome: pending
+228	gating_attribution: pending
+229	expected_global_gain: "Closes the degenerate identical-command/identical-output no-progress loop cluster (5+ failing tasks re-issue one Bash command 15-28x; 2 hit budget_exceeded). A nudge-only, content-agnostic breaker returns wasted steps without ever terminating a run."
+230	regression_risk: "Low — appends one user message only after 4 consecutive byte-identical (command,result) pairs; never blocks/rewrites/terminates a tool call. Unlike the sibling h_loop_detection_pipeline_v1 hard-raise@8, it cannot kill a late-recovering task (task_000010 recovered at step 60). Post-completion echo loops (task_000329, reward 1) are unaffected."
+231	cost_shift: "Net token/step reduction on tasks it fires on: ~120 tokens injected once/twice vs. 15-28 eliminated identical tool round-trips."
+232	rollback_trigger: "If R3 shows no flip on the predicted tasks AND the same tasks still show 15-28 identical-command runs (model ignores the nudge) OR any previously-passing task regresses, revert; escalate to blocking the identical call via synthetic_result."
+233	-->
+234	
+235	### Why
+236	
+237	Assigned focus task_000140_01c78b42: the agent spent steps 2-53 (of 59) in a
+238	degenerate loop — 15 identical `kill -9 353 587 815 1030; ps aux | grep
+239	vm_service` calls returning the identical listing of four `<defunct>` zombie
+240	processes, then ~8 identical `pkill -9 -f vm_service` -> `(exit 137, no output)`.
+241	Zombies cannot be killed; every iteration was a permanent no-op. Compaction
+242	fired at step 54 and lost the plan; the task failed with 7 lingering PIDs and an
+243	unfixed `test_pipeline.sh` (rc 127). A sweep of every messages.json shows this
+244	is systemic: max identical-command runs of 28 (000010), 26 (000015), 21
+245	(000118), 19 (001818), 15 (000140); command AND result verified byte-identical
+246	for 000010/000015/001818; 000010/000015 exhaust their budget entirely. This is
+247	the same cluster the sibling proposal h_loop_detection_pipeline_v1 targets, but
+248	I ship a distinct, safer shape at a different lever (see Changes / candidates.md
+249	C-002).
+250	
+251	### Changes
+252	
+253	- `processors/repeat_command_breaker.py` — new `RepeatCommandBreakerProcessor`
+254	  (MultiHookProcessor, Control lever). `on_before_tool` captures the Bash
+255	  command; `on_after_tool` fingerprints (command, result) and counts
+256	  consecutive identical pairs; at `repeat_threshold` (4) it arms a one-shot
+257	  corrective nudge; `on_before_model` injects it as one user message (replacing
+258	  a trailing user message to satisfy the +1 contract), escalating wording if
+259	  the loop persists. Content-agnostic — keys only on the observable
+260	  command/result fingerprint; includes a zombie-process hint. Crucially it
+261	  NEVER terminates the run (contrast: sibling registers stock
+262	  LoopDetectionProcessor with a hard raise@8 that would have killed task_000010
+263	  before its step-60 recovery).
+264	- `config.yaml` — register via absolute `file://` path at order 6, after
+265	  LengthTruncationRecoveryProcessor (disjoint shape: finish_reason=length only).
+266	
+267	### Evidence
+268	
+269	- `task_000140_01c78b42` messages.json steps 2-31: 15x identical zombie-kill;
+270	  steps 38-53: ~8x identical pkill -> `(exit 137)`; step 54 compaction; final
+271	  failure `test_no_lingering_service_processes` lists 7 lingering PIDs.
+272	- `task_000010_644ab1c2`: 28x identical `ps aux|grep|xargs kill`, budget_exceeded;
+273	  model narrates "I've been stuck in a loop" yet cannot self-break.
+274	- `task_000015_89886d8d`: 26x identical python subprocess call, budget_exceeded.
+275	- Passing control `task_000329_a3ac56b0` (reward 1) repeats only a harmless
+276	  post-completion echo — nudge is a no-op there.
+277	- Validators: canonicalize ok (checked_templates=0); dry_fire likely_bugs=0;
+278	  contract violations=0; literals findings=0.
+279	
+280	### Uncertainty
+281	
+282	Threshold 4 sits above normal 2-3x polling but well below the 15-28 in failures.
+283	Open risk: whether the 4B model actually changes behaviour on the injected nudge
+284	or re-enters the loop. If predicted tasks still show long identical runs
+285	post-fix (still_F, unchanged repeat counts), the model ignores the interrupt and
+286	the next escalation is to block the identical call outright via
+287	ToolCallEvent.synthetic_result rather than only nudging.
+288	
+289	## Round 2 — enable tool-call loop detector
+290	
+291	<!-- journal:frontmatter
+292	round: 2
+293	timestamp: 2026-09-02T12:00:00Z
+294	hypothesis_id: h_toolcall_loop_detection_v1
+295	levers: [configuration]
+296	predicted_affected: [task_000015_89886d8d, task_000010_644ab1c2, task_000118_3043e92d, task_001818_b251e5ea, task_001089_220cc46b]
+297	cited_candidates: [C-001]
+298	gating_outcome: pending
+299	gating_attribution: pending
+300	expected_global_gain: "Flips the budget_exceeded identical-command-loop cluster (5 tasks) by capping consecutive byte-identical Bash calls so ~72 wasted steps are returned to the agent to pivot; generalizes to any single-Bash-tool task that gets stuck re-issuing one command"
+301	regression_risk: "Three currently-passing tasks (task_000329, task_001652, task_001701, task_001591) also contain long identical runs, but in each the required work was already complete and the agent was merely spinning; LoopDetectedError exits cleanly (exit_reason=loop_detected, not error, verified runloop.py:781) preserving final filesystem state so they still pass while shedding idle steps"
+302	cost_shift: "Net DOWN — caps 80-step budget_exceeded loopers at ~6 identical repeats (~15-25 steps saved each); non-looping tasks untouched"
+303	rollback_trigger: "If R3 shows any previously-passing task flip to loop_detected+reward=0 (force-exited before work complete), raise threshold to 10 or revert"
+304	-->
+305	
+306	### Why
+307	
+308	Assigned focus task_000015_89886d8d (budget_exceeded, 80 steps, reward=0): the
+309	agent tried to OCR an image with tesseract, got the CLI argument order wrong
+310	(`read_params_file: Can't open ...`), and then re-issued the *byte-identical*
+311	`python3 << ... tesseract ...` command 26 times in a row — each returning the
+312	identical STDERR — until it exhausted its 80-step budget without ever writing
+313	`/home/user/migrate.py` or `/home/user/test_parser.py`. This is not a
+314	task-specific problem: sweeping all trajectories for the longest run of
+315	consecutive byte-identical tool-call arguments surfaced a 5-task
+316	`budget_exceeded` cluster with runs of 12-28 identical (command, output) pairs.
+317	The current pipeline has NO tool-call loop breaker — only
+318	`LengthTruncationRecoveryProcessor`, which fires only on `finish_reason=length`.
+319	These loops have valid tool calls (`finish_reason=stop`), so nothing intercepts
+320	them. The purpose-built `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+321	exists as a builtin but was simply never wired into this config.
+322	
+323	### Changes
+324	
+325	- `config.yaml` — register `harnessx.processors.control.loop_detection.LoopDetectionProcessor`
+326	  after `parse_retry` with `warn_threshold: 3`, `threshold: 6` (raise),
+327	  `window_size: 12`, `name_warn_threshold: 8`, `compaction_drop_threshold: 5`.
+328	  Warns (injected into tool result) at 3 consecutive identical calls; hard-raises
+329	  LoopDetectedError at 6 -> clean exit_reason=loop_detected.
+330	
+331	### Evidence
+332	
+333	- `task_000015` messages steps 2-56: identical assistant message + identical
+334	  Bash args + identical `STDERR: read_params_file: Can't open
+335	  tessedit_char_whitelist=...` (26x consecutive).
+336	- `task_000010` most-repeated tool output 28x/33: `... [python3] <defunct> ...`.
+337	- `task_000118` most-repeated tool output 22x/31: `(exit 0, no output captured)`.
+338	- `task_001818` `cargo build --release` 22x; `task_001089` `make clean && make
+339	  test` 12x consecutively.
+340	- Passing-cluster safety check: `task_000329` (reward=1) resumed post-compaction
+341	  with all output files already present (step 3 `ls` shows config_delta,
+342	  delta_v1_v2.txt, etc.) then spun on the same `ls` 26x — force-exit would still
+343	  pass.
+344	
+345	### Uncertainty
+346	
+347	Open question: whether returning ~72 steps to task_000015 is enough for the 4B
+348	model to *find* the correct tesseract invocation (`tesseract IN OUT_BASE`, no
+349	`-o`). If it re-enters a *different* identical loop the detector re-fires, but
+350	the underlying OCR-CLI knowledge gap is a model-capability issue, not a harness
+351	one — that would show as still_F on task_000015 with a much lower step count
+352	(loop_detected instead of budget_exceeded), signalling the harness fix worked
+353	but the capability gap remains. Watch for any passing task flipping to
+354	loop_detected+reward=0 (the rollback trigger).

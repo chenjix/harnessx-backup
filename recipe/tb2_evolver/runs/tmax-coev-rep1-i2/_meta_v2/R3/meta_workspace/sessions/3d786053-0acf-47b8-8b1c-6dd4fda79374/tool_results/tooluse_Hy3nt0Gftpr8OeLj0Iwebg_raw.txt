@@ -1,0 +1,47 @@
+299	                    await asyncio.sleep(delay)
+300	                else:
+301	                    raise
+302	
+303	        choice = response.choices[0]
+304	        msg = choice.message
+305	        content = msg.content or ""
+306	        finish_reason = choice.finish_reason or "stop"
+307	
+308	        # Capture reasoning content from o-series models.
+309	        # OpenAI exposes this via message.reasoning (Responses API) or
+310	        # message.reasoning_content (some SDK versions). We check both.
+311	        thinking = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None) or ""
+312	
+313	        tool_calls = []
+314	        if msg.tool_calls:
+315	            tool_calls = parse_tool_calls(msg.tool_calls)
+316	            finish_reason = "tool_use"
+317	
+318	        # Some models (e.g. Qwen3 thinking mode) return finish_reason="tool_calls"
+319	        # but no actual tool_calls in the message.  Normalize to "stop" so
+320	        # downstream processors (e.g. SelfVerifyProcessor) treat it as a done turn.
+321	        if not tool_calls and finish_reason == "tool_calls":
+322	            finish_reason = "stop"
+323	
+324	        usage = Usage(
+325	            input_tokens=response.usage.prompt_tokens if response.usage else 0,
+326	            output_tokens=response.usage.completion_tokens if response.usage else 0,
+327	        )
+328	
+329	        return ModelResponseEvent(
+330	            run_id="",
+331	            step_id=0,
+332	            content=content,
+333	            thinking=thinking,
+334	            tool_calls=tuple(tool_calls),
+335	            finish_reason=finish_reason,
+336	            usage=usage,
+337	            model=self.model,
+338	        )
+339	
+340	    async def _complete_streaming(self, client, oai_messages, kwargs, max_retries, base_delay):
+341	        """Streaming path — required for providers that truncate non-streaming responses (e.g. Tongyi/QwQ-32B)."""
+342	        import json as _json
+343	        import re as _re
+
+[Showing lines 299–343 of 446 total. Use offset=343 to read the next section.]

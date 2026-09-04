@@ -1,0 +1,184 @@
+=== LAST migrate.py step 11 ===
+cat > /home/user/migrate.py << 'EOF'
+#!/usr/bin/env python3
+"""
+Migration utility to parse legacy URLs and migrate to new JSON schema.
+Usage: python migrate.py <input_urls.txt> <output.jsonl>
+"""
+
+import sys
+import re
+import json
+from urllib.parse import urlparse, parse_qs
+from typing import Dict, List, Optional
+
+# Route definitions extracted from the schema image
+# Format: (route_pattern, path_params, query_params)
+ROUTES = [
+    # Route 1: catalog/item with item_id, department, sort_order
+    {
+        'pattern': r'^/catalog/item/(?P<item_id>[^/]+)',
+        'path_params': ['item_id'],
+        'query_params': ['dept', 'sort']
+    },
+    # Route 2: auth/session with session_id, referrer
+    {
+        'pattern': r'^/auth/session/(?P<session_id>[^/]+)',
+        'path_params': ['session_id'],
+        'query_params': ['referrer']
+    },
+    # Route 3: user/prefs with user_id, theme, alerts, notifications
+    {
+        'pattern': r'^/user/prefs/(?P<user_id>[^/]+)',
+        'path_params': ['user_id'],
+        'query_params': ['theme', 'alerts', 'notifications']
+    },
+]
+
+def parse_url(url: str) -> Optional[Dict]:
+    """
+    Parse a URL and extract parameters according to the route schema.
+    Returns None if the URL doesn't match any route.
+    """
+    try:
+        parsed = urlparse(url)
+        path = parsed.path
+        query_string = parsed.query
+        
+        # Try to match against each route
+        for route in ROUTES:
+            match = re.match(route['pattern'], path)
+            if match:
+                # Extract path parameters
+                path_params = {}
+                for param in route['path_params']:
+                    value = match.group(param)
+                    path_params[param] = value
+                
+                # Extract query parameters
+                query_params = {}
+                if query_string:
+                    parsed_query = parse_qs(query_string)
+                    for key, values in parsed_query.items():
+                        # Take the first value if multiple, or join them
+                        query_params[key] = values[0] if values else ''
+                
+                return {
+                    'path': path_params,
+                    'query': query_params
+                }
+    
+    except Exception:
+        return None
+
+def main():
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <input_urls.txt> <output.jsonl>")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
+    with open(input_file, 'r') as f:
+        urls = [line.strip() for line in f if line.strip()]
+    
+    results = []
+    for url in urls:
+        result = parse_url(url)
+        if result:
+            results.append(result)
+    
+    with open(output_file, 'w') as f:
+        for result in results:
+            f.write(json.dumps(result) + '\n')
+
+if __name__ == '__main__':
+    main()
+EOF
+echo "migrate.py updated"
+
+=== LAST test_parser.py step 64 ===
+cat > /home/user/test_parser.py << 'EOF'
+#!/usr/bin/env python3
+"""
+Property-based tests for the URL parser using hypothesis.
+"""
+
+import re
+import json
+import pytest
+from hypothesis import given, strategies as st, settings
+from urllib.parse import urlencode
+
+ROUTES = [
+    {'pattern': r'^/catalog/item/(?P<item_id>[^/]+)', 'path_params': ['item_id'], 'query_params': ['dept', 'sort']},
+    {'pattern': r'^/auth/session/(?P<session_id>[^/]+)', 'path_params': ['session_id'], 'query_params': ['referrer']},
+    {'pattern': r'^/user/prefs/(?P<user_id>[^/]+)', 'path_params': ['user_id'], 'query_params': ['theme', 'alerts', 'notifications']},
+]
+
+def parse_url(url: str):
+    from urllib.parse import urlparse, parse_qs
+    try:
+        parsed = urlparse(url)
+        path = parsed.path
+        query_string = parsed.query
+        for route in ROUTES:
+            match = re.match(route['pattern'], path)
+            if match:
+                path_params = {param: match.group(param) for param in route['path_params']}
+                query_params = {}
+                if query_string:
+                    parsed_query = parse_qs(query_string)
+                    for key, values in parsed_query.items():
+                        query_params[key] = values[0] if values else ''
+                return {'path': path_params, 'query': query_params}
+    except Exception:
+        return None
+
+def generate_random_string(min_len=1, max_len=10):
+    import random, string
+    chars = string.ascii_letters + string.digits + '/_.-@%&'
+    return ''.join(random.choice(chars) for _ in range(min_len, max_len))
+
+def generate_valid_url(route: dict) -> str:
+    path_params = {p: generate_random_string() for p in route['path_params']}
+    query_params = {p: generate_random_string() for p in route['query_params']}
+    if route['pattern'].startswith('/catalog/item/'):
+        path = f"/catalog/item/{path_params['item_id']}"
+    elif route['pattern'].startswith('/auth/session/'):
+        path = f"/auth/session/{path_params['session_id']}"
+    elif route['pattern'].startswith('/user/prefs/'):
+        path = f"/user/prefs/{path_params['user_id']}"
+    else:
+        path = f"/{route['pattern'].split('/')[1]}/{path_params.get('item_id', 'default')}"
+    query_string = urlencode(query_params) if query_params else ''
+    return f"{path}?{query_string}"
+
+def test_parser_handles_valid_urls():
+    for route in ROUTES:
+        url = generate_valid_url(route)
+        result = parse_url(url)
+        assert result is not None, f"URL should match route: {url}"
+        assert 'path' in result
+        assert 'query' in result
+        for param in route['path_params']:
+            assert param in result['path'], f"Path param '{param}' should be in result"
+        for param in route['query_params']:
+            assert param in result['query'], f"Query param '{param}' should be in result"
+
+def test_parser_handles_url_encoded_params():
+    test_cases = [
+        "/catalog/item/test123?dept=hello%20world&sort=asc",
+        "/auth/session/abc456?referrer=https%3A%2F%2Fexample.com",
+        "/user/prefs/user789?theme=dark&alerts=on&notifications=true",
+    ]
+    for url in test_cases:
+        result = parse_url(url)
+        assert result is not None, f"URL should match: {url}"
+        assert 'path' in result
+        assert 'query' in result
+
+def test_parser_handles_special_characters():
+    test_cases = [
+        "/catalog/item/test123?dept=hello%26world&sort=1%2B2",
+        "/auth/session/abc456?referrer

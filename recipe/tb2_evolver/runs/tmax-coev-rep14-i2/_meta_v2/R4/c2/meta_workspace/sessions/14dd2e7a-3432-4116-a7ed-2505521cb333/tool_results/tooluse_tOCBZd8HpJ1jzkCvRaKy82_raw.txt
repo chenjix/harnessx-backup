@@ -1,0 +1,71 @@
+--- SiblingSystemPromptBuilder logic ---
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""System-prompt builders for the Tmax HarnessX path.
+
+``SiblingSystemPromptBuilder`` reads ``system_prompt.txt`` next to the active
+HarnessConfig YAML (resolved via ``TB2_HARNESS_CONFIG`` /
+``TMAX_HARNESS_CONFIG``). MetaAgent may edit that sidecar freely; it may also
+replace this builder with a Template / static builder in ``config.yaml``.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from harnessx.workspace.workspace import Workspace
+
+DEFAULT_TMAX_PROMPT = """\
+You are a terminal coding agent solving a single Linux task.
+Use the Bash tool to inspect the environment, edit files, and run commands.
+Work under /home/user unless the instruction says otherwise.
+When the task is complete, stop calling tools and briefly confirm what you did.
+Do not ask questions — act.
+"""
+
+
+def _resolve_prompt_path() -> Path | None:
+    for key in ("TB2_HARNESS_CONFIG", "TMAX_HARNESS_CONFIG"):
+        raw = (os.environ.get(key) or "").strip()
+        if not raw:
+            continue
+        sibling = Path(raw).expanduser().resolve().parent / "system_prompt.txt"
+        if sibling.is_file():
+            return sibling
+    explicit = (os.environ.get("TMAX_SYSTEM_PROMPT_FILE") or "").strip()
+    if explicit and Path(explicit).is_file():
+        return Path(explicit).resolve()
+    return None
+
+
+class SiblingSystemPromptBuilder:
+    """Load ``system_prompt.txt`` beside the evolved HarnessConfig."""
+
+    async def build(self, workspace: "Workspace | None" = None) -> str:  # noqa: ARG002
+        path = _resolve_prompt_path()
+        if path is not None:
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        return DEFAULT_TMAX_PROMPT.strip()
+
+
+class StaticTmaxSystemPromptBuilder:
+    """Fixed default prompt (fallback when no sidecar exists)."""
+
+    def __init__(self, text: str | None = None) -> None:
+        self._text = (text or DEFAULT_TMAX_PROMPT).strip()
+
+    async def build(self, workspace: "Workspace | None" = None) -> str:  # noqa: ARG002
+        return self._text
+
+
+__all__ = [
+    "DEFAULT_TMAX_PROMPT",
+    "SiblingSystemPromptBuilder",
+    "StaticTmaxSystemPromptBuilder",
+]
+=== R1 system_prompt.txt size ===
+308 R1/system_prompt.txt

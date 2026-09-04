@@ -1,0 +1,37 @@
+16:    BeforeModelEvent,
+18:    ModelResponseEvent,
+26:    ToolCallEvent,
+384:            before_event = BeforeModelEvent(
+398:                (e for e in reversed(_bm_events) if isinstance(e, BeforeModelEvent)),
+404:            if before_event.skip_model:
+405:                model_event = ModelResponseEvent(
+408:                    content=before_event.synthetic_output,
+424:                model_event = ModelResponseEvent(
+430:                    tool_calls=model_response.tool_calls,
+439:                    (e for e in reversed(after_events) if isinstance(e, ModelResponseEvent)),
+474:            if not before_event.skip_model:
+479:                        tool_calls=model_event.tool_calls,
+497:            for tc in model_event.tool_calls:
+505:                tc_event = ToolCallEvent(
+511:                    approved=True,
+520:                    (e for e in reversed(_bt_events) if isinstance(e, ToolCallEvent)),
+546:                    if tc_event.approved:
+549:                            result = await tool_registry.execute(tc_event.tool_name, tc_event.tool_input)
+600:                    elif tc_event.synthetic_result is not None:
+606:                            result=tc_event.synthetic_result,
+634:                                content="Tool call not approved.",
+667:            tool_call_summary = "|".join(f"{tc.name}:{str(tc.input)}" for tc in model_event.tool_calls)
+713:                and not model_event.tool_calls
+727:                model_event.finish_reason == "length" and not model_event.tool_calls and not _thinking_only
+749:                and not model_event.tool_calls
+788:            ModelResponseEvent(
+862:    2. Assistant messages with tool_calls but missing tool results — removes tool_calls
+875:    all_tc_ids: set[str] = set()  # from assistant tool_calls
+878:        if m.role == "assistant" and m.tool_calls:
+879:            for tc in m.tool_calls:
+890:        if m.role == "assistant" and m.tool_calls:
+891:            # Check if ALL tool_calls have corresponding results
+892:            matched = [tc for tc in m.tool_calls if tc.id in all_tr_ids]
+893:            unmatched = [tc for tc in m.tool_calls if tc.id not in all_tr_ids]
+904:                # Partial — keep only matched tool_calls
+909:                        tool_calls=tuple(matched),

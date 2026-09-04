@@ -1,0 +1,226 @@
+1	# Copyright 2026 Darwin-Agent
+2	# SPDX-License-Identifier: MIT
+3	"""RepetitionLoopBreaker — break degenerate near-identical narration loops.
+4	
+5	Closes a systemic failure mode that the existing ``LengthTruncationRecovery``
+6	processor does not catch: the model emits the *same* long reasoning block turn
+7	after turn, sometimes hitting ``max_tokens`` (``finish_reason=length``) and
+8	sometimes not, while the passive run-loop "please continue" nudge simply
+9	re-primes the identical runaway generation. Even the escalating length-recovery
+10	nudge is ignored because the model's own previous verbatim narration is still in
+11	context and dominates the next completion. The cycle burns every remaining step
+12	until ``budget_exceeded`` on a single task.
+13	
+14	Why a separate processor (not just a knob on LengthTruncationRecovery):
+15	
+16	* The loop is defined by *content self-similarity across turns*, not by
+17	  ``finish_reason``. Several looping turns in the observed failure ended
+18	  normally (``end_turn`` / tool-less) rather than on ``length`` — the length
+19	  processor never fired on those.
+20	* The decisive intervention is *pruning the poisoned duplicate assistant
+21	  messages from context* so the model is no longer re-primed by its own
+22	  runaway prose. A nudge alone cannot do this; the stale narration outweighs
+23	  a one-line user message every time.
+24	
+25	Mechanism:
+26	
+27	* On each assistant turn with no tool call, fingerprint a normalised prefix of
+28	  the content.
+29	* When ``repeat_threshold`` consecutive tool-less turns share (near-)identical
+30	  fingerprints, declare a loop.
+31	* On the next ``before_model``: drop all but the most recent looping assistant
+32	  message (and the passive "continue" nudges that trail them) from the context
+33	  window, then append a single decisive redirect instructing the model to stop
+34	  narrating and issue exactly one concrete command. This is content-agnostic:
+35	  it names no task, path, or constant, so it generalises to any repetition
+36	  loop the harness sees.
+37	"""
+38	
+39	from __future__ import annotations
+40	
+41	import dataclasses
+42	import re
+43	
+44	from harnessx.core.events import (
+45	    BeforeModelEvent,
+46	    Message,
+47	    ModelResponseEvent,
+48	    TaskEndEvent,
+49	    TaskStartEvent,
+50	)
+51	from harnessx.core.processor import MultiHookProcessor
+52	
+53	_WS_RE = re.compile(r"\s+")
+54	
+55	_REDIRECT = (
+56	    "SYSTEM INTERVENTION: your last several turns repeated the same reasoning "
+57	    "almost verbatim without making progress. That stale narration has been "
+58	    "removed from the conversation to stop the loop. Do NOT restate or continue "
+59	    "any earlier analysis. In this turn, write at most ONE sentence, then issue "
+60	    "exactly ONE Bash tool call that takes a concrete step — inspect the current "
+61	    "state, or write/modify the required file. If you are unsure what to do "
+62	    "next, run a single short command to observe the current state and decide "
+63	    "from its output."
+64	)
+65	
+66	
+67	def _extract_text(content) -> str:
+68	    if isinstance(content, str):
+69	        return content
+70	    if isinstance(content, list):
+71	        parts = []
+72	        for block in content:
+73	            if isinstance(block, dict):
+74	                t = block.get("text") or block.get("content") or ""
+75	                if isinstance(t, str):
+76	                    parts.append(t)
+77	            elif isinstance(block, str):
+78	                parts.append(block)
+79	        return " ".join(parts)
+80	    return ""
+81	
+82	
+83	def _fingerprint(content, prefix_chars: int) -> str:
+84	    """Normalised, whitespace-collapsed, lowercased prefix of the content."""
+85	    text = _extract_text(content)
+86	    norm = _WS_RE.sub(" ", text).strip().lower()
+87	    return norm[:prefix_chars]
+88	
+89	
+90	class RepetitionLoopBreaker(MultiHookProcessor):
+91	    """Detect near-identical repeated assistant narration and hard-break it."""
+92	
+93	    _singleton_group = "tmax_repetition_loop_breaker"
+94	    # Runs just after length-recovery (5) so its content collapse (if any) has
+95	    # already been applied to this turn's fingerprint, but before compaction.
+96	    _order = 6
+97	
+98	    def __init__(
+99	        self,
+100	        repeat_threshold: int = 3,
+101	        prefix_chars: int = 400,
+102	        min_content_chars: int = 200,
+103	    ) -> None:
+104	        # Number of consecutive tool-less near-identical turns that trips the
+105	        # breaker. 3 keeps normal short retries (which differ turn-to-turn)
+106	        # safe while catching true verbatim loops quickly.
+107	        self.repeat_threshold = max(2, int(repeat_threshold))
+108	        self.prefix_chars = max(80, int(prefix_chars))
+109	        # Very short assistant turns (one-line "Let me run X") are not loops
+110	        # even if repeated; only fingerprint substantial narration.
+111	        self.min_content_chars = max(0, int(min_content_chars))
+112	        self._last_fp: str = ""
+113	        self._run: int = 0
+114	        self._pending_break: bool = False
+115	
+116	    async def on_task_start(self, event: TaskStartEvent):
+117	        self._last_fp = ""
+118	        self._run = 0
+119	        self._pending_break = False
+120	        yield event
+121	
+122	    async def on_after_model(self, event: ModelResponseEvent):
+123	        # A turn that issued a tool call is making progress — reset.
+124	        if event.tool_calls:
+125	            self._last_fp = ""
+126	            self._run = 0
+127	            self._pending_break = False
+128	            yield event
+129	            return
+130	
+131	        text = _extract_text(event.content or "")
+132	        if len(text.strip()) < self.min_content_chars:
+133	            # Too short to be a meaningful narration loop; do not accumulate.
+134	            self._last_fp = ""
+135	            self._run = 0
+136	            yield event
+137	            return
+138	
+139	        fp = _fingerprint(event.content or "", self.prefix_chars)
+140	        if fp and fp == self._last_fp:
+141	            self._run += 1
+142	        else:
+143	            self._run = 1
+144	            self._last_fp = fp
+145	
+146	        if self._run >= self.repeat_threshold:
+147	            self._pending_break = True
+148	
+149	        yield event
+150	
+151	    async def on_before_model(self, event: BeforeModelEvent):
+152	        if not self._pending_break:
+153	            yield event
+154	            return
+155	        self._pending_break = False
+156	        self._last_fp = ""
+157	        self._run = 0
+158	
+159	        msgs = list(event.messages)
+160	        if not msgs:
+161	            yield event
+162	            return
+163	
+164	        # Identify the trailing block of looping assistant turns + the passive
+165	        # "continue" user nudges interleaved with them, and prune all but keep
+166	        # the conversation coherent. We remove trailing assistant messages that
+167	        # share the looping fingerprint and any adjacent passive-continue user
+168	        # messages, then append the decisive redirect. The first message
+169	        # (task/system anchor) is always preserved.
+170	        target_fp = ""
+171	        # Recompute the loop fingerprint from the most recent qualifying
+172	        # assistant message.
+173	        for m in reversed(msgs):
+174	            if getattr(m, "role", None) == "assistant" and not getattr(m, "tool_calls", ()):  # noqa: E501
+175	                cand = _fingerprint(getattr(m, "content", ""), self.prefix_chars)
+176	                if cand:
+177	                    target_fp = cand
+178	                    break
+179	
+180	        if not target_fp:
+181	            # Fall back to a plain redirect append.
+182	            yield self._append_redirect(event, msgs)
+183	            return
+184	
+185	        pruned: list[Message] = []
+186	        removed = 0
+187	        for idx, m in enumerate(msgs):
+188	            role = getattr(m, "role", None)
+189	            # Never drop the first message (task anchor).
+190	            if idx == 0:
+191	                pruned.append(m)
+192	                continue
+193	            if role == "assistant" and not getattr(m, "tool_calls", ()):
+194	                if _fingerprint(getattr(m, "content", ""), self.prefix_chars) == target_fp:
+195	                    removed += 1
+196	                    continue  # drop this looping duplicate
+197	            if role == "user":
+198	                utext = _extract_text(getattr(m, "content", "")).strip().lower()
+199	                if "cut off by the token limit" in utext or utext.startswith(
+200	                    "your last turn ran into the output token limit"
+201	                ):
+202	                    removed += 1
+203	                    continue  # drop passive/soft continue nudges tied to loop
+204	            pruned.append(m)
+205	
+206	        if removed == 0:
+207	            yield self._append_redirect(event, msgs)
+208	            return
+209	
+210	        yield self._append_redirect(event, pruned)
+211	
+212	    def _append_redirect(self, event: BeforeModelEvent, msgs: list[Message]):
+213	        # Contract: must not leave two trailing user messages that duplicate.
+214	        # If the last message is already a user turn, replace it; else append.
+215	        if msgs and getattr(msgs[-1], "role", None) == "user":
+216	            msgs = list(msgs)
+217	            msgs[-1] = Message(role="user", content=_REDIRECT)
+218	        else:
+219	            msgs = list(msgs) + [Message(role="user", content=_REDIRECT)]
+220	        return dataclasses.replace(event, messages=tuple(msgs))
+221	
+222	    async def on_task_end(self, event: TaskEndEvent):
+223	        self._last_fp = ""
+224	        self._run = 0
+225	        self._pending_break = False
+226	        yield event

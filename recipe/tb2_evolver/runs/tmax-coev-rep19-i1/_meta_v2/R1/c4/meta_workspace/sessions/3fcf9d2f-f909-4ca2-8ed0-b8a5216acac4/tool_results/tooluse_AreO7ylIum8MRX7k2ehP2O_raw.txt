@@ -1,0 +1,82 @@
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""TB2 harness config factory and processor implementations.
+
+Public API
+----------
+``make_tb2_harness_config(*, timeout_seconds=None) -> HarnessConfig``
+    Build a fully serializable ``HarnessConfig`` with no runtime slots.
+    Persist it with ``cfg.to_yaml_file(path)`` for meta-harness evolution.
+
+    Runtime-only slots (``sandbox_provider``, ``tracer``) are **not** included
+    here — they are injected by the agent at run time via ``cfg.copy(...)``.
+
+All processor classes are kept in this module so that YAML round-trip
+deserialization (``HarnessConfig.from_yaml_file``) can resolve their
+``_target_`` dotted paths.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import re
+import time
+import uuid
+
+from harnessx.core.builder import HarnessBuilder
+from harnessx.core.harness import HarnessConfig
+from harnessx.core.events import (
+    BeforeModelEvent,
+    Message,
+    ModelResponseEvent,
+    StepStartEvent,
+    TaskEndEvent,
+    TaskStartEvent,
+    ToolCall,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from harnessx.core.processor import MultiHookProcessor
+from harnessx.processors.context.env_context_injector import EnvironmentContextInjector
+from harnessx.processors.context.strategies.system_prompt.base import (
+    BaseSystemPromptBuilder,
+)
+from harnessx.processors.context.system_prompt import SystemPromptProcessor
+from harnessx.processors.control.bg_install_guard import BgInstallGuard
+from harnessx.processors.control.compaction import CompactionProcessor
+from harnessx.processors.control.parse_retry import ParseRetryProcessor
+from harnessx.processors.control.tool_call_correction import ToolCallCorrectionLayer
+from harnessx.tools.builtin import bash_tool
+from harnessx.tools.inmemory import InMemoryToolRegistry
+
+from .defaults import OUTPUT_LIMIT, WORKSPACE_PATH
+
+_REDIRECT_WRITE_RE = re.compile(r"(?<![<>2&\d])>{1,2}\s*([^\s;&|><\n'\"]+)")
+_SED_INPLACE_RE = re.compile(r"\bsed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|-i\S*)\s+\S+\s+([^\s;&|><\n'\"]+)")
+_TEE_WRITE_RE = re.compile(r"\btee\s+(?:-\S+\s+)*([^\s;&|><\n'\"]+)")
+_SKIP_PATH_RE = re.compile(r"^(/dev/|/proc/|/sys/|-|\d+$)")
+
+
+def _extract_written_files(cmd: str) -> list[str]:
+...
+79:_SELF_VERIFY_TOOL = "_tb2_self_verify"
+103:class CustomSelfVerifyProcessor(MultiHookProcessor):
+116:    async def on_task_start(self, event: TaskStartEvent):
+121:    async def on_before_model(self, event: BeforeModelEvent):
+133:    async def on_after_model(self, event: ModelResponseEvent):
+147:    async def on_before_tool(self, event: ToolCallEvent):
+153:    async def on_task_end(self, event: TaskEndEvent):
+159:class CustomEditToolProcessor(MultiHookProcessor):
+176:    async def on_task_start(self, event: TaskStartEvent):
+181:    async def on_before_tool(self, event: ToolCallEvent):
+188:    async def on_after_tool(self, event: ToolResultEvent):
+202:    async def on_task_end(self, event: TaskEndEvent):
+226:class TaskTimeReminderProcessor(MultiHookProcessor):
+240:    async def on_task_start(self, event: TaskStartEvent):
+245:    async def on_step_start(self, event: StepStartEvent):
+274:    async def on_task_end(self, event: TaskEndEvent):
+284:class PostCompactionRefreshProcessor(MultiHookProcessor):
+300:    async def on_task_start(self, event: TaskStartEvent):
+304:    async def on_step_start(self, event: StepStartEvent):
+347:    async def on_task_end(self, event: TaskEndEvent):
+464:        .add(CustomSelfVerifyProcessor())

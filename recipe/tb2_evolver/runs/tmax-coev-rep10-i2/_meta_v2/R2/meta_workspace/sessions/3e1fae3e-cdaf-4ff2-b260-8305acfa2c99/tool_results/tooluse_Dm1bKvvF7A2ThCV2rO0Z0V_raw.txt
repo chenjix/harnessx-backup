@@ -1,0 +1,70 @@
+1	# Evolve journal — tmax-coev-rep10-i2
+2	
+3	## Round 1 — functional verify gate
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-04-27T00:00:00Z
+8	hypothesis_id: h_functional_verify_v1
+9	levers: [instruction, control]
+10	predicted_affected: [task_000059_e4b842f5, task_000118_3043e92d, task_000115_40adb445, task_000264_ab8c7253, task_000396_e56917e2, task_001937_ac874115]
+11	cited_candidates: [C-001, C-002]
+12	gating_outcome: accepted
+13	gating_attribution: score=23/50; +5/-3 gained=task_000090_d0fa254a,task_000505_50b5162d,task_000533_01bba2c2,task_001095_31b3cce4 lost=task_000191_578636e9,task_000714_2b74124a,task_000764_a0052743; score 0.4600 >= incumbent(mean) 0.4200 - tol 0.0400
+14	expected_global_gain: "Flip a chunk of the large done+'1 failed' near-miss cluster (23/29 R0 failures exited done after only a static self-check) by forcing one genuine end-to-end run before exit"
+15	regression_risk: "Bounded extra verify cycles (hard cap max_nudges=2) could add a few Bash calls on already-correct tasks; read-only heuristic could misclassify a legit inspection-only final turn, costing one extra nudge — never an infinite loop"
+16	cost_shift: "+bounded tokens/task (<=2 extra verify cycles + a few functional-test Bash calls); net positive if it flips >=2 near-miss tasks"
+17	rollback_trigger: "If R2 pass_rate is flat/down AND median steps/cost rise materially, revert to R0's single-shot self-verify"
+18	-->
+19	
+20	### Why
+21	
+22	R0 scored 21/50 (42%). The dominant, systemic failure shape: **23 of 29
+23	failures exited `exit_reason=done`** — the agent believed it was finished.
+24	Only 4 were `budget_exceeded`, 2 `error`. Nearly every failing pytest tail
+25	reads "1 failed, N passed": the agent got most of the task right but shipped
+26	a semantic/functional bug (wrong numeric constant, a daemon that never
+27	actually keeps the invariant, a query using the wrong index) that a real
+28	end-to-end run would have caught. The existing single-shot
+29	`CustomSelfVerifyProcessor` fires exactly once (`_tb2_self_verify` shows 2
+30	refs = 1 call + 1 ack in ~all failing done-tasks); the agent answers it with
+31	a **shallow static re-check** (ls / grep / cat) and immediately re-exits.
+32	
+33	### Changes
+34	
+35	- `system_prompt.txt` (C-001) — rewrote the sidecar prompt to make
+36	  verification *functional, not cosmetic*: survey → restate every concrete
+37	  checkable requirement (exact paths, constants, thresholds, formats,
+38	  runtime behavior) → implement to those values → before stopping, RUN the
+39	  solution end-to-end against the real scenario and compare observed behavior
+40	  value-by-value, recomputing required constants independently. General
+41	  strategy only; no task literals.
+42	- `processors/functional_verify_gate.py` + `config.yaml` (C-002) — replaced
+43	  the single-shot `CustomSelfVerifyProcessor` with a stateful, functional-
+44	  aware `FunctionalVerifyGateProcessor` (same `_singleton_group` slot,
+45	  `_hook_='*'`, `max_nudges=2`). It nudges on exit intent, tracks whether the
+46	  agent runs a *substantive* command (executes/exercises the solution) vs.
+47	  purely read-only inspection (ls/cat/grep/head/find/...), and re-nudges once
+48	  more (bounded) when an exit attempt is preceded only by inspection.
+49	
+50	### Evidence
+51	
+52	- `task_000059_e4b842f5` final turn: "verified" by `ls -lh final_mac.txt &&
+53	  cat final_mac.txt` + `cat verify_mac.py` — never independently recomputed
+54	  the MAC; verifier failed `test_verify_mac_py_python3_compatible`.
+55	- `task_000118_3043e92d` final turn: "verified" by `ls -lh
+56	  deployment_monitor.py` and `grep -n THRESHOLD_BYTES/SIGSTOP` — never ran
+57	  `run_deployment.sh` to confirm the monitor keeps disk under quota; verifier
+58	  failed `test_deployment_monitor`.
+59	- Aggregate: `exit_reason=done` on 23/29 failures; `_tb2_self_verify`==2 refs
+60	  in ~all of them; post-ack turn contains only read-only Bash then re-exit.
+61	
+62	### Uncertainty
+63	
+64	Two changes ship together (instruction + control), so attribution will be
+65	ambiguous — but they are independent (either helps alone) and both target the
+66	same cluster via complementary mechanisms (knowledge vs. enforcement). The
+67	main risk is that some near-misses are genuine capability gaps the model
+68	can't fix even after running its own test; those will stay F. Watch for cost
+69	inflation without pass-rate gain — that's the rollback signal. Structural
+70	failures (e.g. task_000958's verifier missing `requests`) are out of scope.

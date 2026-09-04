@@ -1,0 +1,25 @@
+--- R1
++++ R2
+@@ -53,2 +53,22 @@
+   _hook_: '*'
++# R2 change (C-001): warn-only loop breaker. R1 evidence: 11/27 failures
++# exited budget_exceeded at the 80-step cap (+1 error), and the dominant shape
++# is a BYTE-IDENTICAL Bash command repeated consecutively with no change of
++# approach (max consecutive-identical run: 015=21, 1653=25, 191=12, 118=11).
++# The agent re-issues the same failing command instead of diagnosing it,
++# burning the whole budget. This reuses harnessx's existing LoopDetectionProcessor
++# but configured WARN-ONLY: it appends an advisory to the tool result after 3
++# byte-identical consecutive calls, telling the agent to change approach, and
++# NEVER raises (threshold=999). The hard-raise is disabled because 3 currently-
++# passing tasks (878/890/505) also repeat identical commands deliberately and a
++# raise would convert those passes into loop_detected failures. Name-only
++# Strategy 2 is disabled (name_warn_threshold=999) because every call is Bash,
++# so name-only would fire on essentially every task.
++- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
++  window_size: 12
++  warn_threshold: 3
++  threshold: 999
++  name_warn_threshold: 999
++  compaction_drop_threshold: 5
++  _hook_: '*'
+ # Break max_tokens repetition loops (finish_reason=length, no tool call).

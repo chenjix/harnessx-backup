@@ -1,0 +1,899 @@
+1	# Evolve journal — tmax-coev-rep14-i1
+2	
+3	## Round 1 — step-budget deliverable reminder
+4	
+5	<!-- journal:frontmatter
+6	round: 1
+7	timestamp: 2026-08-28T12:00:00Z
+8	hypothesis_id: h_step_budget_reminder_v1
+9	levers: [control]
+10	predicted_affected: [task_000010_644ab1c2, task_000118_3043e92d, task_000206_a943669b, task_000958_4bb2b05d]
+11	cited_candidates: [C-001]
+12	gating_outcome: reverted
+13	gating_attribution: score=29/50; +2/-6 gained=task_000206_a943669b,task_000536_9c16e8ef lost=task_000396_e56917e2,task_000587_9862bb19,task_001031_a8f0eb37,task_001089_220cc46b; score 0.5800 < incumbent(mean) 0.6600 - tol 0.0400 -> revert to R0
+14	expected_global_gain: "Flip/relieve the budget_exceeded cluster (>=4 tasks) by nudging deliverable finalization + exact-path verification before the 80-step wall"
+15	regression_risk: "A couple dozen extra tokens on tasks that run past 60% of an 80-step budget; short passing tasks (<20 steps) never see the reminder"
+16	cost_shift: "Negligible; at most two short injected user messages per long-running task; likely net-neutral by curbing end-of-budget spirals"
+17	rollback_trigger: "If R2 pass_rate is flat/down AND budget_exceeded count is unchanged, or if any previously-passing long-horizon task regresses to F, revert"
+18	-->
+19	
+20	### Why
+21	
+22	Assigned focus `task_000010_644ab1c2` failed with `exit_reason=budget_exceeded`
+23	(80 steps, reward=0). The verifier's `test_operator_script_exists` reports the
+24	required deliverable `/home/user/operator.py` does not exist. Reading the
+25	trajectory: the agent created `operator.py` (msg 19), then **renamed it away**
+26	with `mv /home/user/operator.py /home/user/k8s_operator.py` (msg 23), and spent
+27	the entire back half of the run (msgs 40–70) in a port-forward / zombie-process
+28	debugging spiral, never restoring the required path. This is the shared shape of
+29	the round's `budget_exceeded` cluster (also task_000118, task_000206,
+30	task_000958): the agent gets absorbed in one sub-component, burns the step
+31	budget, and hits the wall without finalizing/verifying the deliverable at its
+32	exact specified path.
+33	
+34	The harness has the *knowledge* (system prompt + `CustomSelfVerifyProcessor`
+35	both say "verify exact output paths") but no *delivery mechanism* at the
+36	decisive moment: `CustomSelfVerifyProcessor` only fires on voluntary exit (never
+37	reached in a budget_exceeded run), and `TaskTimeReminderProcessor` is inert in
+38	the tmax path (`timeout_seconds` is never injected by `harness_runner._run_async`,
+39	so `self._timeout` stays None). The step budget (`BaseTask.max_steps=80`) has no
+40	reminder at all.
+41	
+42	### Changes
+43	
+44	- `processors/step_budget_reminder.py` — new `StepBudgetReminderProcessor`
+45	  (`MultiHookProcessor`): on `on_step_start`, when `step_id/max_steps` crosses
+46	  0.60 (soft) and 0.80 (hard), appends one user-role reminder to stop
+47	  sub-component exploration and finalize + verify every required output at its
+48	  EXACT specified path (no renaming/relocating deliverables). Fires each
+49	  threshold once; only active when `max_steps >= 20`. Contract-clean (append
+50	  one user message, mirrors `TaskTimeReminderProcessor`; no removals, no
+51	  system-prompt mutation).
+52	- `config.yaml` — register the processor after `TaskTimeReminderProcessor`
+53	  (`warn_at: [0.6, 0.8]`, `min_budget: 20`, `hard_threshold: 0.8`); rest of the
+54	  pipeline byte-identical to R0. `system_prompt.txt` sibling copied unchanged.
+55	
+56	### Evidence
+57	
+58	- `task_000010_644ab1c2` result.json: `exit_reason=budget_exceeded`, steps=80;
+59	  final_pytest: `Operator script /home/user/operator.py does not exist.`
+60	- `task_000010_644ab1c2` messages.json: msg 19 `cat > /home/user/operator.py`;
+61	  msg 23 `mv /home/user/operator.py /home/user/k8s_operator.py`; msgs 40–70
+62	  continuous proxy/zombie debugging, `operator.py` never recreated.
+63	- `task_000118_3043e92d`, `task_000206_a943669b`, `task_000958_4bb2b05d`:
+64	  each `exit_reason=budget_exceeded`, steps=80, reward=0, deliverable
+65	  unconverged at the wall.
+66	- `harness_runner.py::_run_async`: only `sandbox_provider` + `tracer` injected
+67	  at runtime → `TaskTimeReminderProcessor.timeout_seconds` is None → inert.
+68	
+69	### Uncertainty
+70	
+71	The reminder may not flip tasks whose failure is a genuine correctness bug
+72	rather than a finalization/path miss (e.g. task_000118's daemon logic, task_000958's
+73	service correctness). For those it is a fair-run improvement, not a guaranteed
+74	flip. If R2 shows flat pass_rate with an unchanged budget_exceeded count, the
+75	nudge isn't landing and should be revisited (e.g. escalate to a hard finalize
+76	directive or an injected verify tool-call at ~step 75). Watch for any long-horizon
+77	passing task regressing — none expected, since the reminder only adds messages.
+78	
+79	## Round 1 (c4) — background-process state reconciliation
+80	
+81	<!-- journal:frontmatter
+82	round: 1
+83	timestamp: 2026-08-28T13:00:00Z
+84	hypothesis_id: h_bg_state_reconcile_v1
+85	levers: [control]
+86	predicted_affected: [task_000140_01c78b42]
+87	cited_candidates: [C-001]
+88	gating_outcome: pending
+89	gating_attribution: pending
+90	expected_global_gain: "Flips the clean-shutdown polarity (task_000140) and hardens the service/background cluster against the self-verify checklist's one-sided 'keep alive' wording by making persist-vs-cleanup explicit at exit."
+91	regression_risk: "Low — processor is inert on the ~60% of tasks with no background launch (regex gate), fires at most once on a genuine no-tool-call exit after self-verify, injects text only (never kills, no knob/schema change), keeps message-count contract at +1 user."
+92	cost_shift: "Negligible — one ~250-tok user message + at most a few short ps/pgrep Bash calls, only on tasks that launched a background process."
+93	rollback_trigger: "R2 shows task_000140 still F with no process-state change, OR any previously-passing service-alive task (task_000028/001089/001264) regresses (service killed / not reachable)."
+94	-->
+95	
+96	### Why
+97	
+98	Assigned focus task_000140_01c78b42 failed on
+99	`test_no_lingering_service_processes`: `pgrep -f vm_service` returned
+100	`['340','586','793']` at grader time. The task is a CI/CD pipeline that
+101	must start AND then SIGTERM-stop a Go `vm_service`, leaving nothing
+102	running. The agent fixed all three files correctly and its own
+103	`test_pipeline.sh` ran (curl returned 200, `vm_setup.log` written), but it
+104	declared done without confirming its own test-run service was reaped — so
+105	the container's final state had lingering `vm_service` processes. Root
+106	harness gap: the agent's own test-time actions mutate the state the
+107	verifier inspects, and nothing prompts it to reconcile leftover
+108	background processes against the task's required end state. The existing
+109	`CustomSelfVerifyProcessor` checklist only nudges the *persist* polarity
+110	("confirm running services are still alive"), the exact opposite of what
+111	this clean-shutdown task needs. Only task_000140 has this grader in R0
+112	(single grader witness), but the mechanism spans a real service cluster
+113	and the one-sided checklist wording is a latent regression risk for any
+114	clean-shutdown grader — hence a *neutral* reconciliation nudge, not a
+115	forced kill.
+116	
+117	### Changes
+118	
+119	- `processors/bg_state_reconcile.py` — new `BackgroundStateReconcileProcessor`
+120	  (`MultiHookProcessor`, `_order=91`, after `CustomSelfVerifyProcessor` at 90).
+121	  Tracks background-launch commands in `on_before_tool` (regex: `nohup`,
+122	  trailing `&`, `disown`, `setsid`, `start*.sh`, `*_service`, `systemctl/service start`);
+123	  at a genuine no-tool-call exit-intent, if a launch occurred and no cleanup nudge
+124	  has fired, injects one keepalive + one deferred user message asking the agent to
+125	  `ps`/`pgrep` and reconcile persist-vs-cleanup against the task text. Kills nothing.
+126	- `config.yaml` — register the processor via absolute `file://` path after
+127	  `CustomSelfVerifyProcessor`. No other change.
+128	
+129	### Evidence
+130	
+131	- task_000140_01c78b42 `final_pytest.output_tail`:
+132	  `AssertionError: Lingering vm_service processes found: ['340', '586', '793']`
+133	  from `test_no_lingering_service_processes`; `agent.exit_reason=done`,
+134	  `finished=no_tool_calls`, 11 steps, `initial_pytest.passed=true`.
+135	- task_000140 messages: agent wrote `test_pipeline.sh` ending `kill -TERM $PID`,
+136	  ran `bash /home/user/test_pipeline.sh` (starts `./vm_service &` via
+137	  `start_service.sh`), then the final assistant turn declared success with no
+138	  post-run `ps`/`pgrep` — the test-started service was never confirmed dead.
+139	- Existing checklist (harness.py L96): "For running services: confirm they are
+140	  still alive and reachable right now" — one-sided persist wording.
+141	
+142	### Uncertainty
+143	
+144	If the model ignores the nudge or cannot reason about which polarity the task
+145	wants, task_000140 stays F. If a service-alive task's agent over-reacts and
+146	kills a service it should keep, that cluster regresses — the nudge is worded
+147	neutrally and gated to fire only once after self-verify to minimise this, but
+148	R2 attribution on task_000028/001089/001264 is the watch signal; revert per
+149	rollback_trigger if any regress.
+150	
+151	## Round 1 (c5) — recover from verbatim tool-result loops
+152	
+153	<!-- journal:frontmatter
+154	round: 1
+155	timestamp: 2026-08-28T13:00:00Z
+156	hypothesis_id: h_stuck_result_breaker_v1
+157	levers: [control]
+158	predicted_affected: [task_000206_a943669b, task_000958_4bb2b05d, task_000118_3043e92d]
+159	cited_candidates: [C-001]
+160	gating_outcome: pending
+161	gating_attribution: pending
+162	expected_global_gain: "Closes the verbatim-loop-burns-80-step-budget cluster (three-plus tasks) by breaking the fixation in place and returning control while budget remains — a recovery strategy complementary to terminate-on-loop."
+163	regression_risk: "Low — append-only note on a tool result after three-plus consecutive byte-identical outputs, a shape no R0-passing task shows; never drops/rewrites messages, never terminates. Contract check passes (append-only on_after_tool)."
+164	cost_shift: "Net decrease — breaks dead loops at repeat three instead of letting them run to step 80, reclaiming tens of steps per stuck task; the note is about 90 tokens and fires only inside an active loop."
+165	rollback_trigger: "If R3 shows any previously-passing task regressing, or the three cited tasks still budget_exceeded with the loop unbroken, revert (raise warn_threshold first if the nudge is merely too weak)."
+166	-->
+167	
+168	### Why
+169	
+170	Assigned focus task_000206_a943669b exited budget_exceeded at step 80 with a
+171	malformed findings.txt. The jq binary rejects hyphenated keys
+172	(csp-report / blocked-uri) as "report/0 is not defined", and the model
+173	re-issued byte-identical failing jq commands with verbatim assistant text
+174	about 13-plus times in a row (messages.json rows 11-533) — the first third of
+175	the step budget spent making zero progress. It escaped only after a
+176	PostCompaction refresh, then had no budget left to fix its buggy analyze.sh.
+177	The pipeline had no recovery hook for repeated identical tool results:
+178	ParseRetryProcessor handles only unparseable model output, CustomEditToolProcessor
+179	counts only write commands, and CustomSelfVerifyProcessor never fires on a
+180	budget-exhausted run. Two other round-0 tasks share the mechanism
+181	(task_000958 sqlite3 x18, task_000118 wait/ps x13).
+182	
+183	### Changes
+184	
+185	- processors/stuck_result_breaker.py — new StuckResultBreaker
+186	  MultiHookProcessor. On on_after_tool, tracks consecutive byte-identical
+187	  results per tool; at warn_threshold (3) appends an escalating corrective note
+188	  ("this exact output has repeated N times — stop, switch mechanism") and at
+189	  hard_threshold (6) a stronger note; reset_after_nudge re-fires if the loop
+190	  persists. Append-only, non-terminating, content-agnostic (no task/path/
+191	  syntax literals).
+192	- config.yaml — register StuckResultBreaker at _order 35 (after
+193	  CustomEditToolProcessor, before CustomSelfVerifyProcessor) via absolute
+194	  file:// path. Rest byte-identical to R0.
+195	
+196	### Evidence
+197	
+198	- task_000206_a943669b messages.json rows 11-533: assistant text "The issue is
+199	  that jq is interpreting report and uri ..." plus tool result "jq: error:
+200	  report/0 is not defined ... (exit 3)" repeat identically over 10 times before
+201	  any tool switch; result.json exit_reason=budget_exceeded, steps=80, reward=0,
+202	  initial_pytest.passed=true; final findings.txt has empty "Attacker IP:" and a
+203	  doubled Blocked URI line.
+204	- task_000958_4bb2b05d, task_000118_3043e92d: prior-round sweep (learnings.md
+205	  lines 108-114) documents sqlite3 x18 and wait/ps x13 consecutive-identical
+206	  loops — same mechanism.
+207	
+208	### Uncertainty
+209	
+210	Distinct from the c3 proposal (LoopDetectionProcessor, configuration lever,
+211	terminate-on-loop): this is a recovery nudge, not a kill switch. If the model
+212	ignores the note and keeps looping, the reclaimed-budget benefit does not
+213	materialize and the task may still fail — but the append-only design cannot
+214	itself regress a passing task. If R3 shows the nudge too weak (loops persist),
+215	raise the cadence or defer to a terminate-on-loop guard; if a passing task
+216	regresses, revert.
+217	
+218	## Round 1 (c7) — verify against real artifacts before finishing
+219	
+220	<!-- journal:frontmatter
+221	round: 2
+222	timestamp: 2026-08-28T14:00:00Z
+223	hypothesis_id: h_verify_real_artifacts_v1
+224	levers: [instruction]
+225	predicted_affected: [task_000505_50b5162d, task_000536_9c16e8ef]
+226	cited_candidates: [C-001]
+227	gating_outcome: accepted
+228	gating_attribution: score=29/50; +2/-2 gained=task_001089_220cc46b,task_001701_95e3bbcb lost=task_000536_9c16e8ef,task_001706_24462a09; score 0.5800 >= incumbent(mean) 0.6200 - tol 0.0400
+229	expected_global_gain: "Flip the OCR/extraction->script cluster (>=2 tasks: 505 security, 536 data_querying) where a self-fabricated test masks a wrong deliverable; the verify-against-real-inputs + distrust-lossy-extraction discipline generalizes to any detector/transformer/script task."
+230	regression_risk: "Low — prompt-only; adds verification steps, removes no capability and changes no processor. Worst case a few extra Bash confirmations on already-passing tasks."
+231	cost_shift: "Small positive (a few extra verification steps on some tasks); likely net-neutral to net-positive by converting silent wrong-answer finishes into corrected deliverables."
+232	rollback_trigger: "If R3 pass_rate is flat/down AND task_000505/task_000536 stay F, or any previously-passing short task regresses to F, revert to R0 prompt."
+233	-->
+234	
+235	### Why
+236	
+237	Assigned focus task_000505_50b5162d (security, reward=0, exit_reason=done, 10 steps).
+238	The agent OCR'd an SSH key from an image, got a garbled string (standard ed25519
+239	prefix `AAAAC3NzaC1lZDI1NTE5` misread as `AAAAC3NzaC1IZDIINTES`, stray spaces
+240	inserted), hardcoded it, then "verified" by creating test files that echoed its own
+241	garbled string — a guaranteed false pass — and declared done. The verifier ran the
+242	script against the real trojaned binaries (uncorrupted key): `2 of 2 evil bypassed`.
+243	Same mechanism appears in task_000536_9c16e8ef (OCR employee-id -> SQLite audit
+244	script; failed on CSV quoting that comparison against the real DB output would have
+245	surfaced). Shared shape: extraction from a lossy source trusted blindly + validation
+246	against self-fabricated inputs instead of the real artifacts already on disk. The OCR
+247	misread is a model limit; the false-confidence verification loop is a harness
+248	discipline gap the system prompt can close generally.
+249	
+250	### Changes
+251	
+252	- `system_prompt.txt` (sibling of config, read by SiblingSystemPromptBuilder) —
+253	  add general discipline: (1) survey real input artifacts up front; (2) when the
+254	  deliverable is a script/program/classifier, validate it end-to-end against the
+255	  REAL inputs the task points at, never against self-fabricated inputs echoing a
+256	  derived value; (3) distrust values from lossy sources (OCR/scan), cross-checking
+257	  format (prefix/length/charset/decodability) and the real target data before
+258	  trusting them; (4) before stopping, confirm exact output paths AND correct
+259	  behavior on real inputs. No task-specific literals.
+260	- `config.yaml` — byte-identical to R0 (still SiblingSystemPromptBuilder); the
+261	  change is entirely in the sidecar prompt. Instruction lever only.
+262	
+263	### Evidence
+264	
+265	- task_000505_50b5162d messages.json msg 7: tesseract output
+266	  `ssh-ed25519 AAAAC3NzaC1IZDIINTES...`; msg 9 hardcodes that string and tests
+267	  `/tmp/malicious_test.txt` built by echoing the same string; result.json
+268	  final_pytest: `2 of 2 evil bypassed: cat_evil, ls_evil`.
+269	- task_000536_9c16e8ef msg 0: OCR of `/app/target_memo.png` + script emitting CSV
+270	  from `/app/audit.db`; result.json final_pytest index-0 diff is a CSV quoting
+271	  mismatch (`"Source Code Repo"` vs `Source Code Repo`) checkable against real DB
+272	  output before exit.
+273	
+274	### Uncertainty
+275	
+276	If the model reads the discipline but still trusts a garbled OCR value without
+277	running against the real binaries, 505 stays F (the OCR itself is a model limit;
+278	the rule only helps if the agent acts on the "test against real inputs" nudge). For
+279	536 the format cross-check is more mechanical and likelier to land. Append-only
+280	prompt guidance cannot itself regress a passing task; watch for step-count inflation
+281	on easy tasks. If R3 shows flat pass_rate with both targets still F, escalate (e.g.
+282	a Control hook that blocks `exit` until the deliverable has been exercised on a
+283	non-self-generated file) or defer.
+284	
+285	## Round 2 — exact output-contract self-verify
+286	
+287	<!-- journal:frontmatter
+288	round: 2
+289	timestamp: 2026-08-28T13:00:00Z
+290	hypothesis_id: h_output_contract_verify_v1
+291	levers: [control]
+292	predicted_affected: [task_000264_ab8c7253, task_000536_9c16e8ef]
+293	cited_candidates: [C-001]
+294	gating_outcome: pending
+295	gating_attribution: pending
+296	expected_global_gain: "Relieve the 'false-confidence voluntary exit on wrong output-contract' cluster (>=2 data_querying tasks, plausibly touches the ~8 done/no_tool_calls failures whose miss is exact format/values)"
+297	regression_risk: "Low — behaviour-identical to the CustomSelfVerifyProcessor it replaces except for a longer checklist; same +1 user msg / keepalive / one-shot firing. Worst case is a few extra verification Bash calls."
+298	cost_shift: "Small positive: ~2 extra checklist sentences + 1-3 extra verify Bash calls on tasks that voluntarily exit; net-neutral-to-favourable since it targets would-be failures."
+299	rollback_trigger: "If R3 pass_rate is flat/down AND task_000264/task_000536 still fail on the same exact-match assertion, the nudge isn't landing (residual is a pure model SQL/format capability gap) — revert to stock CustomSelfVerifyProcessor."
+300	-->
+301	
+302	### Why
+303	
+304	Assigned focus `task_000264_ab8c7253` (data_querying) failed with `reward=0`,
+305	`exit_reason=done`, `finished=no_tool_calls`, steps=17 — a *voluntary* exit, not
+306	a budget/loop wall. Two output-contract errors: (1) the recursive CTE base case
+307	counted each employee as its own subordinate → every count off by +1
+308	(`'Alice (CEO),12' != 'Alice (CEO),11'`); (2) the query-plan test asserts the
+309	literal substring `USING INDEX`, but the agent produced `USING COVERING INDEX` /
+310	`AUTOMATIC COVERING INDEX`. The stock `CustomSelfVerifyProcessor` fired (msg 289
+311	`_tb2_self_verify`) but its generic checklist ("re-read task / files exist /
+312	inspect contents") let both slip: the agent re-`ls`'d and re-eyeballed the
+313	numbers it had already produced, never recomputing a value or comparing the
+314	format literally. `task_000536_9c16e8ef` shows the same shape — correct values
+315	emitted with quoted CSV fields where bare were required. Shared root cause: the
+316	verification discipline at the moment of voluntary exit is too weak to catch
+317	exact-format / off-by-one output-contract misses.
+318	
+319	### Changes
+320	
+321	- `processors/output_contract_verify.py` — new `OutputContractVerifyProcessor`
+322	  (`MultiHookProcessor`). Drop-in replacement for `CustomSelfVerifyProcessor`:
+323	  identical one-shot exit-verify mechanism (keepalive synthetic tool call + a
+324	  single appended user message, same singleton group `tb2_self_verify`, same
+325	  order 90), but the injected checklist adds two task-agnostic steps — (3) a
+326	  literal byte-for-byte output-format audit (delimiter/quoting/header/trailing
+327	  newline) and (4) an independent re-derivation of at least one expected value
+328	  by a different method (hand-trace / alternate query / manual count). No
+329	  domain knowledge, constants, paths, or task IDs embedded.
+330	- `config.yaml` — swap the final pipeline entry
+331	  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` for a
+332	  `file://…::OutputContractVerifyProcessor` reference. Rest of the pipeline
+333	  byte-identical to R0. `system_prompt.txt` sibling copied unchanged.
+334	
+335	### Evidence
+336	
+337	- `task_000264_ab8c7253` result.json: `reward=0`, `exit_reason=done`,
+338	  `steps=17`; `final_pytest`: `At index 0 diff: 'Alice (CEO),12' != 'Alice (CEO),11'`
+339	  and `'USING INDEX' not in 'QUERY PLAN … SCAN E USING COVERING INDEX …'`.
+340	- `task_000264` messages.json: msg 88 CTE base case `e.id AS subordinate_id`
+341	  (counts self); msg 289 self-verify tool fired; msgs 307–328 agent re-`ls`'d
+342	  and re-declared success without recomputing.
+343	- `task_000536_9c16e8ef` result.json `final_pytest`:
+344	  `'EMP-4001,"Source Code Repo",…' != 'EMP-4001,Source Code Repo,…'` — right
+345	  values, quoted vs bare fields; `exit_reason=done`, `finished=no_tool_calls`.
+346	
+347	### Uncertainty
+348	
+349	Part of `task_000264`'s failure is a genuine model SQL-reasoning slip
+350	(self-inclusion) and a subtle test-string expectation. The harness fix does not
+351	inject SQL knowledge — it strengthens the *verification discipline* so the model
+352	re-derives and byte-compares its own output, a general capability. If R3 shows
+353	the cluster unchanged on the same exact-match assertions, the residue is a pure
+354	capability gap; revert to the stock processor per the rollback trigger. No
+355	previously-passing task loses a mechanism, so regression risk is low.
+356	
+357	## Round 3 — lossy-source extraction + real-input validation discipline
+358	
+359	<!-- journal:frontmatter
+360	round: 3
+361	timestamp: 2026-08-28T15:00:00Z
+362	hypothesis_id: h_ocr_extraction_discipline_v1
+363	levers: [instruction]
+364	predicted_affected: [task_000015_89886d8d, task_000505_50b5162d, task_000536_9c16e8ef]
+365	cited_candidates: [C-001]
+366	gating_outcome: reverted
+367	gating_attribution: score=27/50; +2/-4 gained=task_001031_a8f0eb37,task_001706_24462a09 lost=task_000578_cebe85a5,task_001089_220cc46b,task_001673_86224c91,task_001701_95e3bbcb; score 0.5400 < incumbent(mean) 0.6200 - tol 0.0400 -> revert to R0
+368	expected_global_gain: "Flip/relieve the OCR->script cluster (>=3 tasks: 015 migrate, 505 SSH-key detector, 536 audit script) by teaching the agent to exhaust standard OCR remedies (upscale/fix DPI, re-binarize, multi-PSM) before inferring a schema from samples, and to validate a built parser/script end-to-end against the REAL task inputs rather than self-fabricated echoes."
+369	regression_risk: "Low — prompt-only append; removes no capability, changes no processor. Worst case a few extra image-preprocessing / real-input Bash calls on already-passing tasks. The two passing OCR tasks (338, 1652) already extract cleanly, so guidance only reinforces their habit."
+370	cost_shift: "Small positive — a handful of extra preprocessing/verification Bash calls on extraction tasks; likely net-neutral-to-favourable by converting silent wrong-answer finishes into corrected deliverables and pre-empting the output-token repetition spiral seen when the agent has no remedy to reach for."
+371	rollback_trigger: "If next round is flat/down AND task_000015/505/536 stay F on the same accuracy/format assertions (pure OCR-model-capability limit), OR any previously-passing OCR task (338, 1652) or short non-OCR task regresses to F — revert to the R0 minimal prompt."
+372	-->
+373	
+374	### Why
+375	
+376	Assigned focus `task_000015_89886d8d` (software_engineering, reward=0,
+377	exit_reason=done, 28 steps): built `/home/user/migrate.py` (OCR a routing-schema
+378	image into URL→JSON mapping rules) that scored accuracy 0.6678 vs the 0.98
+379	threshold on a hidden 2000-URL dataset. Root chain: `tesseract` on the raw
+380	800×400 image emitted `Invalid resolution 0 dpi. Using 70 instead` and garbage
+381	(`eatalogyitem`, `Wept=<depariment>`, `esss_id`). The agent fiddled with
+382	contrast/threshold/PSM ~7 times but never applied the actual fix — upscaling the
+383	image to raise effective DPI — then hit the output-token limit in a repetition
+384	loop (msg 288 truncation notice), gave up, and *guessed* a 3-route schema from
+385	the 4 sample URLs. It then "verified" only against those self-consistent samples
+386	(a guaranteed false pass) and declared done, so URL-encoding / extra-param /
+387	edge-case handling on the hidden set was never exercised — the exact 0.6678→0.98
+388	gap. This is not a missing tool: tesseract, PIL and Bash all work, and the two
+389	`tesseract` tasks that PASS (338, 1652) extract cleanly with the same toolset.
+390	It is a strategy/knowledge gap the instruction lever can close generally, and it
+391	recurs across the OCR→script cluster (505 hardcoded a garbled SSH key tested
+392	against its own echo → `2 of 2 evil bypassed`; 536 OCR'd an employee id in one
+393	shot, failed a CSV quoting/format check verifiable against the real DB).
+394	
+395	### Changes
+396	
+397	- `system_prompt.txt` (sidecar, read by `SiblingSystemPromptBuilder`) — append
+398	  two general disciplines: (1) lossy-source extraction — treat OCR/scan output as
+399	  unverified; if garbled, exhaust standard remedies (fix DPI by upscaling,
+400	  re-binarize/denoise, try multiple PSM modes, compare attempts) and cross-check
+401	  extracted values against expected shape + other evidence BEFORE inferring from
+402	  a couple of samples; (2) validation — test a built script/parser end-to-end
+403	  against the REAL task inputs, probe edge cases the samples don't cover
+404	  (encoding, missing/extra params, boundaries), and confirm exact output paths +
+405	  format before stopping. No task literals, constants, or copy-paste code.
+406	- `config.yaml` — byte-identical to R0 (still `SiblingSystemPromptBuilder`); the
+407	  change is entirely in the sidecar prompt. Confirmed R0 running prompt is the
+408	  minimal 5-line `DEFAULT_TMAX_PROMPT` (no sidecar existed in R0/R2), so this is
+409	  net-new instruction, not a duplicate of any live guidance.
+410	
+411	### Evidence
+412	
+413	- `task_000015_89886d8d` result.json: `reward=0`, accuracy `0.6678 < 0.98`;
+414	  messages msg 22 OCR `Invalid resolution 0 dpi` + garbled text; msg 288
+415	  output-token repetition-loop truncation; msg 296 "proceed with the mapping I
+416	  can infer from the sample URLs"; msg 330 verify only against 4 sample URLs.
+417	- `task_000505_50b5162d`: single `tesseract /app/evidence.png stdout`; garbled
+418	  ed25519 key hardcoded + tested against a self-echoed string → verifier
+419	  `2 of 2 evil bypassed`.
+420	- `task_000536_9c16e8ef`: single `tesseract /app/target_memo.png stdout`;
+421	  extracted id fed straight into `run_audit.sh`; final_pytest a CSV quoting miss.
+422	- Passing counter-cluster: `task_000338_27d6a1be`, `task_001652_86e1d185`
+423	  (`reward=1`) — clean extraction with the same toolset (338 simpler artifact;
+424	  1652 iterates with alternate tools), showing capability is present.
+425	
+426	### Uncertainty
+427	
+428	If the upscaled image still OCRs to garbage the residual is a pure model/OCR
+429	capability limit and 015 stays F; the format cross-check (505 ed25519 prefix,
+430	536 CSV format) is more mechanical and likelier to land. Append-only prompt
+431	guidance cannot itself remove a mechanism, so regression risk is low; watch for
+432	step-count inflation on easy tasks and for any regression on 338/1652. If the
+433	cluster is unchanged on the same assertions next round, revert to R0 prompt per
+434	the rollback trigger.
+435	
+436	
+437	## Round 3 — break degenerate low-information tool-call loops
+438	
+439	<!-- journal:frontmatter
+440	round: 3
+441	timestamp: 2026-08-28T15:00:00Z
+442	hypothesis_id: h_degenerate_loop_breaker_v1
+443	levers: [control]
+444	predicted_affected: [task_000010_644ab1c2, task_000958_4bb2b05d, task_001706_24462a09, task_001031_a8f0eb37]
+445	cited_candidates: [C-001]
+446	gating_outcome: pending
+447	gating_attribution: pending
+448	expected_global_gain: "Flip/relieve the degenerate-loop failing cluster (>=4 tasks) where the model cycles on the same completed tool call(s) with identical results, making no new observations; content-agnostic so it generalizes."
+449	regression_risk: "Very low — append-only on the tool result (CustomEditToolProcessor contract), contract-clean, 0 of 29 passing tasks in R2 hit the window=6/distinct<=2 condition so no passing task ever sees the note."
+450	cost_shift: "Net decrease — breaks loops at ~6th repeated result instead of running to the step-80 wall, reclaiming tens of steps per stuck task; ~90-token note fires only inside a loop."
+451	rollback_trigger: "If R4 shows cited loopers still reward=0 with the loop unbroken (nudge ignored) and no passing regression, escalate (lower refire_gap or add hard loop-terminate) rather than reship; if any previously-passing task regresses to F, revert."
+452	-->
+453	
+454	### Why
+455	
+456	Assigned focus `task_000010_644ab1c2` (system_administration, reward=0,
+457	exit_reason=done, steps=65). The task requires a script at `/home/user/operator.py`,
+458	but that filename shadows Python's stdlib `operator` module — so any `python3`
+459	process with `/home/user` on `sys.path[0]` triggers a circular import
+460	(`from operator import eq` inside `collections`). final_pytest fails with that
+461	exact circular-import traceback.
+462	
+463	The agent correctly *diagnosed* the shadowing but never escaped it. It fell into a
+464	byte-identical 2-cycle (messages.json msgs 45–54): tool_call
+465	`rm operator.py && ln -sf k8s_operator.py operator.py && python3 -c "import operator"`
+466	→ `OK`, alternating with `cd /tmp && python3 k8s_operator.py` → the same traceback,
+467	9× each, until the run ended with no working deliverable.
+468	
+469	Root harness gap: nothing in R0 intercepts a loop of *completed* tool calls whose
+470	results never change. `LengthTruncationRecoveryProcessor` only handles
+471	`finish_reason=="length" and not tool_calls` (no-tool-call token-cap loops) — the
+472	other loop shape in this same trajectory (msgs 58–84). The completed-tool-call loop
+473	was uncovered. Sweep confirmed a recurring cluster: task_000958 (sqlite3 x13,
+474	budget_exceeded), task_001706 (x12, budget_exceeded), task_001031 (x47, error).
+475	
+476	Critically, task_000010's loop is a 2-cycle, so a naive "N consecutive identical
+477	results" detector (max strictly-consecutive = 2) misses it. A rolling window of the
+478	last 6 (command,result) fingerprints collapsing to <=2 distinct values catches both
+479	the 2-cycle AND the back-to-back reruns. Empirically, 0 of 29 R2-passing tasks hit
+480	this condition — the shape is exclusive to the looping/failing cluster.
+481	
+482	Distinct from reverted R1 `h_step_budget_reminder_v1` (a step-fraction reminder,
+483	control): this fires on the *repetition shape* of tool results, not on a budget
+484	threshold, and is append-only on the result rather than injecting user messages.
+485	
+486	### Changes
+487	
+488	- `processors/degenerate_loop_breaker.py` — new `DegenerateLoopBreakerProcessor`
+489	  (`MultiHookProcessor`, `_order=33`, after CustomEditToolProcessor(30), before
+490	  CustomSelfVerifyProcessor(90)). Pairs each command with its result in
+491	  `on_before_tool`/`on_after_tool`, maintains a rolling window of blake2b
+492	  fingerprints; when distinct fingerprints in the window <= `distinct_max` it
+493	  appends an escalating (soft→hard) "you are looping, change strategy" note to the
+494	  tool result. Append-only, non-terminating, content-agnostic (no task ids/paths/
+495	  syntax literals). Re-fires every `refire_gap` results so a stubborn loop is nudged
+496	  again without spamming.
+497	- `config.yaml` — register the processor via absolute `file://` path
+498	  (window=6, distinct_max=2, min_window_fill=6, refire_gap=4). Rest byte-identical
+499	  to R0; `system_prompt.txt` sibling copied unchanged.
+500	
+501	### Evidence
+502	
+503	- task_000010_644ab1c2 result.json: reward=0, exit_reason=done, steps=65;
+504	  final_pytest circular-import traceback on `import operator` from `/home/user/operator.py`.
+505	- task_000010 messages.json msgs 45–54: the `rm/ln/python3 -c` ↔ `python3 k8s_operator.py`
+506	  2-cycle, 9× each. windows-that-would-fire=13.
+507	- task_000958_4bb2b05d (budget_exceeded, max_consec_result=13), task_001706_24462a09
+508	  (budget_exceeded, max_consec_result=12), task_001031_a8f0eb37 (error, dupcmd=47).
+509	- Passing-task false-positive sweep: 0 of 29 reward=1 tasks would fire the detector.
+510	
+511	### Uncertainty
+512	
+513	If the model reads the note but cannot find the general escape (for 000010, the
+514	stdlib-shadow escape is a real reasoning step — strip the script dir from sys.path or
+515	run via a wrapper), 000010 may stay F even though the loop is broken; that residual is
+516	a model reasoning limit, not a harness gap. For the budget_exceeded loopers the
+517	reclaimed-budget benefit is more mechanical. Append-only design cannot itself regress a
+518	passing task. If R4 shows the nudge too weak (loops persist), escalate cadence or add a
+519	terminate-on-loop guard per rollback_trigger.
+520	
+521	## Round 3 (c3) — escalate on verbatim length-truncation loop
+522	
+523	<!-- journal:frontmatter
+524	round: 3
+525	timestamp: 2026-08-28T15:00:00Z
+526	hypothesis_id: h_stuck_truncation_escalator_v1
+527	levers: [control]
+528	predicted_affected: [task_000118_3043e92d, task_000010_644ab1c2]
+529	cited_candidates: [C-001]
+530	gating_outcome: pending
+531	gating_attribution: pending
+532	expected_global_gain: "Relieve the verbatim length-truncation loop cluster (task_000118 deployment_monitor daemon, task_000010 k8s operator) where the passive length-recovery nudge fails to break the loop and the deliverable is never exercised end-to-end; reclaim tens of burned steps and force a real execution before a voluntary exit."
+533	regression_risk: "Low - fires only on hashed content-identity across 3+ consecutive finish_reason=length no-tool-call turns (a shape healthy tasks never show); append-only (+0 when last role is user else +1), one-shot per run, never terminates, no system-prompt mutation."
+534	cost_shift: "Net decrease - breaks the loop at the 3rd identical truncation instead of running to the step wall (118 burned ~50 of 79 steps looping); directive ~120 tokens, fires at most once."
+535	rollback_trigger: "If R4 shows task_000118/task_000010 still F with the same identical-truncation loop unbroken, OR any previously-passing task regresses to F, revert. If loop breaks but 118 still fails on the log-size peak, residual is a monitor-logic capability gap - keep the escalator, note the gap."
+536	-->
+537	
+538	### Why
+539	
+540	Assigned focus task_000118_3043e92d (system_administration, reward=0,
+541	exit_reason=done, no_tool_calls, 79 steps). Task: a deployment_monitor.py
+542	daemon that must keep /home/user/logs under 40 MB via SIGSTOP/truncate/SIGCONT;
+543	verifier ran the real run_deployment.sh and peak log size hit 209715200 bytes
+544	(over the 45 MB threshold). The dominant run pathology is a verbatim
+545	length-truncation loop: the model re-emitted byte-identical narration, hit
+546	max_tokens with no tool call, got the passive continue nudge, and repeated - 14
+547	continue-nudges in the transcript; the same paragraph emitted ~10x. The
+548	existing LengthTruncationRecoveryProcessor fired repeatedly (its escalating
+549	NUDGE_REPEAT is the text the model quotes back) yet never broke the loop; ~50 of
+550	79 steps consumed. At the forced self-verify (msg 59) the agent re-read the
+551	source (msg 63) and rubber-stamped it (msg 64) - it never once executed the
+552	deliverable against the real simulator, so the peak was never observed. Same
+553	shape in task_000010_644ab1c2 (k8s operator, 65 steps).
+554	
+555	Harness gap: the length-truncation recovery is a passive text nudge; when the
+556	model ignores it the loop persists to the step wall with the deliverable never
+557	run. No runtime hook escalates, on demonstrated non-landing, from
+558	narration-redirect to a concrete write/EXECUTE directive.
+559	
+560	### Changes
+561	
+562	- processors/stuck_truncation_escalator.py - new StuckTruncationEscalator
+563	  (MultiHookProcessor, _order=7, after LengthTruncationRecoveryProcessor at 5).
+564	  Fingerprints assistant content on each finish_reason=length no-tool-call
+565	  turn; when the same fingerprint repeats hard_repeat (3) times in a row,
+566	  escalates ONCE with a strong directive: abandon narration, issue one Bash
+567	  command that writes the required output and/or EXECUTES the deliverable
+568	  end-to-end against the real inputs the task names, then observe the real
+569	  result. Content-agnostic, append-only, non-terminating.
+570	- config.yaml - register via absolute file:// path immediately after
+571	  LengthTruncationRecoveryProcessor; rest byte-identical to R0; system_prompt.txt
+572	  sibling copied unchanged.
+573	
+574	### Evidence
+575	
+576	- task_000118_3043e92d result.json: exit_reason=done, steps=79, reward=0;
+577	  final_pytest "Peak log directory size was 209715200 bytes, which exceeds the
+578	  threshold of 45000000 bytes".
+579	- task_000118 messages.json: 14 "cut off by the token limit. Please continue"
+580	  nudges; Counter over assistant contents shows the same
+581	  "The user is telling me to stop the repetition..." text at counts 4/3/3;
+582	  msg 59 self-verify, msg 63 re-read source, msg 64 "looks correct" -
+583	  run_deployment.sh never executed by the agent.
+584	- task_000010_644ab1c2 messages.json final turns: repeated "I've been stuck in a
+585	  loop... Please continue" truncation cycle; deliverable unfinalized.
+586	
+587	### Uncertainty
+588	
+589	Distinct from pending R1-c5 h_stuck_result_breaker_v1 (tool-RESULT identity) and
+590	the sibling R3 h_degenerate_loop_breaker_v1 (completed tool-call 2-cycle, which
+591	explicitly excludes the finish_reason=length no-tool-call loop this targets), and
+592	from R2 h_output_contract_verify_v1 (format audit). If the model ignores even the
+593	hard directive the loop persists and the task stays F, but the append-only design
+594	cannot regress a passing task. If the loop breaks yet 118 still fails on the
+595	log-size peak, the residual is a monitor-logic model capability gap; keep the
+596	escalator (it reclaimed budget and forced a real run) and note the gap. Watch
+597	task_000010/118 attribution and any long-horizon passing task for T->F.
+598	
+599	## Round 3 — provision HTTP verifier dependency (requests)
+600	
+601	<!-- journal:frontmatter
+602	round: 3
+603	timestamp: 2026-08-28T15:00:00Z
+604	hypothesis_id: h_http_verifier_dep_guard_v1
+605	levers: [control]
+606	predicted_affected: [task_000028_7fe033ac, task_000958_4bb2b05d]
+607	cited_candidates: [C-001]
+608	gating_outcome: pending
+609	gating_attribution: pending
+610	expected_global_gain: "Flip the verifier-side `import requests` collection-error cluster (>=2 HTTP-service tasks): the grader pytest module does `import requests` at collection time; when the container lacks it the test never collects and the task scores 0 regardless of correctness. Generalizes to any HTTP-service deliverable graded via Python requests."
+611	regression_risk: "Low — drop-in replacement for CustomSelfVerifyProcessor; append-only, one-shot, byte-identical to stock on non-HTTP runs (regex gate suppresses the extra item). Worst case one redundant `pip install requests` (~seconds) on an HTTP task that already had it. No message removed, no process killed, no schema/knob changed; contract check 0 violations."
+612	cost_shift: "Negligible; one conditional ~150-token checklist item + at most one short `pip install` on HTTP-service tasks. Net-favorable: converts guaranteed-0 verifier-collection failures into gradable runs."
+613	rollback_trigger: "If R4 shows task_000028/task_000958 still failing with the same `ModuleNotFoundError: No module named 'requests'` collection error (nudge not acted on), OR any previously-passing HTTP-service task regresses, revert to stock CustomSelfVerifyProcessor."
+614	-->
+615	
+616	### Why
+617	
+618	Assigned focus task_000028_7fe033ac failed with reward=0 despite the agent
+619	FULLY and correctly solving the task: it fixed the nginx upstream socket,
+620	rewrote the C++ server to compute the real ffprobe frame count and listen on
+621	the correct UNIX socket, resolved the nginx→socket permission-denied 502, wrote
+622	a correct logrotate.conf, started both services, and confirmed
+623	`Status: 200 / Body: '150'` end-to-end through nginx. The task nonetheless
+624	scored 0 because the *verifier* (`/tmp/test_final_state.py`, injected after the
+625	agent exits) does `import requests` at collection time and the container has no
+626	`requests` installed: pytest rc=2, "Interrupted: 1 error during collection",
+627	`ModuleNotFoundError: No module named 'requests'`. task_000958_4bb2b05d shows
+628	the identical collection ImportError. Both are HTTP-service tasks. This is a
+629	harness discipline gap, not a model capability gap: the agent even discovered
+630	the box had no HTTP clients at all (`curl: command not found`, `wget failed`,
+631	`nc` absent) and fell back to python urllib — a clear cue the environment lacked
+632	the HTTP tooling the verifier depends on — but never provisioned `requests`.
+633	Outbound installs work in these containers (task_000684 pip-installed
+634	numpy/scipy, task_001818 torch/whisper, task_001652 pytesseract), so
+635	`pip install requests` closes the gap.
+636	
+637	### Changes
+638	
+639	- `processors/http_verifier_dep_guard.py` — new `HttpVerifierDepGuardProcessor`
+640	  (`MultiHookProcessor`, singleton group `tb2_self_verify`, order 90). Drop-in
+641	  replacement for `CustomSelfVerifyProcessor`: identical one-shot exit-verify
+642	  mechanism (keepalive synthetic tool call + one appended user message). Tracks
+643	  HTTP-service signals in `on_before_tool` via a content-agnostic Bash regex
+644	  (nginx/proxy_pass/httplib/flask/uvicorn/http.server/HTTP/1.x/loopback host:port/
+645	  urllib/requests.*). On exit-intent, if a signal was seen, appends one extra
+646	  checklist item telling the agent to ensure `requests` is importable
+647	  (`python3 -c "import requests" || pip install requests`). On non-HTTP runs the
+648	  checklist is the stock text.
+649	- `config.yaml` — swap the final pipeline entry
+650	  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` for a
+651	  `file://…::HttpVerifierDepGuardProcessor` reference. Rest byte-identical to R0.
+652	  `system_prompt.txt` sibling copied unchanged.
+653	
+654	### Evidence
+655	
+656	- task_000028_7fe033ac result.json: reward=0, `exit_reason=done`,
+657	  `finished=no_tool_calls`, steps=25; final_pytest output_tail =
+658	  `import requests` → `ModuleNotFoundError: No module named 'requests'`,
+659	  rc=2, "Interrupted: 1 error during collection".
+660	- task_000028 messages.json: final HTTP test `Status: 200 / Body: '150'`
+661	  (task functionally complete); earlier `curl: command not found`,
+662	  `wget failed`, only `/usr/bin/python3` present.
+663	- task_000958_4bb2b05d result.json: identical `import requests`
+664	  ModuleNotFoundError collection failure (test line 4), reward=0.
+665	- Install viability: task_000684 "Successfully installed numpy ... scipy",
+666	  task_001818 torch/whisper from PyPI, task_001652 pytesseract — outbound pip
+667	  works in these containers.
+668	
+669	### Uncertainty
+670	
+671	If the model reads the nudge but declines to install `requests` (e.g. treats it
+672	as out of scope because the task text doesn't mention it), the two tasks stay F —
+673	the item is worded to override that ("Do this even though the task text may not
+674	mention it"). If the HTTP regex misses a service shape it won't fire, but that is
+675	a no-op, not a regression. Append-only design cannot itself regress a passing
+676	task. If R4 shows the cluster unchanged with the same requests ImportError,
+677	escalate to a Control hook that runs the install directly at exit; if any HTTP
+678	task regresses, revert per rollback_trigger.
+679	
+680	## Round 4 (c5) — noop: task_000264 residual is a capability gap already in-flight
+681	
+682	<!-- journal:frontmatter
+683	round: 4
+684	timestamp: 2026-08-28T16:00:00Z
+685	hypothesis_id: h_noop_task264_capgap_v1
+686	levers: []
+687	predicted_affected: []
+688	gating_outcome: accepted
+689	gating_attribution: score=30/50; +5/-2 gained=task_000578_cebe85a5,task_000587_9862bb19,task_001089_220cc46b,task_001090_c61c71f2 lost=task_001031_a8f0eb37,task_001706_24462a09; score 0.6000 >= incumbent(mean) 0.6133 - tol 0.0400
+690	expected_global_gain: "None — explicit no-op. The one valid harness lever for this task's failure shape (strengthened output-contract self-verify) is already in flight as R2 h_output_contract_verify_v1 (pending); re-shipping it would collide with that proposal and pile a 4th control processor on a cluster the scoreboard shows is saturated (control 3 attempts / 0 accepted / 1 reverted)."
+691	regression_risk: "None — config is byte-identical to R0."
+692	cost_shift: "Zero."
+693	rollback_trigger: "N/A (noop)."
+694	-->
+695	
+696	### Why
+697	
+698	Assigned focus `task_000264_ab8c7253` (data_querying, reward=0, exit_reason=done,
+699	finished=no_tool_calls, 17 steps — a voluntary exit). Two grader failures, both
+700	model-capability gaps rather than harness deficiencies:
+701	
+702	1. **Off-by-one recursive CTE.** The base case seeds `e.id AS subordinate_id`
+703	   (every employee is its own subordinate), so all counts are +1. Grader:
+704	   `At index 0 diff: 'Alice (CEO),12' != 'Alice (CEO),11'`. Alice's count of 12
+705	   equals total headcount (12) — a semantic red flag the model didn't catch. This
+706	   is a SQL-reasoning slip; a harness processor cannot inject the correct
+707	   recurrence.
+708	2. **`USING INDEX` substring miss.** Grader asserts the literal substring
+709	   `"USING INDEX" in content`, but sqlite emits `USING COVERING INDEX` /
+710	   `AUTOMATIC COVERING INDEX` for any index on `manager_id` (verified locally with
+711	   sqlite 3.37.2: the query only touches `manager_id`/`id`, so every candidate
+712	   index is *covering* → plan never contains the bare `USING INDEX` token). To
+713	   satisfy the grader the agent would need a sqlite-specific trick to force a
+714	   non-covering plan — pure domain knowledge, not a harness lever.
+715	
+716	The stock `CustomSelfVerifyProcessor` DID fire (msg 30 verification-check) and the
+717	agent rubber-stamped (msgs 31-33: re-`ls`'d files, re-eyeballed its own numbers,
+718	never recomputed). Strengthening that self-verify checklist is exactly the
+719	in-flight R2 hypothesis `h_output_contract_verify_v1` (byte-for-byte format audit +
+720	independent re-derivation), which is `pending` and lists task_000264 as its primary
+721	predicted_affected. That is the correct and only defensible harness lever for this
+722	shape.
+723	
+724	### Decision
+725	
+726	Explicit no-op. Per the brief ("if your focus turns out to be unsupported by the
+727	trajectories … make the smallest defensible edit rather than drifting onto another
+728	proposal's territory") and SOUL.md's capability-gap rule, I ship R0 byte-for-byte.
+729	
+730	Rationale for not shipping a change:
+731	- The residual failure is two model-capability gaps (SQL self-inclusion + sqlite
+732	  plan-string knowledge); a Control/Instruction lever cannot supply either without
+733	  embedding task-specific SQL knowledge (banned).
+734	- The one legitimate harness lever (output-contract self-verify discipline) is
+735	  already in flight as R2 `h_output_contract_verify_v1` (pending) — re-proposing it
+736	  is a novelty/territory collision and would confound its attribution.
+737	- Lever scoreboard: control = 3 attempts, 0 accepted, 1 reverted. Piling a 4th
+738	  overlapping control processor on this exact cluster is the textbook
+739	  "tried repeatedly without flipping → look elsewhere" signal.
+740	
+741	### Evidence
+742	
+743	- `task_000264_ab8c7253` result.json: `final_pytest` `At index 0 diff:
+744	  'Alice (CEO),12' != 'Alice (CEO),11'` and `'USING INDEX' not in
+745	  'QUERY PLAN … SCAN E USING COVERING INDEX …'`.
+746	- messages.json msg 9: CTE base case `SELECT e.id as manager_id, e.id as
+747	  subordinate_id FROM employees` (self-inclusion). msg 30 `_tb2_self_verify` fired;
+748	  msgs 31-33 re-`ls`/re-eyeball, no recomputation.
+749	- Local sqlite 3.37.2 repro: index on `manager_id` (plain or wide) yields
+750	  `SCAN … USING COVERING INDEX` / `SEARCH … USING COVERING INDEX` — never the bare
+751	  `USING INDEX` token the grader requires.
+752	
+753	### Uncertainty
+754	
+755	If R2's `h_output_contract_verify_v1` lands and flips task_000264, this confirms
+756	the self-verify discipline was the right lever and no further action is needed. If
+757	R2 is reverted or leaves task_000264 F on the same two assertions, the residual is
+758	confirmed as a pure capability gap (SQL recurrence + sqlite plan-string knowledge)
+759	that no harness lever should chase — log and skip. NEEDS_FROM_HUMAN candidate: the
+760	`USING INDEX` grader assertion is arguably an over-strict test (rejects a correct
+761	covering-index optimization); if graders are tunable, relaxing to
+762	`"USING" and "INDEX"` or accepting `COVERING INDEX` would fix a false-negative.
+763	
+764	## Round 4 — computed-result plausibility + full-range compare
+765	
+766	<!-- journal:frontmatter
+767	round: 4
+768	timestamp: 2026-08-28T16:00:00Z
+769	hypothesis_id: h_computed_result_plausibility_v1
+770	levers: [instruction]
+771	predicted_affected: [task_000396_e56917e2, task_001653_c4cafa73, task_001937_ac874115]
+772	cited_candidates: [C-001]
+773	gating_outcome: pending
+774	gating_attribution: pending
+775	expected_global_gain: "Relieve the 'declared done on a glaringly wrong self-computed value' cluster (>=3 tasks across scientific_computing + data_science) by making magnitude-plausibility and full-range/tail comparison an explicit pre-exit discipline; generalizes to any reproduce/validate/optimize task."
+776	regression_risk: "Low - prompt-only append to the minimal R0 sidecar; removes no capability, changes no processor. Worst case a few extra comparison Bash calls on already-passing compute tasks (000338, 001088 extract/compute cleanly, so guidance only reinforces their habit). Append-only guidance cannot remove a mechanism."
+777	cost_shift: "Small positive - a handful of extra tail/edge comparison Bash calls on compute tasks; likely net-neutral-to-favourable by converting silent wrong-answer finishes into corrected or honestly-flagged work."
+778	rollback_trigger: "If next round is flat/down AND task_000396/001653/001937 stay F on the same value mismatches (residual is pure model numerical capability), OR any previously-passing compute task (000338, 001088, data_science 000578/000760/001498/001697) regresses to F - revert to the R0 minimal sidecar prompt."
+779	-->
+780	
+781	### Why
+782	
+783	Assigned focus `task_000396_e56917e2` (scientific_computing, reward=0,
+784	exit_reason=done, no_tool_calls, 30 steps). Task: fix a vendored RK45 lib's
+785	build + step-size bug, run the sim, compute the maximum absolute deviation of
+786	`output.dat` vs an analytical `reference.dat`, write it to
+787	`/home/user/validation.log`; verifier asserts `0.0 < max_dev < 0.1`. The agent
+788	fixed the two obvious bugs (`-lm`; exponent `-0.25 -> 0.25`), computed
+789	**max_dev = 0.607**, wrote it, and declared done. The vendored integrator is a
+790	forward-Euler step ("using Euler for demonstration"), unconditionally unstable
+791	for an oscillator: the reference stays on the unit circle (amp ~1.0) while the
+792	agent's output diverges to amp ~1.64 by t~10 - the sign fix was necessary but
+793	NOT sufficient (a stable RK4/RKF is needed). The agent had its own 0.607 metric
+794	in hand - the smoking gun - but "verified" by spot-checking only the first 4
+795	(easy) leading time steps and re-listing files, never comparing the divergent
+796	tail or questioning the magnitude. Same shape recurs: task_001937 reported
+797	"Optimal Grid: 60" (expected 50); task_001653 emitted Distance 18.6199
+798	(expected 11.3444). Shared root: agent treats "produced a number / script ran"
+799	as success and does not sanity-check magnitude or compare across the full range.
+800	Implementing a stable integrator is a model capability gap (not patched); the
+801	verification discipline is a general, harness-addressable gap.
+802	
+803	### Changes
+804	
+805	- `system_prompt.txt` (sidecar, read by `SiblingSystemPromptBuilder`) - append a
+806	  general "computed-result plausibility + full-range comparison" discipline:
+807	  judge whether a computed value/metric is plausible in magnitude/sign; when
+808	  matching/validating/minimizing error against a reference, a large residual or
+809	  out-of-range value means the computation is still wrong (fix root cause, don't
+810	  record the bad value); compare across the FULL range incl. hardest/tail/edge
+811	  samples, not just the easy leading ones; a compile-error or sign-bug fix is
+812	  not necessarily the complete fix - re-run end-to-end and confirm the
+813	  correctness criterion before finishing. No task literals, tolerances, or
+814	  formulas.
+815	- `config.yaml` - byte-identical to R0 (still `SiblingSystemPromptBuilder`); the
+816	  change is entirely in the sidecar prompt. Instruction lever only. Confirmed R0
+817	  running prompt is the minimal 5-line `DEFAULT_TMAX_PROMPT`, so this is net-new
+818	  guidance, not a duplicate of any live rule.
+819	
+820	### Evidence
+821	
+822	- `task_000396_e56917e2` result.json: reward=0, exit_reason=done;
+823	  final_pytest `max deviation 0.6072 is not within (0.0, 0.1)`. messages msg 441
+824	  `compare.py` -> `0.6072399999999999`; msg 449 writes it verbatim; msgs 495-521
+825	  "verify" only t in {0, 0.01, 0.0534, 0.1437}; msg 531 `_tb2_self_verify` fires;
+826	  msgs 549-583 re-ls/cat + re-declare success. Divergence verified: ref
+827	  t=9.94 -> (-0.870, 0.493) amp 1.0; output t~9.94 -> (-1.447, 0.765) amp 1.64.
+828	- `task_001937_ac874115` final_pytest: `Expected Optimal Grid to be 50, but got 60`.
+829	- `task_001653_c4cafa73` final_pytest: `Centroid/Distance 18.6199` != expected
+830	  `11.3444`.
+831	- Passing counter-cluster: `task_000338_27d6a1be`, `task_001088_6f566806`
+832	  (reward=1) - clean compute/extraction with the same toolset; the rule only
+833	  reinforces their habit.
+834	
+835	### Uncertainty
+836	
+837	For task_000396 the flip is not guaranteed: after flagging 0.607 as wrong the
+838	agent must still author a stable integrator (a model capability limit); the
+839	discipline converts a silent wrong-answer finish into an honest not-yet-correct
+840	signal and is a fair-run improvement regardless. task_001937 (recompute the
+841	grid) and task_001653 (recompute the report values) are more mechanical and
+842	likelier to land once the agent stops rubber-stamping obviously-off numbers.
+843	Append-only prompt guidance cannot itself regress a passing task; watch for
+844	step-count inflation on easy tasks and any regression on 000338/001088 or the
+845	passing data_science cluster. If the cluster is unchanged on the same
+846	value-mismatch assertions next round, revert to the R0 minimal prompt.
+847	
+848	## Round 4 — polarity-neutral lifecycle self-verify
+849	
+850	<!-- journal:frontmatter
+851	round: 4
+852	timestamp: 2026-08-28T16:00:00Z
+853	hypothesis_id: h_lifecycle_selfverify_polarity_v1
+854	levers: [control]
+855	predicted_affected: [task_000140_01c78b42]
+856	cited_candidates: [C-001]
+857	gating_outcome: pending
+858	gating_attribution: pending
+859	expected_global_gain: "Flip the clean-shutdown witness (task_000140) and remove a latent harness harm: the stock self-verify checklist's one-sided 'confirm services still ALIVE' wording actively mis-nudges every teardown-polarity lifecycle task (graceful shutdown / no lingering processes / resource release)."
+860	regression_risk: "Very low — the persist branch of checklist item 5 is preserved in meaning, so service-must-stay-alive tasks are unaffected; message-count contract is identical to stock CustomSelfVerifyProcessor (+1 user, one-shot, order 90), no new firing conditions."
+861	cost_shift: "Negligible — item 5 is ~2 sentences longer; at most one extra pgrep/kill Bash call on teardown-polarity tasks that would otherwise fail. Net-favourable (converts silent lingering-process failures into corrected clean exits)."
+862	rollback_trigger: "If next round shows task_000140 still F on test_no_lingering_service_processes with the process table unreconciled (nudge ignored -> model reasoning limit), OR any previously-passing service-must-stay-alive task regresses (service killed/unreachable), revert to stock CustomSelfVerifyProcessor."
+863	-->
+864	
+865	### Why
+866	
+867	Assigned focus `task_000140_01c78b42` (system_administration, reward=0,
+868	exit_reason=done, finished=no_tool_calls, 11 steps) failed only on
+869	`test_no_lingering_service_processes`: `pgrep -f vm_service` found lingering
+870	PIDs at grader time (`['344','591']`, then `['344','591','787']` on the
+871	second grader run). The agent correctly fixed all three files, ran its own
+872	`test_pipeline.sh` (which starts `./vm_service &` then `kill -TERM $PID`),
+873	saw curl 200 + the log written, and declared done. The stock
+874	`CustomSelfVerifyProcessor` DID fire, but its checklist item 5 is one-sided
+875	— "For running services: confirm they are still alive and reachable right
+876	now" — the exact wrong polarity for a clean-shutdown task. It gave the agent
+877	no reason to reap the test-run service, so the container's final live state
+878	kept the process the grader inspects. This is a harness-level polarity bug:
+879	the same wording is a latent regression risk for ANY task whose required end
+880	state is "stopped / no lingering processes", not just task_000140. Sweep
+881	confirmed the `no_lingering` grader is a single witness this batch, but the
+882	mis-nudge mechanism is general and lives in the harness, not the task.
+883	
+884	### Changes
+885	
+886	- `processors/lifecycle_self_verify.py` — new `LifecycleSelfVerifyProcessor`,
+887	  a drop-in replacement for `CustomSelfVerifyProcessor`: byte-identical
+888	  firing mechanics (singleton group `tb2_self_verify`, `_order=90`,
+889	  synthetic keepalive tool call + deferred +1 user message on no-tool-call
+890	  exit intent), with checklist item 5 rewritten to be polarity-neutral —
+891	  reconcile the *required* end state (persist OR teardown), and if the task
+892	  requires a stopped/clean state, confirm via `ps`/`pgrep` that nothing
+893	  remains, explicitly including any process started while self-testing. No
+894	  task ids / paths / service names embedded.
+895	- `config.yaml` — swap the final pipeline entry
+896	  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` for a
+897	  `file://…::LifecycleSelfVerifyProcessor` reference. Rest byte-identical t
+
+[... truncated at 60,000 chars of 68,317 (1019 lines total). This file has very long lines; use `offset`/`limit` to page through it, or Grep to find the part you need. ...]

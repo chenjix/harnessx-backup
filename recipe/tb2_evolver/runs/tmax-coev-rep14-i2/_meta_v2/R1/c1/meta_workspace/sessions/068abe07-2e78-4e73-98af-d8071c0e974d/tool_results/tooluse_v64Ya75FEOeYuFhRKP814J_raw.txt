@@ -1,0 +1,69 @@
+======== task_000111_cbada64a ========
+num msgs: 14
+--- FIRST USER PROMPT (truncated) ---
+As a machine learning engineer, you are preparing training data from a simulation process. You've noticed that the numerical integrator used for the simulation sometimes exhibits divergent step-size behavior, resulting in noisy outputs. You need to analyze the resulting dataset to quantify the noise level.
+
+Write a C++ program `/home/user/analyze.cpp` to analyze the dataset located at `/home/user/noisy_data.csv`. The CSV contains 100 lines of `x,y` coordinates (comma-separated floats).
+
+Your C++ program must perform the following tasks:
+1. **Curve Fitting:** Perform a simple linear regression using Ordinary Least Squares (OLS) to fit a line ($y = mx + c$) to the dataset, finding the slope `m` and intercept `c`.
+2. **Residuals Calculation:** Calculate the squared residuals for each of the 100 points ($residual_i = y_i - (m \cdot x_i + c)$).
+3. **Bootstrap Confidence Interval:** Generate a 95% bootstrap confidence interval for the **mean** of the squared residuals. 
+    - Use $10,000$ bootstrap resamples.
+    - Each resample should draw $N$ items with replacement from the squared residuals (where $N$ is the number of data points, i.e., 100).
+    - Use the percentile method to find the bounds (the 2.5th percentile for the lower bound and the 97.5th percentile for the upper bound).
+    - Sort the resampled means to find these percentiles. If the exact index is not an integer, you can just use the nearest integer index (e.g., index 249 for 2.5% and 9749 for 97.5% in a 0-indexed array).
+    - Use C++'s `<random>` library. You may use `std::mt19937` with a seed of `12345` and `std::uniform_int_distribution<int>(0, N - 1)` for resampling.
+4. **Output:** Save the results to `/home/user/result.txt` containing exactly one line in the format:
+   `m,c,ci_lower,ci_upper`
+   (Round the values to 4 decimal places).
+
+Compile your C++ program with `g++ -O3 /home/user/analyze.cpp -o /home/user/analyze` and run it to produce the `result.txt` file.
+======== task_000264_ab8c7253 ========
+num msgs: 34
+--- FIRST USER PROMPT (truncated) ---
+You are a Database Administrator tasked with optimizing and running a graph-analytical query on a local SQLite database.
+
+You have been provided with an SQLite database at `/home/user/company.db`. 
+The database contains two tables:
+1. `departments` (id INTEGER PRIMARY KEY, name TEXT)
+2. `employees` (id INTEGER PRIMARY KEY, name TEXT, manager_id INTEGER, salary INTEGER, department_id INTEGER)
+
+Your task is to:
+1. Write an SQLite query using a Recursive CTE that calculates the total number of subordinates (direct and indirect) for each employee.
+2. Filter the results to only include employees with 3 or more total subordinates.
+3. Sort the results by the total number of subordinates in descending order, and then by employee name in ascending order.
+4. Analyze the `EXPLAIN QUERY PLAN` for this query. You will notice it performs full table scans (SCAN TABLE employees).
+5. Create the optimal index(es) on the `employees` table to optimize the recursive joins (specifically targeting the `manager_id` lookups).
+6. Run the optimized query and save the final output to `/home/user/top_managers.csv` in the format `name,total_subordinates` (no headers, comma-separated).
+7. Save the `EXPLAIN QUERY PLAN` output of your optimized query to `/home/user/query_plan.txt`.
+
+Ensure all operations are completed using standard `sqlite3` commands. You can write a bash script or interact directly in the terminal to accomplish this.
+======== task_000140_01c78b42 ========
+num msgs: 25
+--- FIRST USER PROMPT (truncated) ---
+You are a site administrator responsible for managing user accounts and provisioning virtual machines. You have inherited a partially written Go service that is supposed to act as an internal network API to provision user VMs using a QEMU mock script. However, the service fails to run correctly due to network routing issues in the Go code, and when it does run, it fails to execute the provisioning script properly because of environment differences (a PATH issue).
+
+Your task is to fix the service, its deployment script, and create a CI/CD test script to verify it.
+
+1. **Fix the Go Service (`/home/user/app/main.go`)**:
+   - The Go application should listen on TCP port `8080`.
+   - It needs an HTTP POST endpoint at `/provision` that accepts a form value named `username`.
+   - Upon receiving a request, the handler must execute the external command `qemu-mock` with the `username` as its single argument.
+   - Wait for the command to complete and return an HTTP 200 status.
+
+2. **Fix the Service Supervisor Script (`/home/user/start_service.sh`)**:
+   - This script acts as our service lifecycle manager (init script).
+   - It currently builds the Go app and runs it in the background, but the Go app fails to find `qemu-mock` when executed.
+   - The `qemu-mock` binary is located in `/home/user/bin/`. You must modify `start_service.sh` to ensure the Go application's environment has `/home/user/bin/` prioritized in its `PATH`.
+   - The script must save the running Go application's process ID (PID) to `/home/user/service.pid`.
+
+3. **Construct a CI/CD Test Pipeline (`/home/user/test_pipeline.sh`)**:
+   - Create a bash script that automates the deployment and testing process.
+   - It must execute `/home/user/start_service.sh`.
+   - It must wait for the service to start listening on port 8080 (e.g., using a short sleep or a loop).
+   - It must use `curl` to send a POST request to `http://localhost:8080/provision` with the form data `username=admin_alice`.
+   - Finally, it must gracefully stop the Go service by reading `/home/user/service.pid` and sending a SIGTERM kill signal to that PID.
+
+**Success Criteria**:
+If everything is configured correctly, running `bash /home/user/test_pipeline.sh` will successfully build the service, start it, trigger the network request, and gracefully shut it down. The `qemu-mock` script (which we have already created for you) will automatically write `PROVISIONED_VM_FOR: admin_alice` to `/home/user/vm_setup.log`. We will verify the contents of

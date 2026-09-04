@@ -1,0 +1,69 @@
+## Round 1 (c3) — heredoc-aware edit detector
+
+<!-- journal:frontmatter
+round: 1
+timestamp: 2026-09-02T19:30:00Z
+hypothesis_id: h_heredoc_edit_detector_v1
+levers: [control]
+predicted_affected: [task_000118_3043e92d, task_001937_ac874115]
+cited_candidates: [C-001]
+gating_outcome: pending
+gating_attribution: pending
+expected_global_gain: "Removes a false-positive [EditDetection] signal class that fires on any TB2 task authoring multi-line files via heredoc whose body contains `>` (Python/awk comparisons, pipes). Bash-only TB2 makes heredoc the dominant file-write idiom, so this touches the whole code-authoring cluster, not one task."
+regression_risk: "Very low — on non-heredoc commands the extractor is byte-identical to the stock parser (same 3 regexes, same skip filter), so genuine over-edit detection on repeated >/sed -i/tee writes is unchanged. Only heredoc bodies stop producing write targets, which is strictly correct."
+cost_shift: "Neutral-to-slightly-negative. Fewer phantom warnings → fewer confused delete/recreate recovery turns → fewer tokens on tasks that thrashed on spurious over-edit alerts. Per-step cost is one linear body strip."
+rollback_trigger: "If R2 shows global pass_rate down OR the code-authoring cluster regresses (a previously-passing heredoc task flips to F), revert to benchmarks.terminal_bench_2.harness.CustomEditToolProcessor."
+-->
+
+### Why
+
+Assigned focus task_000118_3043e92d (system_administration): the true reward
+failure is a logic/timing bug — the agent's `deployment_monitor.py` never
+truncated logs during the grader's run, so peak log-dir size hit 209,715,200
+bytes vs the 45,000,000 threshold. But the harness actively made this harder:
+the stock `CustomEditToolProcessor` scans the ENTIRE Bash command for `>`
+write redirects, heredoc body included. The agent wrote its monitor via
+`cat > deployment_monitor.py << 'EOF' ... EOF` whose body contains
+`SIZE_THRESHOLD = ...` and `if size > max_size:`. The `>` inside the body was
+misread as a redirect, so each write produced phantom "written files"
+(`SIZE_THRESHOLD:`, `=`, `max_size:`) alongside the real file. All of them
+accumulated in the per-file edit counter and fired THREE simultaneous
+`[EditDetection]` over-edit warnings. The model's own summary shows it read
+these as "The system is detecting excessive edits" and reacted by deleting and
+recreating the file — an unproductive loop that consumed steps it needed for
+the real timing bug. This is a genuine harness deficiency (a mechanical parser
+false-positive injected into tool results), not a model knowledge gap, so it is
+fixable in the harness regardless of whether it alone flips the task.
+
+### Changes
+
+- `processors/heredoc_aware_edit_detector.py` — new
+  `HeredocAwareEditToolProcessor` (MultiHookProcessor). Drop-in replacement for
+  the stock `CustomEditToolProcessor`: same singleton group
+  (`bash_edit_detector`), same `_order` 30, same `threshold` knob, same hook
+  surface and warning text. Only difference: `_strip_heredoc_bodies` removes
+  every heredoc body (keeping the opener line so the redirect target is still
+  counted) before running the stock redirect/sed/tee regexes, so body `>`
+  characters are treated as data.
+- `config.yaml` — replace `benchmarks.terminal_bench_2.harness.CustomEditToolProcessor`
+  with the new processor via absolute `file://` path, `threshold: 7`.
+
+### Evidence
+
+- `task_000118_3043e92d.result.json` final_pytest:
+  `AssertionError: Peak log directory size was 209715200 bytes, which exceeds
+  the threshold of 45000000 bytes` — the real reward failure (timing bug).
+- `task_000118_3043e92d.messages.json`: 4 tool results carry
+  ``[EditDetection] File `/home/user/deployment_monitor.py` ...`` PLUS phantom
+  ``File `SIZE_THRESHOLD:` ...`` and ``File `=` ...``. The model's later
+  summary: "The system is detecting excessive edits ... decided to delete the
+  file and create it fresh" — the phantom warnings drove a delete/recreate loop.
+- Offline reproduction: on the exact task_000118 heredoc the stock extractor
+  yields `['/home/user/deployment_monitor.py', 'max_size:']`; the new extractor
+  yields only `['/home/user/deployment_monitor.py']`. Non-heredoc commands
+  (`echo > f`, `sed -i`, `cat >> f`, `tee f`) extract identically to stock.
+- Validators: canonicalize ok; dry_fire likely_bugs=0; contract violations=0
+  (processor only appends to tool-result strings, never mutates event.messages);
+  literals findings=0.
+
+### Uncertainty

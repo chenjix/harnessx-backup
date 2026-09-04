@@ -1,0 +1,54 @@
+        if pct >= 0.75 and not self._warned_75:
+            self._warned_75 = True
+            return _TIME_WARNING_75
+        return None
+
+    def _build_block(self, tree: str | None) -> str:
+        lines = [f"\n\n## {self._header}"]
+        lines.append(f"- Agent workspace path: `{self._working_dir}`")
+        if self._project_dir is not None:
+            lines.append(f"- Project path: `{self._project_dir}`")
+        if self._timeout:
+            lines.append(f"- Task timeout: {self._timeout}s")
+        for key, val in self._constraints.items():
+            lines.append(f"- {key}: {val}")
+        if tree:
+            lines.append(f"\n### Workspace\n```\n{tree}\n```")
+        if self._inject_integrity_rules:
+            lines.append(_INTEGRITY_RULES)
+        return "\n".join(lines)
+
+    async def on_task_start(self, event: TaskStartEvent):
+        self._start_time = time.monotonic()
+        # Honor an explicitly configured working_dir (e.g. Tmax /home/user) —
+        # do not overwrite it with a host-side Workspace.root (/app, etc.).
+        if event.workspace is not None and not self._working_dir_explicit:
+            try:
+                self._working_dir = str(Path(event.workspace.root).expanduser().resolve())
+            except Exception:
+                self._working_dir = str(event.workspace.root)
+        if self._inject_tree:
+            self._tree_cache = await self._fetch_tree()
+
+        tree = self._tree_cache if self._inject_tree else None
+        prompt = event.system_prompt
+        if self._non_interactive:
+            prompt = sp_append(prompt, _NON_INTERACTIVE)
+        prompt = sp_append(prompt, self._build_block(tree))
+        yield dataclasses.replace(event, system_prompt=prompt)
+
+    async def on_before_model(self, event: BeforeModelEvent):
+        # Inject time-budget warnings as a user message right before the model call.
+        time_warn = self._time_warning()
+        if time_warn:
+            msg = Message(role="user", content=time_warn.strip())
+            yield dataclasses.replace(event, messages=event.messages + (msg,))
+        else:
+            yield event
+
+    async def on_task_end(self, event: TaskEndEvent):
+        self._start_time = None
+        self._warned_75 = False
+        self._warned_90 = False
+        self._tree_cache = None
+        yield event

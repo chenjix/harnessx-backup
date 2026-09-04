@@ -1,0 +1,84 @@
+14:class Message:
+15:    role: str  # "user" | "assistant" | "tool"
+16:    content: str | list  # str for text; list of content blocks for multimodal (Anthropic format)
+17:    tool_call_id: str | None = None
+18:    name: str | None = None
+19:    tool_calls: tuple = ()  # tuple[ToolCall, ...] — populated for role=assistant with tool calls
+20:    thinking: str = ""  # reasoning/thinking text (for display/trajectory recording)
+24:    msg_id: str | None = None  # stable per-message identity; set on raw-track records by journal
+28:class ToolSchema:
+29:    name: str
+30:    description: str
+45:class ToolCall:
+46:    id: str
+47:    name: str
+52:class Usage:
+53:    input_tokens: int = 0
+54:    output_tokens: int = 0
+55:    cache_read_tokens: int = 0
+56:    cache_write_tokens: int = 0
+64:class EvalResult:
+67:    reason: str
+75:class Event:
+76:    type: str
+77:    run_id: str
+78:    step_id: int
+86:class TaskStartEvent(Event):
+87:    type: str = field(default="task_start", init=False)
+88:    task_description: str = ""
+89:    model: str = ""
+90:    parent_run_id: str | None = None
+91:    session_id: str = ""  # session identifier — for /session display and /compact state loading
+94:    )  # mutable State ref — processors may read/write slots and messages
+96:    system_prompt: str = ""  # assembled system prompt (frozen for task lifetime)
+102:class BoundaryHint:
+107:    reason: str = "compaction"
+108:    before_msgs: int = 0
+109:    after_msgs: int = 0
+110:    before_tokens: int = 0
+111:    after_tokens: int = 0
+115:class StepStartEvent(Event):
+116:    type: str = field(default="step_start", init=False)
+118:    raw_messages: tuple["Message", ...] = ()  # state.raw_messages at this step
+120:    context_window: int = 64_000
+124:    messages: tuple["Message", ...] = ()  # assembled context
+125:    system_prompt: str = ""
+126:    token_count: int = 0
+131:class BeforeModelEvent(Event):
+132:    type: str = field(default="before_model", init=False)
+133:    messages: tuple[Message, ...] = ()
+137:    synthetic_output: str = field(default="", hash=False, compare=False)
+141:class ModelResponseEvent(Event):
+142:    type: str = field(default="model_response", init=False)
+143:    content: str = ""
+144:    thinking: str = ""  # extended thinking / reasoning content from the model
+146:    tool_calls: tuple[ToolCall, ...] = ()
+147:    finish_reason: str = "end_turn"
+149:    model: str = ""
+154:class ToolCallEvent(Event):
+155:    type: str = field(default="tool_call", init=False)
+156:    tool_name: str = ""
+157:    tool_input: dict = field(default_factory=dict)
+158:    tool_call_id: str = ""
+160:    synthetic_result: str | None = None
+162:    ToolResultEvent result instead of sending "Tool call not approved."
+163:    Processors can use this to intercept tool calls and inject custom results.
+168:class ToolResultEvent(Event):
+169:    type: str = field(default="tool_result", init=False)
+170:    tool_name: str = ""
+171:    tool_call_id: str = ""
+172:    result: str = ""
+173:    error: str | None = None
+175:    content_blocks: tuple = field(default=(), hash=False, compare=False)
+176:    # Native multimodal blocks (Anthropic content format) from MCP tools.
+177:    # Empty tuple = text-only result; processor chain passes this through unchanged.
+181:class StepEndEvent(Event):
+182:    type: str = field(default="step_end", init=False)
+183:    step_summary: str = ""
+184:    tool_call_summary: str = ""  # "tool1(args)|tool2(args)" — used by LoopDetectionProcessor
+185:    cumulative_tokens: int = 0
+193:    input_tokens: int = 0
+194:    output_tokens: int = 0
+198:class TaskEndEvent(Event):
+199:    type: str = field(default="task_end", init=False)
+200:    final_output: str = ""

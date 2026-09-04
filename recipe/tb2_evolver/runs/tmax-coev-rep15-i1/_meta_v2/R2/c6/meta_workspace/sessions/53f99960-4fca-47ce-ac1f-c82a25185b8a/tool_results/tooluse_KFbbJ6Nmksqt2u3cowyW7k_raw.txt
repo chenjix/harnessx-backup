@@ -1,0 +1,608 @@
+1	## Round 1 — break truncation spiral (force-act)
+2	
+3	<!-- journal:frontmatter
+4	round: 1
+5	timestamp: 2026-08-30T04:18:22Z
+6	hypothesis_id: h_length_recovery_forceact_v1
+7	levers: [control, instruction]
+8	predicted_affected: [task_000010_644ab1c2, task_000118_3043e92d, task_000264_ab8c7253, task_001031_a8f0eb37, task_001321_658ce4a8]
+9	cited_candidates: [C-001, C-002]
+10	gating_outcome: accepted
+11	gating_attribution: score=29/50; +3/-4 gained=task_000028_7fe033ac,task_001090_c61c71f2,task_001515_eed714e6 lost=task_000536_9c16e8ef,task_000587_9862bb19,task_000740_59416444,task_001701_95e3bbcb; score 0.5800 >= incumbent(mean) 0.6000 - tol 0.0400
+12	expected_global_gain: "Flips some/all of the 5-task budget_exceeded cluster (10% of sample) by breaking the reasoning-only max_tokens spiral and returning wasted steps to productive work; generalizes to any verbose-model truncation spiral."
+13	regression_risk: "Low — same singleton group replaces the R0 recovery processor; new triggers (content-length, forced Bash snapshot) only fire on runs already spiralling (3 consecutive truncations), at most once per streak. Prompt additions are general strategy, no task literals."
+14	cost_shift: "Net negative on the affected cluster (fewer wasted re-priming turns); +1 bounded Bash round-trip per spiral is negligible. Neutral on healthy runs."
+15	rollback_trigger: "If R2 pass_rate is flat/down AND the budget_exceeded count does not shrink, or if any previously-passing task regresses to budget_exceeded/error, revert to the R0 text-only recovery processor."
+16	-->
+17	
+18	### Why
+19	
+20	R0 scored 30/50. Five tasks all hit `exit_reason=budget_exceeded` at the
+21	full 80-step cap (task_000010, task_000118, task_000264, task_001031,
+22	task_001321). The shared root cause is a *reasoning-only truncation spiral*:
+23	the model generates verbose narration that exceeds the per-turn `max_tokens`
+24	(4096) cap with NO tool call, the run loop appends a passive "cut off by the
+25	token limit. Please continue from where you left off." nudge, and the same
+26	runaway generation re-primes turn after turn. task_000118 shows the assistant
+27	emitting the IDENTICAL sentence ~11 times with zero tool calls; 20 of its
+28	user turns are the passive continue nudge. The R0 config carried a text-only
+29	`LengthTruncationRecoveryProcessor` that (a) triggered only on
+30	`finish_reason=="length"` (which the backend did not report reliably — the
+31	raw passive nudge survived into history, proving the processor never fired)
+32	and (b) escalated with TEXT the model narrates straight past. task_000010
+33	additionally exposed the "correct-logic wrong-path" hard-fail: it wrote
+34	`/home/user/k8s_operator.py` while the verifier required
+35	`/home/user/operator.py`.
+36	
+37	### Changes
+38	
+39	- `processors/length_recovery_forceact.py` — new `MultiHookProcessor`
+40	  (singleton group `tmax_length_recovery`, so it REPLACES the R0 processor):
+41	  adds a secondary content-length trigger and, after N consecutive
+42	  truncations, mechanically injects a real generic Bash workspace-snapshot
+43	  tool call so model-external ground truth lands in context and breaks the
+44	  spiral. (C-001)
+45	- `config.yaml` — swap the R0
+46	  `recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor`
+47	  entry for the new `file://` processor with
+48	  `repeat_threshold=2, force_action_threshold=3, content_char_threshold=40000`.
+49	- `system_prompt.txt` — two general strategy rules: verify every required
+50	  output artifact exists at its EXACT path before finishing; after 2+
+51	  identical failures, stop retrying variants and switch approach; keep turns
+52	  short. (C-002)
+53	
+54	### Evidence
+55	
+56	- `task_000118_3043e92d` msgs 2,4,6,9,11,13,15,17,19,21,23: assistant repeats
+57	  verbatim "The user is right - I've been stuck in a loop..." with zero
+58	  tool_calls; each followed by the raw passive "cut off by the token limit"
+59	  nudge. First real tool call only at msg 25. 20 passive continue turns, only
+60	  14 tool calls across 80 steps.
+61	- `task_000264_ab8c7253` last assistant: "The query is still timing out. I've
+62	  been stuck in a loop trying the same query." 18 passive continue turns.
+63	- `task_000010_644ab1c2` final_pytest: "Operator script /home/user/operator.py
+64	  does not exist. You must create it." (wrote `k8s_operator.py` instead).
+65	- `task_001031_a8f0eb37` / `task_001321_658ce4a8`: 33 tool calls each, cycling
+66	  near-identical retries (mpi4py API / output-capture variants) with no pivot.
+67	
+68	### Uncertainty
+69	
+70	The forced-snapshot mechanism is proven to fire in this harness
+71	(`tb2_self_verify` uses the same injected-tool-call path), but whether fresh
+72	state actually lets these particular Qwen3.5-9B runs finish within remaining
+73	budget is the open question — some tasks (recursive-CTE perf, MPI) may also
+74	have a genuine capability gap the harness cannot close. If the cluster does
+75	not shrink at all in R2, the spiral is not the only blocker and the next round
+76	should look upstream (per-turn max_tokens sizing, or task-class capability).
+77	
+78	## Round 2 — final-state process/resource hygiene
+79	
+80	<!-- journal:frontmatter
+81	round: 2
+82	timestamp: 2026-04-27T12:00:00Z
+83	hypothesis_id: h_final_state_hygiene_v1
+84	levers: [control]
+85	predicted_affected: [task_000140_01c78b42, task_001090_c61c71f2]
+86	cited_candidates: [C-001]
+87	gating_outcome: pending
+88	gating_attribution: pending
+89	expected_global_gain: "Flip the TB2 final-container-state failure cluster: tasks whose verifier greps for lingering/misnamed processes or bounded resource footprints (task_000140 lingering vm_service; task_001090 wrong /proc/comm), a verifier family the file-content-only self-verify checklist never probes."
+90	regression_risk: "Low — appends text to the one-shot exit self-verify ack; injects no messages, changes no control flow, fires once per task. Non-service tasks read a few hundred extra tokens once. No passing task depends on leaving processes running unless the task asked for it (clause branches stopped-vs-running)."
+91	cost_shift: "+~350 tokens on the single exit turn per task; +1-3 Bash verify calls near the end on service/resource tasks only. Negligible aggregate, no per-step growth."
+92	rollback_trigger: "If R3 shows task_000140 still failing test_no_lingering_service_processes, or any previously-passing service task regresses (e.g. agent kills a process it was meant to leave running), revert the processor."
+93	-->
+94	
+95	### Why
+96	
+97	Assigned focus task_000140_01c78b42 fails the verifier test
+98	`test_no_lingering_service_processes`: `Lingering vm_service processes found:
+99	['338', '591', '790']`. The task asks the agent to fix a Go service, write a
+100	supervisor script, and build a CI/CD pipeline that starts the service, hits it,
+101	then **gracefully stops it** — so the required END state is "no vm_service
+102	running". The agent implemented everything correctly and ran the pipeline
+103	(step 14) to test it, but the pipeline's `kill -TERM $PID` on the single
+104	recorded PID is racy and misses copies spawned by earlier/repeated pipeline
+105	runs (the verifier re-runs the pipeline). The stock CustomSelfVerifyProcessor
+106	fired at step 20, but the agent's follow-up only re-checked output-file
+107	existence/content and never ran `pgrep`/`ps` to confirm no service lingered.
+108	
+109	The same root cause — the agent not reconciling the final *process* state
+110	against the task's required end-state — recurs at task_001090_c61c71f2, whose
+111	verifier fails `Process name is 'bash', expected 'monitor'` (a wrapper bash left
+112	in front of the real binary instead of `exec`-ing it). Two adjacent
+113	resource-footprint tasks (task_000118 log-dir size, task_000748 leaked bytes)
+114	sit on the same "final container state" verifier axis, so the resource clause is
+115	additive cover. The stock self-verify checklist covers output files and
+116	"is the service still alive" but says nothing about cleanup, process identity,
+117	or bounded resource state — a real harness gap on the TB2 final-state verifier
+118	family.
+119	
+120	### Changes
+121	
+122	- `processors/final_state_hygiene.py` — new `FinalStateHygieneProcessor`
+123	  (MultiHookProcessor). On `on_after_tool`, when the stock `_tb2_self_verify`
+124	  synthetic result appears, appends a task-agnostic final-state process/resource
+125	  hygiene checklist (reconcile running processes vs required stopped/running
+126	  end-state incl. process identity/port; reconcile bounded resource footprints).
+127	  Fires at most once per task; injects no messages; contract-clean.
+128	- `config.yaml` — registered the processor via absolute `file://…::FinalStateHygieneProcessor`
+129	  immediately after `CustomSelfVerifyProcessor` (order 95 so the synthetic
+130	  result exists before we append).
+131	
+132	### Evidence
+133	
+134	- `task_000140_01c78b42` result.json final_pytest: `FAILED
+135	  test_no_lingering_service_processes - AssertionError: Lingering vm_service
+136	  processes found: ['338', '591', '790']`.
+137	- `task_000140` msg 0 (prompt): "gracefully stop the Go service … sending a
+138	  SIGTERM kill signal" — required end-state is service stopped.
+139	- `task_000140` step 14 tool call: `bash /home/user/test_pipeline.sh` (spawns
+140	  `vm_service &`); step 20 `_tb2_self_verify` fired; msg 22 re-checked only files
+141	  (`ls`, `cat vm_setup.log`), never `pgrep vm_service`; msg 26 declared done.
+142	- `task_001090_c61c71f2` result.json tail: `assert comm == "monitor" … 'bash' ==
+143	  'monitor'` — final process-identity mismatch, same reconcile-end-state gap.
+144	
+145	### Uncertainty
+146	
+147	Assumes the model acts on the appended checklist when it reads the exit ack
+148	rather than skimming past it — same instruction-adherence risk as any prompt
+149	guidance, but delivered exactly at the exit decision point via the existing
+150	gate rather than as always-on prompt text. If R3 shows task_000140 still
+151	failing at the lingering-process test, the model is ignoring the exit reminder
+152	and the next escalation is a Control hook that actively runs `pgrep` for
+153	agent-spawned background processes at exit and blocks the exit until they are
+154	resolved. Watch for regressions where the agent over-eagerly kills a process a
+155	task wanted left running — the clause branches on stopped-vs-running to avoid
+156	this, but confirm on any service task that flips F.
+157	
+158	## Round 2 — correctness self-verify (value audit)
+159	
+160	<!-- journal:frontmatter
+161	round: 2
+162	timestamp: 2026-08-30T05:10:00Z
+163	hypothesis_id: h_correctness_self_verify_v1
+164	levers: [control]
+165	predicted_affected: [task_000396_e56917e2, task_000505_50b5162d, task_001653_c4cafa73, task_000140_01c78b42, task_000015_89886d8d]
+166	cited_candidates: [C-001]
+167	gating_outcome: pending
+168	gating_attribution: pending
+169	expected_global_gain: "Flips part of the ~15-task exit_reason=done/reward=0 'silent wrong-answer' cluster (largest R0 failing cluster untouched by R1's budget_exceeded fix) by turning the passive one-shot self-verify into an active correctness audit + forced independent cross-check. Generalizes to any task with a stated success criterion."
+170	regression_risk: "Low — same singleton group tb2_self_verify replaces the stock verify (no net processor added). Barriers fire only on exit-intent turns; phase-2 nudge fires at most once and only when the model re-narrated with zero new tool calls, then always yields to exit, so a genuinely-finished run is never trapped."
+171	cost_shift: "+1 to +3 Bash round-trips on runs that would otherwise rubber-stamp and exit; negligible on runs already doing real verification (they trip the 'new tool call since phase 1' guard and skip phase 2). Net positive vs a wasted 0-reward task."
+172	rollback_trigger: "If R3 pass_rate is flat/down AND the done/reward=0 cluster does not shrink, OR any previously-passing task regresses to done/reward=0 via being pushed to 'fix' a correct value, revert to the stock CustomSelfVerifyProcessor."
+173	-->
+174	
+175	### Why
+176	
+177	R0's largest failing cluster is exit_reason=done + finished=no_tool_calls +
+178	reward=0 (~15 tasks): the agent believed it finished, but the verifier's
+179	VALUE/behaviour assertion (a threshold, an exact match, a clean final state)
+180	failed. The stock `_tb2_self_verify` fired in every one of these cases, yet
+181	the agent rubber-stamped it — re-listing files and declaring "format matches"
+182	— because the stock checklist is existence/format-oriented and the model
+183	narrates straight past the weak "values are correct" item. The assigned
+184	task_000396 is the archetype: the task says the integration "diverges and
+185	fails to match the analytical reference", the verifier wants deviation < 0.1,
+186	the agent computed 0.576768, self-verified only that files exist, and exited —
+187	never reconciling a plainly-non-matching value against the stated goal.
+188	
+189	### Changes
+190	
+191	- `processors/correctness_self_verify.py` — new `MultiHookProcessor`
+192	  `CorrectnessSelfVerifyProcessor` (singleton group `tb2_self_verify`, so it
+193	  REPLACES the stock `CustomSelfVerifyProcessor`). Two exit-intent barriers:
+194	  (1) an adversarial correctness audit that forces reconciling the result
+195	  against the task's stated success criterion, independently re-deriving any
+196	  reported number, and testing on an edge/adversarial input; (2) a terminal
+197	  anti-rubber-stamp nudge that fires only if the model tries to exit again
+198	  with zero new tool calls since barrier 1, insisting on one concrete
+199	  cross-check command before exit. Bounded (phase 2 at most once, then free
+200	  exit). (C-001)
+201	- `config.yaml` — drop the stock
+202	  `benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor` entry, add
+203	  the new `file://` processor at the same pipeline position / singleton group.
+204	
+205	### Evidence
+206	
+207	- `task_000396_e56917e2` msgs 42-53: max deviation `0.576768` written; verify
+208	  fired msg 53; agent re-checked only file existence + `0.25` bug line; exited.
+209	  final_pytest: `assert 0.576768 < 0.1`.
+210	- `task_000505_50b5162d` msgs 15-19: verify fired; agent only re-ran `ls`;
+211	  final_pytest: "2 of 2 evil bypassed" (detector tested only on `/bin/ls`).
+212	- `task_001653_c4cafa73` msgs 11-15: verify fired; agent confirmed "format
+213	  matches exactly"; VALUES wrong (`Centroid: 36.36..` vs `42.00..`).
+214	- `task_000140_01c78b42` msgs 20-26: verify fired; files confirmed; final_pytest
+215	  "Lingering vm_service processes found ['338','591','790']".
+216	- `task_000015_89886d8d` msgs 66-73: verify fired; agent's own passing test did
+217	  not exercise the golden corpus; final_pytest `accuracy 0.3389 < 0.98`.
+218	
+219	### Uncertainty
+220	
+221	Some cluster members (task_001653, task_000015) are partly capability-bound:
+222	the "recompute a second way / test the real corpus" barrier gives a genuine
+223	second chance but cannot conjure correct math the model can't do. The
+224	mechanism is proven to fire (same injected-tool-call path as the stock
+225	verify), and the phase-2 guard bounds cost, but whether these particular
+226	Qwen3.5-9B runs actually act on the audit rather than re-narrating a second
+227	time is the open question. If the cluster does not shrink at all in R3, the
+228	blocker is capability, not verification discipline, and the next round should
+229	look upstream (per-task-class reasoning support), not tighten the barrier.
+230	
+231	## Round 1 — rigorous completion guard (c7)
+232	
+233	<!-- journal:frontmatter
+234	round: 1
+235	timestamp: 2026-08-30T05:02:00Z
+236	hypothesis_id: h_rigorous_completion_guard_v1
+237	levers: [control]
+238	predicted_affected: [task_000015_89886d8d, task_000010_644ab1c2]
+239	cited_candidates: [C-001]
+240	gating_outcome: pending
+241	gating_attribution: pending
+242	expected_global_gain: "Flips/derisks the 'declared done after a shallow check' failure shape — agent finishes after script-ran / sample-matched / file-plausibly-exists without re-deriving the EXACT output contract (keys, exact path, format, accuracy behaviour) from the authoritative source. Generalizes to any task self-advertising a hidden/accuracy-graded eval (OCR-schema, data-migration, service-contract)."
+243	regression_risk: "Low. Guard arms ONLY when task text matches generic rigor-cue vocabulary, so trivial already-passing tasks get no extra turn; bounded at max_fires=2 so it cannot cause an exit-block/budget spiral; additive, +1 user message per fire (contract-verified), ordered right after the existing one-shot CustomSelfVerifyProcessor."
+244	cost_shift: "+0 on non-armed tasks; +1-2 short verification round-trips (plus agent re-checking) on armed tasks. Net-positive when it converts a 0-reward run into a pass or averts wasted retries."
+245	rollback_trigger: "If R2 pass_rate is flat/down AND neither task_000015 nor task_000010 flips AND any previously-passing rigor-advertised task regresses to budget_exceeded/error (exit-block spiral), revert the RigorousCompletionGuard entry."
+246	-->
+247	
+248	### Why
+249	
+250	Assigned cluster: task_000010_644ab1c2 (budget_exceeded, wrong exact path
+251	`k8s_operator.py` vs required `operator.py`) and task_000015_89886d8d
+252	(exit_reason=done, final accuracy 0.3389 < 0.98). Distinct proximate causes,
+253	one shared harness-actionable root: the agent finishes after a SHALLOW check
+254	without re-deriving the exact output contract from the authoritative source and
+255	without stress-testing beyond the provided sample. In task_000015 the OCR of
+256	the schema image clearly carried the true target keys (`category`, `order`,
+257	`traffic_source`) but the agent named its output keys after the sample's own
+258	query params (`department`, `sort_order`) and verified only that its script ran
+259	on the 3-line sample. In task_000010 the agent wrote a plausible-but-wrong path
+260	and never re-confirmed the exact required filename. The truncation-spiral half
+261	of task_000010 is owned by the sibling proposal (h_length_recovery_forceact_v1)
+262	— this candidate ships the complementary completion-discipline mechanism, not a
+263	duplicate length-recovery lever.
+264	
+265	### Changes
+266	
+267	- `processors/rigorous_completion_guard.py` — new `MultiHookProcessor`
+268	  `RigorousCompletionGuard` (singleton group `tb2_rigor_completion_guard`,
+269	  `_order=91`, right after `CustomSelfVerifyProcessor`). Captures
+270	  `task_description` at `on_task_start`; arms only when a generic rigor-cue
+271	  regex matches ("hidden", "massive", "edge-case", "accuracy", "threshold",
+272	  "robust", "property-based", "golden", "test suite will run", …). On an
+273	  exit-intent turn (finish_reason∈{end_turn,stop}, no tool calls) it injects a
+274	  bounded (`max_fires=2`) targeted reminder: re-derive the exact contract from
+275	  the source (not from samples), stress-test edge cases, confirm exact paths.
+276	  Uses the proven keepalive-tool-call exit-intercept path (approved=False +
+277	  synthetic_result), net +1 user message per fire. (C-001)
+278	- `config.yaml` — append the new `file://` processor with `max_fires=2`;
+279	  everything else byte-identical to R0 (length-recovery left untouched so this
+280	  proposal stays orthogonal to the sibling).
+281	
+282	### Evidence
+283	
+284	- `task_000015_89886d8d` msg 37 (Bash writing migrate.py): ROUTES table maps
+285	  `dept→department`, `sort→sort_order` with comments deriving keys from the
+286	  query-param names; msgs 40 & 66 show the only correctness check is running on
+287	  the 3-line `sample_urls.txt`; msg 73 final: "the script works correctly with
+288	  the sample URLs." OCR msgs 4/16/24 show `category`/`order`/`traffic_source`
+289	  were in context and ignored.
+290	- `task_000010_644ab1c2` result.json final_pytest: "Operator script
+291	  /home/user/operator.py does not exist" (agent wrote `k8s_operator.py`);
+292	  exit_reason=budget_exceeded at 80 steps.
+293	
+294	### Uncertainty
+295	
+296	task_000015 is partly a model OCR/reasoning capability limit — the correct
+297	keys were in context and the agent still guessed. The guard raises the odds it
+298	trusts the source over the sample but does not guarantee the flip. For
+299	task_000010 the guard only bites if the run reaches an exit turn before
+300	budget_exceeded, i.e. the sibling's length-recovery has to hold first — so 010
+301	is the secondary target here. If R2 shows no flip on either and no cost spike,
+302	the residual blocker is capability, and the next round should look upstream
+303	(per-turn max_tokens sizing / OCR tooling) rather than at completion discipline.
+304	
+305	## Round 1 (c5) — break identical-command loops
+306	
+307	<!-- journal:frontmatter
+308	round: 1
+309	timestamp: 2026-06-01T00:00:00Z
+310	hypothesis_id: h_repeated_command_loop_breaker_v1
+311	levers: [control]
+312	predicted_affected: [task_000264_ab8c7253, task_001031_a8f0eb37, task_001321_658ce4a8]
+313	cited_candidates: [C-001]
+314	gating_outcome: pending
+315	gating_attribution: pending
+316	expected_global_gain: "Closes the identical-Bash-command repetition-loop budget_exceeded class; early redirect gives recovery headroom, raise reclaims budget on unrecoverable loops"
+317	regression_risk: "A legitimate task that must re-run the exact same substantive command 5+ times consecutively; mitigated by ignoring empty/trivial calls (protects the observed 22x-empty-call passing task_001089), warn-before-raise, and clean loop_detected exit"
+318	cost_shift: "Net cheaper — looping tasks terminate early instead of burning all 80 steps / 1000s+; ~0 added cost on non-looping tasks"
+319	rollback_trigger: "If any of the 3 predicted tasks still budget_exceeded with the breaker present, OR any previously-passing task regresses to loop_detected with the breaker firing (esp. task_001089_220cc46b), revert"
+320	-->
+321	
+322	### Why
+323	
+324	Assigned focus task_000264_ab8c7253 failed budget_exceeded at 80 steps / 1410s.
+325	It is a SQLite recursive-CTE task; the model wrote a recursive query that always
+326	times out (15s), then re-narrated "The user is right - I've been stuck in a
+327	loop, let me try a fundamentally different approach" verbatim on ~10 consecutive
+328	turns while re-issuing the byte-identical failing command. The whole step +
+329	wall-clock budget drained with zero progress; the required top_managers.csv was
+330	left 0 bytes. Same mechanical pathology as two other budget_exceeded tasks this
+331	round: task_001031 (mpi4py snippet, 33 consecutive identical commands) and
+332	task_001321 (extractor invocation, 19 consecutive identical). It is a loop
+333	pathology, not a missing capability — the agent runs varied diagnostics when
+334	it briefly breaks out.
+335	
+336	### Changes
+337	
+338	- processors/repeated_command_breaker.py — new RepeatedCommandLoopBreaker
+339	  MultiHookProcessor. Fingerprints only substantive Bash commands (non-empty,
+340	  min length); counts consecutive identical commands; at warn_threshold appends
+341	  a decisive "stop re-issuing the exact command" redirect to the tool result;
+342	  at raise_threshold raises LoopDetectedError → clean exit_reason=loop_detected
+343	  with best-output recovery. Empty-arg / trivial / non-Bash calls are neutral
+344	  interludes (neither count nor reset), which protects the passing empty-call
+345	  recovery pattern. Content-agnostic.
+346	- config.yaml — register RepeatedCommandLoopBreaker (order 21, after
+347	  LengthTruncationRecoveryProcessor, before compaction).
+348	
+349	### Evidence
+350	
+351	- task_000264 messages.json: command fingerprint for the sqlite recursive-CTE
+352	  query issued 8 times, 3 consecutive at tail; each returns "Error: command
+353	  timed out after 15s"; identical narration ~10 times. final_pytest:
+354	  top_managers.csv empty → test_csv_output AssertionError [] == [...].
+355	- task_001031 last 4 assistant turns: identical python3 mpi4py snippet;
+356	  simulated max consecutive-identical run = 33.
+357	- task_001321 last turns: identical extractor invocation; max
+358	  consecutive-identical run = 19.
+359	- Regression guard verified: task_001089_220cc46b (reward=1) makes 22
+360	  consecutive empty-argument calls; simulator confirms the breaker does NOT fire
+361	  because empty/trivial calls are ignored. No passing task trips the raise
+362	  threshold.
+363	
+364	### Uncertainty
+365	
+366	The raise reclaims budget but does not by itself flip a still-broken task; the
+367	flip path is the early warn redirect giving the agent budget headroom to change
+368	approach. If the underlying query/logic gap is unrecoverable for the model, the
+369	task will exit loop_detected (still reward=0) but faster — a cost win, not a
+370	pass win. Worst case on a false positive is one redirect message plus an early
+371	clean termination on a task that would have failed anyway.
+372	
+373	## Round 2 — graded-artifact clean re-run guard (c2)
+374	
+375	<!-- journal:frontmatter
+376	round: 2
+377	timestamp: 2026-08-30T06:20:00Z
+378	hypothesis_id: h_graded_artifact_rerun_v1
+379	levers: [control]
+380	predicted_affected: [task_000118_3043e92d, task_000140_01c78b42]
+381	cited_candidates: [C-001]
+382	gating_outcome: pending
+383	gating_attribution: pending
+384	expected_global_gain: "Flips the 'graded-artifact re-run mismatch' sub-cluster of the large done/reward=0 family: tasks shipping an executable deliverable (daemon/monitor/service/pipeline) that an external grader restarts from scratch, where the agent's ad-hoc self-test used a non-matching invocation ordering/timing and a latent startup/timing/leftover bug survived. Generalizes to any task graded on the artifact's behaviour on a clean re-execution."
+385	regression_risk: "Low — new singleton group graded_artifact_rerun_reminder, _order=92 after service_deps (91) and CustomSelfVerify (90) so exit-intent hooks serialize. Fires at most once per task, only when the agent's own Bash activity shows an executable deliverable was authored AND task text uses run/execute/start/test-the-artifact vocabulary; injects one user message via the proven keepalive-tool-call path (contract-clean), never off task ids. Always yields to a genuine exit on the next turn, so a finished run is never trapped. Non-matching tasks (pure data-transform / one-shot answer) never arm."
+386	cost_shift: "+1 reminder message + typically +1-3 Bash re-run/verify round-trips on armed tasks only; ~0 on the ~30 tasks that do not arm. Net-positive when it converts a 0-reward run into a pass."
+387	rollback_trigger: "If R3 shows task_000118 still failing the peak-size assertion AND task_000140 still failing test_no_lingering_service_processes, OR any previously-passing artifact/service task regresses to done/reward=0 or budget_exceeded via the reminder pushing a needless re-run, revert the graded_artifact_rerun_reminder entry."
+388	-->
+389	
+390	### Why
+391	
+392	Assigned focus task_000118_3043e92d fails `exit_reason=done`,
+393	`finished=no_tool_calls`, `reward=0` — NOT a truncation spiral (only 23/80
+394	steps). The task asks for a disk-usage monitor daemon at
+395	`/home/user/deployment_monitor.py` that pauses/truncates worker logs. The
+396	agent wrote a correct-looking monitor and tested it, but its final self-test
+397	(msg 33) started the monitor and then `run_deployment.sh` in the SAME shell,
+398	where Python import-lag happened to let the monitor's first loop catch the
+399	workers. The GRADER instead does `Popen(monitor); sleep(0.5); Popen(deploy)` —
+400	giving the monitor a clean 0.5 s head start, so its "exit when no worker_sim.py
+401	found" loop fires on iteration 1 (before any worker exists), the daemon dies
+402	immediately, never truncates, and peak log-dir size hits the full 200 MB
+403	(final_pytest: `Peak log directory size was 209715200 bytes ... exceeds ...
+404	45000000`). Root cause the harness can act on: the agent tested its graded
+405	deliverable under a self-chosen invocation whose startup ordering/timing
+406	differed from how the grader restarts it, and never re-ran it from a clean,
+407	fresh-process baseline. The same shape recurs at task_000140_01c78b42, whose
+408	pipeline leaves lingering `vm_service` processes on the grader's re-run and
+409	whose agent's follow-up only re-listed output files instead of re-running the
+410	pipeline clean and checking `pgrep`.
+411	
+412	### Changes
+413	
+414	- `processors/graded_artifact_rerun_reminder.py` — new
+415	  `GradedArtifactReRunReminderProcessor` (MultiHookProcessor, singleton group
+416	  `graded_artifact_rerun_reminder`, `_order=92`). On an exit-intent turn, when
+417	  the agent's Bash activity shows an executable deliverable was authored AND the
+418	  task text describes it being run/executed by an automated check, it injects a
+419	  one-shot reminder (via the proven keepalive-tool-call exit-intercept path) to
+420	  reset to a clean baseline (kill spawned background processes, reset mutable
+421	  working state) and re-run the artifact exactly as the grader will — fresh
+422	  process, worst-case startup ordering — then confirm the stated end-state
+423	  metric, not just file existence. Bounded to one fire; contract-clean;
+424	  content-agnostic. (C-001)
+425	- `config.yaml` — registered the new `file://…::GradedArtifactReRunReminderProcessor`
+426	  immediately after `ServiceDepsReminderProcessor`; everything else
+427	  byte-identical to R1/c2.
+428	
+429	### Evidence
+430	
+431	- `task_000118_3043e92d` msg 33 (agent self-test): `python3
+432	  /home/user/deployment_monitor.py & ; sleep 1 ; /home/user/run_deployment.sh`
+433	  in one shell; msg 34 showed 12 KB total (passed by timing luck). result.json
+434	  final_pytest: `AssertionError: Peak log directory size was 209715200 bytes,
+435	  which exceeds the threshold of 45000000 bytes.` The monitor's `main()` loop
+436	  `break`s when `get_worker_processes()` is empty — true on iteration 1 under
+437	  the grader's `Popen+sleep(0.5)` order.
+438	- `task_000140_01c78b42` result.json final_pytest: `Lingering vm_service
+439	  processes found: ['338','591','790']`; msgs 20-26 show the agent's post-verify
+440	  follow-up only re-checked files (`ls`, `cat vm_setup.log`), never re-ran the
+441	  pipeline clean + `pgrep vm_service`.
+442	
+443	### Uncertainty
+444	
+445	Assumes the model acts on the clean-re-run reminder rather than skimming past it
+446	and re-declaring done — the same instruction-adherence risk as any exit nudge,
+447	but delivered exactly at the exit decision via the existing gate. For task_000118
+448	it also assumes the agent, once it sees the 200 MB clean-re-run result, can fix
+449	the startup guard (a small, in-budget edit — it used 23/80 steps). If R3 shows
+450	task_000118 still failing the peak-size assertion, the model is not acting on the
+451	reminder and the next escalation is a Control hook that actively runs the
+452	artifact once in a clean namespace at exit and surfaces the end-state metric
+453	before allowing exit. Watch for regressions where the reminder pushes a needless
+454	re-run on an already-correct artifact/service task — the arm requires BOTH an
+455	authored-executable Bash signal and re-run-graded task vocabulary to limit this.
+456	
+457	## Round 2 — background-service lifecycle hygiene
+458	
+459	<!-- journal:frontmatter
+460	round: 2
+461	timestamp: 2026-08-30T06:30:00Z
+462	hypothesis_id: h_bg_service_hygiene_v1
+463	levers: [control]
+464	predicted_affected: [task_000010_644ab1c2, task_000396_e56917e2, task_001536_acfe6c35]
+465	cited_candidates: [C-001]
+466	gating_outcome: pending
+467	gating_attribution: pending
+468	expected_global_gain: "Flips/de-risks the background-service churn slice of the budget_exceeded cluster (task_000010 archetype) and trims wasted wall-clock on any port-forward/mock-API/socket-server task by breaking the hung-command + stale-port-rebind loop early. Generalizes to any task emitting the two generic OS/tooling failure strings."
+469	regression_risk: "Low - fires at most once per task and only after 2+ churn signatures; a single legitimate transient timeout never trips it. Adds one processor (new singleton group, replaces nothing), injects one user message, no tool round-trip, no control-flow change. Worst false-positive cost: one ~250-token advisory on a task that hit two unrelated timeouts."
+470	cost_shift: "Net negative on the affected cluster (churning tasks stop burning 120s hangs and restart loops early). +~250 tokens once on any task crossing the threshold; zero on healthy runs (no signatures so never arms)."
+471	rollback_trigger: "If R3 shows task_000010 still budget_exceeded with unchanged 120s-timeout / address-in-use churn counts, OR any previously-passing service task regresses to done/reward=0 or budget_exceeded with this processor firing, revert BackgroundServiceHygieneProcessor."
+472	-->
+473	
+474	### Why
+475	
+476	Assigned focus task_000010_644ab1c2 still fails in R1: budget_exceeded at the
+477	80-step cap, elapsed_s=1113, manifests never applied. The task requires
+478	standing up a durable port-forward from :9090 to a mock API on :8080 and
+479	driving an interactive CLI through it. Root cause is a background-service
+480	lifecycle churn the model repeatedly misdiagnoses: it starts a single-shot /
+481	non-durable proxy, the interactive CLI then hangs against it and the Bash tool
+482	returns "command timed out after 120s" (3 such hangs, ~360s of the 1113s
+483	budget), and restart attempts fail with a TCPServer(("127.0.0.1", 8080))
+484	"address already in use" traceback because a stale mock_api PID still holds the
+485	port - which the model reads as "the service is running, good" and moves past.
+486	The same tool-layer signature class ("command timed out after") also appears on
+487	task_000396 and task_001536, so the trigger is a recurring cross-task shape,
+488	not a one-task regex. The separate wrong-operator-filename defect
+489	(k8s_operator.py vs operator.py) is owned by the sibling completion-discipline
+490	candidate; this round targets the budget-burn root that prevented 010 from ever
+491	reaching a clean exit.
+492	
+493	### Changes
+494	
+495	- processors/background_service_hygiene.py - new BackgroundServiceHygieneProcessor
+496	  (MultiHookProcessor, singleton group bg_service_hygiene, order 92).
+497	  Counts generic churn signatures in tool results ("command timed out after N",
+498	  "address already in use" / "Errno 98" / "EADDRINUSE"); once the count reaches
+499	  signal_threshold (default 2), injects a single one-shot user message on the
+500	  next model call: free stale ports, make the listener durable/multi-connection,
+501	  probe with a bounded timeout instead of re-running a hung command. Churn-
+502	  gated, not task-id-keyed; fires at most once per task. (C-001)
+503	- config.yaml - registered the processor via absolute
+504	  file://...::BackgroundServiceHygieneProcessor after ServiceDepsReminderProcessor;
+505	  everything else byte-identical to R1/c2.
+506	
+507	### Evidence
+508	
+509	- task_000010_644ab1c2 result.json: exit_reason=budget_exceeded,
+510	  elapsed_s=1113.2, 80 steps; final_pytest test_api_success_log shows only
+511	  the ConfigMap was ever applied (deploy-v2.yaml never got through the flaky
+512	  proxy).
+513	- task_000010 messages.json msg 18/28/69: TCPServer(("127.0.0.1", 8080))
+514	  Traceback (stale listener holds :8080); msg 19/29 assistant misreads it as
+515	  "the mock API is still running".
+516	- task_000010 msg 32, 46: "Error: command timed out after 120s" (interactive
+517	  CLI hung against the non-durable forward).
+518	- task_000010 msg 65: socat[801] E bind(...) Address already in use on :9090.
+519	- Cross-task: task_000396_e56917e2 and task_001536_acfe6c35 each have one
+520	  "command timed out after" tool result - same foreground-hang signature.
+521	
+522	### Uncertainty
+523	
+524	Assumes the model acts on the injected lifecycle guidance rather than skimming
+525	past it mid-churn - same instruction-adherence risk as any nudge, but delivered
+526	exactly at the churn signature rather than as always-on prompt text. If R3
+527	shows 010 still budget_exceeded with unchanged timeout/bind-collision counts,
+528	the residual blocker is model capability (it cannot author a durable proxy) and
+529	the next escalation is a Control hook that actively runs a stale-port sweep,
+530	not more guidance. Watch for regressions on any service task that flips F with
+531	this processor firing.
+532	
+533	## Round 2 — OCR robustness ladder (c1)
+534	
+535	<!-- journal:frontmatter
+536	round: 2
+537	timestamp: 2026-08-30T06:20:00Z
+538	hypothesis_id: h_ocr_robustness_ladder_v1
+539	levers: [control]
+540	predicted_affected: [task_000015_89886d8d, task_000505_50b5162d]
+541	cited_candidates: [C-001]
+542	gating_outcome: pending
+543	gating_attribution: pending
+544	expected_global_gain: "Flips the OCR-from-image failure cluster (task_000015 accuracy 0.0000; task_000505 detector matched nothing) by supplying the standard OCR-recovery ladder — upscale first, set --dpi, sweep --psm, binarize — plus the 'derive the output contract from the authoritative source image, not the provided sample' discipline, delivered right after the agent's first tesseract call. Generalizes to any unseen task that must read text from a low-quality image."
+545	regression_risk: "Low — the processor never arms unless the agent itself runs an OCR tool (tesseract/pytesseract), so the non-image majority of tasks are byte-for-byte unaffected. On an armed task it only APPENDS one user message (never rewrites tool_calls, so it cannot clobber a real or foreign-processor tool call) and fires at most once. Passing OCR tasks (task_000338, task_001652) already used good OCR habits consistent with the reminder."
+546	cost_shift: "+~400 tokens once per OCR task (a small minority of the suite); ~0 on all non-OCR tasks. May also save the ~11 near-identical cosmetic-tweak OCR retries task_000015 currently burns before giving up. Net positive vs a wasted 0-reward run."
+547	rollback_trigger: "If R3 shows task_000015 still failing test_migrate_script_accuracy AND task_000505 still failing test_adversarial_corpus AND no OCR task flips, the blocker is model OCR/reasoning capability the ladder cannot conjure — revert the processor and treat OCR as a capability gap (skip)."
+548	-->
+549	
+550	### Why
+551	
+552	Assigned focus task_000015_89886d8d fails `test_migrate_script_accuracy`
+553	(`Accuracy metric 0.0000 is below the 0.98 threshold`). The task's schema
+554	mapping lives in a low-DPI synthetic PNG (`/app/routing_schema.png`, 800x400).
+555	tesseract emits `Warning: Invalid resolution 0 dpi. Using 70 instead` and
+556	returns garbled text. The agent then retries ONLY cosmetic PIL tweaks
+557	(contrast/brightness/sharpen/autocontrast/threshold) ~11 times — it never
+558	upscales, never sets `--dpi`, never sweeps `--psm`, the three highest-impact
+559	OCR levers for clean synthetic renders. Getting the same garble, it gives up on
+560	the source and invents output schema keys (`department`, `sort_order`,
+561	`ui_theme`, `traffic_source`) from the *sample's* query-param names instead of
+562	the right-hand side of the mapping arrows visible even in the garble, so its
+563	output matches the golden schema on zero records. The same OCR-quality root
+564	cause recurs at task_000505_50b5162d (transcribe an SSH public key from
+565	`/app/evidence.png`; a misread key ⇒ `2 of 2 evil bypassed`). This is a
+566	strategy gap, not a capability gap: tesseract is present and works — the model
+567	just doesn't know how to drive it on low-quality images and gives up.
+568	
+569	### Changes
+570	
+571	- `processors/ocr_robustness_reminder.py` — new `OcrRobustnessReminderProcessor`
+572	  (MultiHookProcessor, singleton group `ocr_robustness_reminder`, `_order=92`).
+573	  Keyed off the agent's own Bash OCR activity (tesseract/pytesseract/etc.),
+574	  never off task ids. The first time OCR is observed, it queues and (on the next
+575	  `on_before_model`) appends a single task-agnostic user message: the OCR-
+576	  recovery ladder (upscale first → `--dpi 300` → sweep `--psm` → binarize) plus
+577	  "derive the output contract from the authoritative source image, not the
+578	  provided sample". Fires at most once; only appends a message (never rewrites
+579	  tool_calls); contract-clean. (C-001)
+580	- `config.yaml` — registered the processor via absolute `file://…::OcrRobustnessReminderProcessor`
+581	  after `ServiceDepsReminderProcessor`. Everything else byte-identical to R1/c2.
+582	
+583	### Evidence
+584	
+585	- `task_000015_89886d8d` step 2 tool result: `Warning: Invalid resolution 0 dpi.
+586	  Using 70 instead ... atalogyitem <item _id> ... category ... order ... sort
+587	  order` (garbled). Steps 3–24: only contrast/sharpen/threshold tweaks, no
+588	  upscale/`--dpi`/`--psm`. Step 37: writes ROUTES with keys derived from sample
+589	  query params; step 40 output uses `department`/`sort_order`/`ui_theme`/
+590	  `traffic_source`. final_pytest: `Accuracy metric 0.0000 ... below 0.98`.
+591	- `task_000505_50b5162d` first user msg: "Extract the hidden SSH public key from
+592	  the image file `/app/evidence.png`"; `grep tesseract` confirms OCR path;
+593	  final_pytest `test_adversarial_corpus`: `2 of 2 evil bypassed: ls_evil,
+594	  cat_evil` (detector built on the transcribed key matched nothing).
+595	- Passing OCR tasks task_000338_27d6a1be (reward 1) and task_001652_86e1d185
+596	  (reward 1) used ImageMagick `convert` preprocessing — the reminder is
+597	  consistent with, not counter to, the habits that already worked.
+598	
+599	### Uncertainty
+600	
+601	The ladder raises the odds of a clean transcription but cannot guarantee the
+602	model executes it well or reasons correctly about the mapping direction —
+603	task_000015 also has a reasoning component (right-hand-side keys). If R3 shows
+604	no OCR flip and no cost spike, the residual blocker is model OCR/reasoning
+605	capability, not strategy, and the next round should treat it as a capability
+606	gap and skip rather than tighten the reminder. Note task_000536_9c16e8ef also
+607	uses OCR but its failure is a CSV quoting-format mismatch, not OCR quality — it
+608	is deliberately excluded from predicted_affected.

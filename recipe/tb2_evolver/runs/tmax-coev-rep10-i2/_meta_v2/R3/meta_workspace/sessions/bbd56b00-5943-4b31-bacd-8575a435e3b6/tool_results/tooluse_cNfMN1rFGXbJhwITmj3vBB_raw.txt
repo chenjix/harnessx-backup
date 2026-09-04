@@ -1,0 +1,115 @@
+1	# HarnessX HarnessConfig for Tmax taxonomy eval / evolve.
+2	# Combine: model_config.agentic(HarnessConfig.from_yaml(this))
+3	#
+4	# Live surfaces MetaAgent may edit:
+5	#   - processors (this file)
+6	#   - tool_registry (this file)
+7	#   - system_prompt.txt (sibling of this YAML; read by SiblingSystemPromptBuilder)
+8	#
+9	# Runtime-only slots (sandbox_provider, tracer) are injected by
+10	# recipe.tmax_eval.harness_runner — do not put them here.
+11	#
+12	# Per-call output cap is NOT in this YAML: harness_runner sets
+13	# OpenAIProvider(max_tokens=TMAX_MAX_TOKENS, default 4096) so a single
+14	# runaway generation cannot burn an hour of wall-clock on one task.
+15	
+16	tool_registry:
+17	  builtin:
+18	  - Bash
+19	  custom: []
+20	tracer: null
+21	processors:
+22	- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+23	  system_builder:
+24	    _target_: recipe.tmax_eval.prompt_builder.SiblingSystemPromptBuilder
+25	  _hook_: '*'
+26	- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+27	  working_dir: /home/user
+28	  constraints: {}
+29	  header: Environment
+30	  max_tree_lines: 20
+31	  non_interactive: true
+32	  inject_integrity_rules: true
+33	  show_project_dir: false
+34	  _hook_: '*'
+35	- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+36	  tool_schemas: {}
+37	  _hook_: '*'
+38	- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+39	  warn_at:
+40	  - 0.7
+41	  - 0.9
+42	  _hook_: '*'
+43	# Step-based deadline nudge. The recipe runner enforces a hard step budget
+44	# (task.max_steps=80) but never sets TaskTimeReminderProcessor.timeout_seconds,
+45	# so the wall-clock reminder above is inert. Multiple failures ended at
+46	# exit_reason=budget_exceeded (80 steps) with NO deliverable file on disk —
+47	# an automatic 0. This processor fires escalating "commit your best-effort
+48	# output to disk now" reminders as the step budget is consumed.
+49	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i2/R0/assets/processors/step_budget_deadline.py::StepBudgetDeadlineProcessor
+50	  warn_at:
+51	  - 0.65
+52	  - 0.85
+53	  _hook_: '*'
+54	# R2 change (C-001): warn-only loop breaker. R1 evidence: 11/27 failures
+55	# exited budget_exceeded at the 80-step cap (+1 error), and the dominant shape
+56	# is a BYTE-IDENTICAL Bash command repeated consecutively with no change of
+57	# approach (max consecutive-identical run: 015=21, 1653=25, 191=12, 118=11).
+58	# The agent re-issues the same failing command instead of diagnosing it,
+59	# burning the whole budget. This reuses harnessx's existing LoopDetectionProcessor
+60	# but configured WARN-ONLY: it appends an advisory to the tool result after 3
+61	# byte-identical consecutive calls, telling the agent to change approach, and
+62	# NEVER raises (threshold=999). The hard-raise is disabled because 3 currently-
+63	# passing tasks (878/890/505) also repeat identical commands deliberately and a
+64	# raise would convert those passes into loop_detected failures. Name-only
+65	# Strategy 2 is disabled (name_warn_threshold=999) because every call is Bash,
+66	# so name-only would fire on essentially every task.
+67	- _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+68	  window_size: 12
+69	  warn_threshold: 3
+70	  threshold: 999
+71	  name_warn_threshold: 999
+72	  compaction_drop_threshold: 5
+73	  _hook_: '*'
+74	# Break max_tokens repetition loops (finish_reason=length, no tool call).
+75	# Without this, one stuck task can block an entire evolve round.
+76	- _target_: recipe.tmax_eval.processors.length_recovery.LengthTruncationRecoveryProcessor
+77	  repeat_threshold: 2
+78	  head_chars: 1200
+79	  tail_chars: 600
+80	  _hook_: '*'
+81	- _target_: harnessx.processors.control.compaction.CompactionProcessor
+82	  token_threshold: 140000
+83	  message_threshold: 100
+84	  retention_window: 6
+85	  eviction_fraction: 0.5
+86	  summarize_key: summarize
+87	  preserve_first_message: true
+88	  _hook_: '*'
+89	- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+90	  max_consecutive_errors: 1
+91	  _hook_: '*'
+92	- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+93	  drop_threshold: 5
+94	  _hook_: '*'
+95	- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+96	  _hook_: '*'
+97	- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+98	  threshold: 7
+99	  _hook_: '*'
+100	# R1 change (C-002): replace the single-shot self-verify with a stateful,
+101	# functional-aware exit gate. R0 evidence: 23/29 failures exited done after a
+102	# shallow static self-check (ls/cat/grep) and never ran the solution against
+103	# the real scenario. This gate re-nudges (bounded) when an exit attempt is
+104	# preceded only by read-only inspection, forcing at least one genuine
+105	# end-to-end run before finishing.
+106	- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep10-i2/_meta_v2/R1/processors/functional_verify_gate.py::FunctionalVerifyGateProcessor
+107	  max_nudges: 2
+108	  _hook_: '*'
+109	workspace: null
+110	workspace_template: default
+111	init_workspace: false
+112	step_snapshots: true
+113	sandbox_provider: null
+114	sandbox_hint_id: null
+115	plugins: []

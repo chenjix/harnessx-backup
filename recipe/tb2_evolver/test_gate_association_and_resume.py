@@ -113,6 +113,23 @@ def test_gate_keeps_unique_gain_below_bar() -> None:
     assert "unique" in reason
 
 
+def test_gate_promotes_latest_config_on_exact_tie() -> None:
+    """A score-neutral complementary config must reach the final holdout gate."""
+    best = (0.44, "R0", 0)
+    decision, reason, new_best, reverted = gate(
+        round_idx=2,
+        round_score=0.44,
+        round_config="R2-complementary",
+        best=best,
+        tolerance=0.04,
+        incumbent_mean=0.44,
+        unique_gained=["task_new_a", "task_new_b"],
+    )
+    assert decision == "accept"
+    assert reverted is None
+    assert new_best == (0.44, "R2-complementary", 2)
+
+
 def test_resume_without_best_does_not_crash() -> None:
     assert best_from_state({}) is None
     assert best_from_state({"history": [{"score": 0.5}]}) is None
@@ -125,4 +142,5 @@ if __name__ == "__main__":
     test_resume_restores_best()
     test_resume_without_best_does_not_crash()
     test_gate_keeps_unique_gain_below_bar()
+    test_gate_promotes_latest_config_on_exact_tie()
     print("RESULT: PASS")

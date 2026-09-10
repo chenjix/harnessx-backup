@@ -623,11 +623,12 @@ def _score_and_gate_tb2(
     bar = incumbent_mean if incumbent_mean is not None else best_score
     basis = "mean" if incumbent_mean is not None else "single"
     if round_score >= bar - tolerance:
-        # Promote on the same basis: a candidate becomes the incumbent only when
-        # it beats the incumbent's mean, so one lucky draw cannot seize the crown
-        # and lock out everything that follows. A TIE is still taken: the config
-        # stays in the lineage (not reverted) even if it does not replace best_so_far.
-        new_best = (round_score, round_config, round_idx) if round_score > bar else best
+        # Promote on the same basis: a candidate becomes the incumbent when it
+        # beats or ties the incumbent's mean.  On a tie prefer the latest config:
+        # it may solve a complementary task subset, and keeping the old config
+        # here would prevent that evidence-backed candidate from reaching the
+        # final holdout gate.
+        new_best = (round_score, round_config, round_idx) if round_score >= bar else best
         return (
             "accept",
             f"score {round_score:.4f} >= incumbent({basis}) {bar:.4f} - tol {tolerance:.4f}",
@@ -2078,11 +2079,11 @@ async def main() -> None:
                         }
                     wscore = getattr(tournament_eval, "full_score", None)
                     if wscore is not None and (
-                        best_round is None or float(wscore) > best_round[0]
+                        best_round is None or float(wscore) >= best_round[0]
                     ):
                         best_round = (float(wscore), promoted_config, output_round)
                         logger.info(
-                            "[R%d] tournament best_so_far ← c%d @ %.4f",
+                            "[R%d] tournament best_so_far ← c%d @ %.4f (ties prefer latest)",
                             output_round,
                             tournament_eval.idx,
                             wscore,

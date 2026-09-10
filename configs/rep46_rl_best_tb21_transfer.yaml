@@ -1,0 +1,67 @@
+# TB2.1-native transfer of the best accepted Harness+RL pair:
+# rep46 RL2 model + rep19-i1/R2 harness. Keep TB2's prompt/workspace contract
+# and transplant the two processors learned by the accepted Tmax harness.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: benchmarks.terminal_bench_2.harness._StaticSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /app
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at: [0.7, 0.9]
+  _hook_: '*'
+# Learned by rep19-H1. TB2 uses 120 max steps, so warn at the same 80% point.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i1/_meta_v2/R2/c0/processors/step_budget_verify.py::StepBudgetVerifyProcessor
+  step_budget: 120
+  warn_fraction: 0.8
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+# Learned by rep19-H1.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep19-i1/_meta_v2/R1/c1/processors/repeated_command_breaker.py::RepeatedCommandBreaker
+  tool_name: Bash
+  warn_threshold: 3
+  hard_threshold: 5
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: true
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

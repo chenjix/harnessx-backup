@@ -156,10 +156,11 @@ Holdout-102 **永远**不进 evolve / SFT-gen / RL train。
 用 **incumbent 模型** + **cand_harness** 跑 holdout-102
 （job `tmax-coev-repN-i{k}-B-harness`），并发 `HOLDOUT_CONCURRENT=8`。
 
-`ratchet_accept after before`：
+当前 promotion 规则：
 
-- `after > before` → 接受（`improved`）
-- `after == before` 且 `ACCEPT_TIES=1` → 接受（`tied at N`）
+- `after > before` 且 `ACCEPT_AGGREGATE_GAINS=1`（默认）→ 接受，即使 paired sign-test 不显著
+- 或 paired sign-test 通过 → 接受
+- aggregate 平局默认不接受；harness 可显式设置 `HARNESS_ACCEPT_SCORE_TIES=1`
 - 否则拒绝
 
 **不再**看 `eval_system_errors`。`agent_error` 已经让该题 `reward=0`，
@@ -269,7 +270,8 @@ sftgen 会被丢掉。
   `ENABLE_SFT=0` 时从 base / 上一轮 RL ckpt 起步（不 merge LoRA）。
   Launcher：`scripts/slurm/tmax/h200_tmax_coevolve_evolve_rl.sbatch`。
 - **E**：holdout-102，`harness_used` + 新模型，job `{TAG}-E-sft-a{attempt}`。
-  同样 `HOLDOUT_CONCURRENT=8`，同样只比 pass count。
+  同样 `HOLDOUT_CONCURRENT=8`；总 pass count 严格上涨即可接受，paired
+  sign-test 仍会生成报告并作为另一条接受路径。
 
 接受 → `prev_adapter` 换成新 adapter，更新 `INC_SCORE`（仅当分数上升）。
 拒绝 → 若 `attempt < MAX_SFT_RETRIES`，同一 `RUN_TAG` 再跑

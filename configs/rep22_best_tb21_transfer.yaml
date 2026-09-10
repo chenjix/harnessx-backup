@@ -1,0 +1,70 @@
+# TB2.1-native transfer of the best rep22 harness.
+#
+# Keep the native Terminal-Bench workspace/prompt contract, then transplant
+# only the two control processors learned by rep22-i2/R2.  This avoids testing
+# the irrelevant Tmax /home/user vs TB2 /app path mismatch.
+
+tool_registry:
+  builtin:
+  - Bash
+  custom: []
+tracer: null
+processors:
+- _target_: harnessx.processors.context.system_prompt.SystemPromptProcessor
+  system_builder:
+    _target_: benchmarks.terminal_bench_2.harness._StaticSystemPromptBuilder
+  _hook_: '*'
+- _target_: harnessx.processors.context.env_context_injector.EnvironmentContextInjector
+  working_dir: /app
+  constraints: {}
+  header: Environment
+  max_tree_lines: 20
+  non_interactive: true
+  inject_integrity_rules: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer
+  tool_schemas: {}
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.TaskTimeReminderProcessor
+  warn_at: [0.7, 0.9]
+  _hook_: '*'
+- _target_: harnessx.processors.control.compaction.CompactionProcessor
+  token_threshold: 140000
+  message_threshold: 100
+  retention_window: 6
+  eviction_fraction: 0.5
+  summarize_key: summarize
+  preserve_first_message: true
+  _hook_: '*'
+- _target_: harnessx.processors.control.parse_retry.ParseRetryProcessor
+  max_consecutive_errors: 1
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.PostCompactionRefreshProcessor
+  drop_threshold: 5
+  _hook_: '*'
+- _target_: harnessx.processors.control.bg_install_guard.BgInstallGuard
+  _hook_: '*'
+# Learned by rep22: redirect period-k repeated command/output loops.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep22-i2/_meta_v2/R2/c4/processors/cyclic_loop_breaker.py::CyclicLoopBreaker
+  max_period: 4
+  warn_cycles: 2
+  break_cycles: 3
+  max_total_blocks: 12
+  window_size: 32
+  compaction_drop_threshold: 5
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomEditToolProcessor
+  threshold: 7
+  _hook_: '*'
+- _target_: benchmarks.terminal_bench_2.harness.CustomSelfVerifyProcessor
+  _hook_: '*'
+# Learned by rep22: remind server tasks to install the verifier dependency.
+- _target_: file:///fsx/home/jixuan.chen/harnessx-backup/recipe/tb2_evolver/runs/tmax-coev-rep22-i2/_meta_v2/R1/c4/processors/http_verifier_dep.py::HttpVerifierDepProcessor
+  _hook_: '*'
+workspace: null
+workspace_template: default
+init_workspace: true
+step_snapshots: true
+sandbox_provider: null
+sandbox_hint_id: null
+plugins: []

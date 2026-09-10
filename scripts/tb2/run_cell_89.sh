@@ -136,8 +136,11 @@ export TB2_MIN_FREE_GB="${TB2_MIN_FREE_GB:-30}"
 # DockerRootDir is what let a run start and then lose 63/89 tasks to
 # `no space left on device` under /var/lib/containerd.
 docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+# Some H200 images do not expose /etc/containerd/config.toml. Under
+# `set -e -o pipefail`, the missing optional file previously terminated the
+# whole Slurm job here before the first diagnostic line was printed.
 containerd_root="$(sed -nE 's/^[[:space:]]*root[[:space:]]*=[[:space:]]*"?([^"]+)"?.*/\1/p' \
-                    /etc/containerd/config.toml 2>/dev/null | head -1)"
+                    /etc/containerd/config.toml 2>/dev/null | head -1 || true)"
 containerd_root="${containerd_root:-/var/lib/containerd}"
 # Peak transient space is (simultaneous pulls) x (image size), not the total of
 # all 89 images: per-task deletion bounds accumulation but not concurrency. So the
@@ -153,7 +156,10 @@ PEAK_PULLS=$(( N_GPUS * TB2_CONCURRENT ))
 GB_PER_IMAGE="${TB2_GB_PER_IMAGE:-2}"
 NEED_IMG=$(( PEAK_PULLS * GB_PER_IMAGE ))
 for mount in "$containerd_root" "$docker_root" /fsx/home; do
-  avail_gb=$(df -BG --output=avail "$mount" 2>/dev/null | tail -1 | tr -dc '0-9')
+  # Storage layouts differ across H200 nodes. A guessed/default path may not
+  # exist even though Docker is healthy and uses another data root.
+  [[ -e "$mount" ]] || { echo "disk skip: $mount does not exist on this node"; continue; }
+  avail_gb=$(df -BG --output=avail "$mount" 2>/dev/null | tail -1 | tr -dc '0-9' || true)
   [[ -n "$avail_gb" ]] || continue
   need="$NEED_IMG"; [[ "$mount" == "/fsx/home" ]] && need=5
   if [[ "$avail_gb" -lt "$need" ]]; then

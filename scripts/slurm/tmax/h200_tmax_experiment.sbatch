@@ -23,12 +23,12 @@ REPO="${REPO:-${SLURM_SUBMIT_DIR:-$PWD}}"
 cd "$REPO"
 
 : "${MODEL_SIZE:?MODEL_SIZE must be 4b or 9b}"
-: "${TMAX_PIPELINE:?TMAX_PIPELINE must be sft or rl}"
+: "${TMAX_PIPELINE:?TMAX_PIPELINE must be sft, rl, or harness}"
 : "${SFT_ROLLOUT_MODE:?SFT_ROLLOUT_MODE must be single, cross, or none}"
 : "${REPLICATE:?REPLICATE is required}"
 case "$MODEL_SIZE" in 4b|9b) ;; *) echo "ERROR: MODEL_SIZE=$MODEL_SIZE" >&2; exit 2 ;; esac
 case "$TMAX_PIPELINE:$SFT_ROLLOUT_MODE" in
-  sft:single|sft:cross|rl:none) ;;
+  sft:single|sft:cross|rl:none|harness:none) ;;
   *) echo "ERROR: invalid pipeline/rollout pair: $TMAX_PIPELINE/$SFT_ROLLOUT_MODE" >&2; exit 2 ;;
 esac
 
@@ -65,7 +65,26 @@ export EVOLVE_TASKS_JSON="${EVOLVE_TASKS_JSON:-$REPO/recipe/tb2_evolver/tasks_tm
 export HOLDOUT_TASKS_JSON="${HOLDOUT_TASKS_JSON:-$REPO/recipe/tb2_evolver/tasks_tmax_only200.json}"
 export INIT_LORA_PATH="${INIT_LORA_PATH:-}"
 
-if [[ "$TMAX_PIPELINE" == sft ]]; then
+# Continuation jobs may require an exact starting model/harness. Fail before
+# image setup or evaluation if submission-time environment propagation changed
+# either path.
+if [[ -n "${REQUIRE_INIT_MODEL:-}" ]]; then
+  [[ "$INIT_LORA_PATH" == "$REQUIRE_INIT_MODEL" && -f "$INIT_LORA_PATH/config.json" ]] || {
+    echo "ERROR: required init model was not preserved: expected=$REQUIRE_INIT_MODEL actual=${INIT_LORA_PATH:-<empty>}" >&2
+    exit 2
+  }
+fi
+if [[ -n "${REQUIRE_SEED_HARNESS:-}" ]]; then
+  [[ "${SEED_HARNESS:-}" == "$REQUIRE_SEED_HARNESS" && -f "$REQUIRE_SEED_HARNESS" ]] || {
+    echo "ERROR: required seed harness was not preserved: expected=$REQUIRE_SEED_HARNESS actual=${SEED_HARNESS:-<empty>}" >&2
+    exit 2
+  }
+fi
+
+if [[ "$TMAX_PIPELINE" == harness ]]; then
+  export ENABLE_SFT=0 ENABLE_RL=0 HARNESS_ONLY=1
+  export SFT_GEN_ROLLOUT=0 MASTERY_REQUIRE_CORPUS=0
+elif [[ "$TMAX_PIPELINE" == sft ]]; then
   export ENABLE_SFT=1 ENABLE_RL=0
   export MIN_TRAJS="${MIN_TRAJS:-20}" MAX_TRAJS="${MAX_TRAJS:-0}"
   export PER_TASK="${PER_TASK:-1}" MAX_PAIRS_PER_TRAJ="${MAX_PAIRS_PER_TRAJ:-32}"

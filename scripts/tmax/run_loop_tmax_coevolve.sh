@@ -11,8 +11,8 @@
 #   A  harness evolve on that set (EVOLVE_ROUNDS, default 5)
 #        model_best + harness_best → harness_k (+ success trajs)
 #   B  holdout-102 with model_best + harness_k → HARNESS ratchet:
-#        paired sign test passes → harness_best := harness_k
-#        otherwise               → keep harness_best, drop harness_k
+#        aggregate score rises OR paired sign test passes → harness_best := harness_k
+#        otherwise                                      → keep harness_best, drop harness_k
 #   B2 SFT-gen rollout (~100 unique non-holdout tasks, PER_TASK=1):
 #        reuse this iter's evolve-set evals under H*; top up with new taxonomy
 #        tasks. Skip if (H*, M) is unchanged from the last SFT-gen. If B
@@ -26,14 +26,14 @@
 #        → model_k_rl. NEVER trains on holdout-102 (eval-only, matches Tmax).
 #        ENABLE_SFT=0 inits RL from base / incumbent full ckpt, not an SFT LoRA.
 #   E  holdout-102 with model_k(+rl) + harness_best → MODEL ratchet:
-#        paired sign test passes → model_best := model_k
-#        otherwise               → reject, run EXTRA_EVOLVE_ROUNDS more,
+#        aggregate score rises OR paired sign test passes → model_best := model_k
+#        otherwise                                      → reject, run EXTRA_EVOLVE_ROUNDS more,
 #                                  rebuild corpus, re-SFT / re-eval
 #                                  (up to MAX_SFT_RETRIES), then move on
 #
-# Current promotion uses paired per-task results (`recipe.tmax_eval.paired_gate`)
-# with PAIRED_EVAL_ALPHA. ACCEPT_TIES and MODEL_RATCHET_TOL remain only for the
-# legacy ratchet_accept helper and do not control the main B/E gates.
+# Promotion accepts a strict aggregate holdout gain by default, even when the
+# paired sign test is inconclusive. The paired per-task gate remains a second
+# acceptance path. ACCEPT_TIES and MODEL_RATCHET_TOL remain legacy-only.
 #
 # Usage:
 #   REPLICATE=1 CLEAN_STALE=1 bash scripts/tmax/run_loop_tmax_coevolve.sh
@@ -53,6 +53,7 @@
 #   CORPUS_MAX_PREV_FRAC=0.4 # cap older-iteration trajs at 40% of selected
 #   MAX_PAIRS_PER_TRAJ=32
 #   PAIRED_EVAL_ALPHA=0.05  # current harness/model promotion threshold
+#   ACCEPT_AGGREGATE_GAINS=1 # accept any strict holdout pass-count increase
 #   ACCEPT_TIES=1           # legacy ratchet helper only; main B/E do not use it
 #   MODEL_RATCHET_TOL=0     # legacy ratchet helper only
 #   HARNESS_RATCHET=1       # ratchet the harness on holdout too (not just carry)
@@ -143,8 +144,17 @@ ACCEPT_TIES="${ACCEPT_TIES:-1}"
 TIE_MAX_SYSTEM_ERRORS="${TIE_MAX_SYSTEM_ERRORS:-0}"
 SYSTEM_ERROR_STATUSES="${SYSTEM_ERROR_STATUSES:-error,agent_error}"
 HARNESS_RATCHET="${HARNESS_RATCHET:-1}"
+# Allow a candidate harness that ties the incumbent's aggregate holdout score
+# to advance even when the paired sign test is inconclusive. This is useful for
+# co-evolution: a score-neutral harness can solve a complementary task subset
+# and provide different frontier evidence to the following RL stage.
+HARNESS_ACCEPT_SCORE_TIES="${HARNESS_ACCEPT_SCORE_TIES:-0}"
 SYSTEM_ERROR_RETRIES="${SYSTEM_ERROR_RETRIES:-2}"
 PAIRED_EVAL_ALPHA="${PAIRED_EVAL_ALPHA:-0.05}"
+# A strict aggregate holdout increase is sufficient for promotion even when
+# the paired sign test is underpowered (for example, 7 wins / 5 losses). Set
+# to 0 only to reproduce the older significance-only promotion policy.
+ACCEPT_AGGREGATE_GAINS="${ACCEPT_AGGREGATE_GAINS:-1}"
 # Re-measure (and re-ratchet) the harness after EXTRA_EVOLVE_ROUNDS. Off by
 # default: another holdout-102 pass per retry is expensive, and swapping the
 # harness mid-iteration would confound the model comparison whose BEFORE score
@@ -173,9 +183,14 @@ EVOLVE_EXTRA_EXCLUDE="${EVOLVE_EXTRA_EXCLUDE:-}"
 # base model or the last accepted full checkpoint (no LoRA SFT).
 ENABLE_SFT="${ENABLE_SFT:-1}"
 ENABLE_RL="${ENABLE_RL:-0}"
+HARNESS_ONLY="${HARNESS_ONLY:-0}"
+# Keep the statistically gated promotion policy by default.  Setting this to
+# zero is useful for continuation studies that intentionally train the next
+# outer iteration from the latest model even when its holdout score ties.
+MODEL_RATCHET="${MODEL_RATCHET:-1}"
 if [[ "$ENABLE_SFT" != "1" ]]; then
-  if [[ "$ENABLE_RL" != "1" ]]; then
-    echo "ERROR: ENABLE_SFT=0 requires ENABLE_RL=1 (otherwise the model never updates)" >&2
+  if [[ "$ENABLE_RL" != "1" && "$HARNESS_ONLY" != "1" ]]; then
+    echo "ERROR: ENABLE_SFT=0 requires ENABLE_RL=1 or HARNESS_ONLY=1" >&2
     exit 2
   fi
   SFT_GEN_ROLLOUT=0
@@ -183,6 +198,16 @@ if [[ "$ENABLE_SFT" != "1" ]]; then
 fi
 RL_EPISODES="${RL_EPISODES:-5120}"
 RL_N_TASKS="${RL_N_TASKS:-100}"
+# Bootstrap an RL-first chain from a harness that was already evolved in a
+# previous run.  The first outer iteration reuses that harness and the named
+# evolve run's outcomes for frontier-task selection; later iterations return
+# to the normal evolve -> RL order.
+SKIP_FIRST_EVOLVE="${SKIP_FIRST_EVOLVE:-0}"
+BOOTSTRAP_EVOLVE_RUN_TAG="${BOOTSTRAP_EVOLVE_RUN_TAG:-}"
+if [[ "$SKIP_FIRST_EVOLVE" == "1" && -z "$BOOTSTRAP_EVOLVE_RUN_TAG" ]]; then
+  echo "ERROR: SKIP_FIRST_EVOLVE=1 requires BOOTSTRAP_EVOLVE_RUN_TAG" >&2
+  exit 2
+fi
 # Screened-population evolve. Empty = fanout 1 (legacy). evolve_tmax.sh word-splits
 # this into recipe.tb2_evolver.run flags.
 EVOLVE_EXTRA_ARGS="${EVOLVE_EXTRA_ARGS:-}"
@@ -301,7 +326,7 @@ fi
 [[ -f "$BASELINE_HARNESS" ]] || { echo "ERROR: missing $BASELINE_HARNESS" >&2; exit 2; }
 [[ -x "$PY" ]] || { echo "ERROR: bad PYTHON_BIN=$PY" >&2; exit 2; }
 
-log "plan: N_ITERS=$N_ITERS EVOLVE_ROUNDS=$EVOLVE_ROUNDS ENABLE_SFT=$ENABLE_SFT ENABLE_RL=$ENABLE_RL"
+log "plan: N_ITERS=$N_ITERS EVOLVE_ROUNDS=$EVOLVE_ROUNDS ENABLE_SFT=$ENABLE_SFT ENABLE_RL=$ENABLE_RL HARNESS_ONLY=$HARNESS_ONLY"
 log "  EVOLVE_EXTRA_ARGS=${EVOLVE_EXTRA_ARGS:-<none: --fanout 1 legacy hill-climb>}"
 
 mark() { touch "$STATE/.done-$1"; }
@@ -935,7 +960,13 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
   log "  evolve set : $EVOLVE_TASKS_JSON"
 
   # ── A. harness evolve ────────────────────────────────────────────────────
-  if ! done_p "evolve-i${k}"; then
+  bootstrap_rl_iter=0
+  if [[ "$SKIP_FIRST_EVOLVE" == "1" && "$k" == "$START_ITER" ]]; then
+    bootstrap_rl_iter=1
+    cand_harness="$prev_harness"
+    log "  bootstrap RL-first iteration: reuse $cand_harness"
+    log "  frontier evidence: historical evolve tag $BOOTSTRAP_EVOLVE_RUN_TAG"
+  elif ! done_p "evolve-i${k}"; then
     # Resume if this iter's evolve tag already has state / partial trajs
     # (e.g. job cancelled mid-R0). Passing RESUME=0 would wipe the chance to
     # continue and re-burn a full 5-round evolve.
@@ -953,11 +984,13 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
     log "skip evolve-i${k}"
   fi
 
-  if cand_harness="$(resolve_evolved "$TAG")"; then
-    log "  gated harness_$k = $cand_harness"
-  else
-    cand_harness="$prev_harness"
-    log "  WARNING: no gated harness in iter $k; carrying previous harness"
+  if (( bootstrap_rl_iter == 0 )); then
+    if cand_harness="$(resolve_evolved "$TAG")"; then
+      log "  gated harness_$k = $cand_harness"
+    else
+      cand_harness="$prev_harness"
+      log "  WARNING: no gated harness in iter $k; carrying previous harness"
+    fi
   fi
 
   # ── B. holdout with incumbent model + candidate harness → harness ratchet ─
@@ -984,8 +1017,16 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
       prev_eval_job="${TAG}-B-harness"
       printf '%s\n' "$prev_eval_job" >"$INC_EVAL_JOB_FILE"
       log "  HARNESS_RATCHET=0 — adopting harness_i${k} unconditionally (holdout ${SCORE_B})"
-    elif (( paired_rc == 0 )); then
-      RATCHET_REASON="paired sign test passed (alpha=$PAIRED_EVAL_ALPHA)"
+    elif [[ "$ACCEPT_AGGREGATE_GAINS" == "1" ]] && (( SCORE_B > INC_SCORE )) || \
+         (( paired_rc == 0 )) || \
+         [[ "$HARNESS_ACCEPT_SCORE_TIES" == "1" && "$SCORE_B" == "$INC_SCORE" ]]; then
+      if [[ "$ACCEPT_AGGREGATE_GAINS" == "1" ]] && (( SCORE_B > INC_SCORE )); then
+        RATCHET_REASON="aggregate holdout improved ${INC_SCORE} → ${SCORE_B} (paired significance not required)"
+      elif (( paired_rc == 0 )); then
+        RATCHET_REASON="paired sign test passed (alpha=$PAIRED_EVAL_ALPHA)"
+      else
+        RATCHET_REASON="aggregate holdout tied at ${SCORE_B} (HARNESS_ACCEPT_SCORE_TIES=1)"
+      fi
       log "  harness ACCEPTED: $RATCHET_REASON"
       harness_used="$cand_harness"
       prev_harness="$cand_harness"
@@ -1000,6 +1041,16 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
       harness_used="$prev_harness"
       BEFORE_SCORE="$INC_SCORE"
     fi
+  fi
+
+  # Harness-only control: stage B is the endpoint for this iteration.  Keep
+  # the base/incumbent model frozen and proceed directly to the next harness
+  # search round, preserving the normal task rotation and harness ratchet.
+  if [[ "$HARNESS_ONLY" == "1" ]]; then
+    log "  HARNESS_ONLY=1 — model frozen; skipping corpus/SFT/RL/model ratchet"
+    save_incumbent "$k" "end"
+    log "  incumbent after iter $k: score=$INC_SCORE model=${prev_adapter:-<base>} harness=$prev_harness"
+    continue
   fi
 
   # ── C/D/E with optional extra-evolve retries when SFT does not lift holdout ─
@@ -1099,10 +1150,20 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
             RL_GPUS="$GPU_POOL"
             RL_EXP_NAME="${BASE}-i${k}-a${attempt}"
             RL_HARNESS_CONFIG="$harness_used"
-            RL_EVOLVE_REPLICATE="$REPLICATE"
             RL_EVOLVE_MASTERED="$STATE/mastered_i${k}.json"
             RL_WALL_TIMEOUT="${RL_WALL_TIMEOUT:-0}"
           )
+          if (( bootstrap_rl_iter == 1 )); then
+            rl_env+=(
+              RL_EVOLVE_REPLICATE=""
+              RL_EVOLVE_RUN_TAG="$BOOTSTRAP_EVOLVE_RUN_TAG"
+            )
+          else
+            rl_env+=(
+              RL_EVOLVE_REPLICATE="$REPLICATE"
+              RL_EVOLVE_RUN_TAG=""
+            )
+          fi
           if [[ "$ENABLE_SFT" == "1" ]]; then
             rl_env+=(ADAPTER_DIR="$ADAPTER_ATTEMPT")
           elif [[ -n "$prev_adapter" && -f "$prev_adapter/adapter_config.json" ]]; then
@@ -1165,16 +1226,30 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
     paired_model_rc=0
     paired_accept "$prev_eval_job" "$job_e" "$paired_model_report" || paired_model_rc=$?
     log "  paired model report: $paired_model_report"
-    if (( paired_model_rc == 0 )); then
-      RATCHET_REASON="paired sign test passed (alpha=$PAIRED_EVAL_ALPHA)"
+    if [[ "$MODEL_RATCHET" == "0" ]] || \
+       { [[ "$ACCEPT_AGGREGATE_GAINS" == "1" ]] && (( AFTER_SCORE > BEFORE_SCORE )); } || \
+       (( paired_model_rc == 0 )); then
+      if [[ "$MODEL_RATCHET" == "0" ]]; then
+        RATCHET_REASON="MODEL_RATCHET=0 (adopt latest model unconditionally)"
+      elif [[ "$ACCEPT_AGGREGATE_GAINS" == "1" ]] && (( AFTER_SCORE > BEFORE_SCORE )); then
+        RATCHET_REASON="aggregate holdout improved ${BEFORE_SCORE} → ${AFTER_SCORE} (paired significance not required)"
+      else
+        RATCHET_REASON="paired sign test passed (alpha=$PAIRED_EVAL_ALPHA)"
+      fi
       log "  model ACCEPTED: $RATCHET_REASON — adopting $EVAL_MODEL"
       # normalize primary adapter/ckpt path for next iter
-      if [[ "$EVAL_MODEL" != "$ADAPTER_OUT" ]]; then
+      adopted_model="$ADAPTER_OUT"
+      if [[ "$EVAL_MODEL" == "$ADAPTER_OUT"/* ]]; then
+        # RL writes its full checkpoint below RL_OUT.  Removing RL_OUT here
+        # would delete the source before it can be copied; keep the resolved
+        # checkpoint path as the next iteration's initial model.
+        adopted_model="$EVAL_MODEL"
+      elif [[ "$EVAL_MODEL" != "$ADAPTER_OUT" ]]; then
         rm -rf "$ADAPTER_OUT"
         cp -a "$EVAL_MODEL" "$ADAPTER_OUT"
       fi
-      printf '%s\t%s\t%s\n' "$k" "$AFTER_SCORE" "$ADAPTER_OUT" >>"$BEST_FILE"
-      prev_adapter="$ADAPTER_OUT"
+      printf '%s\t%s\t%s\n' "$k" "$AFTER_SCORE" "$adopted_model" >>"$BEST_FILE"
+      prev_adapter="$adopted_model"
       prev_eval_job="$job_e"
       printf '%s\n' "$prev_eval_job" >"$INC_EVAL_JOB_FILE"
       (( AFTER_SCORE > INC_SCORE )) && INC_SCORE="$AFTER_SCORE"
@@ -1182,6 +1257,7 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
       break
     fi
 
+    RATCHET_REASON="paired sign test did not pass (alpha=$PAIRED_EVAL_ALPHA)"
     log "  model REJECTED: $RATCHET_REASON"
     if (( attempt >= MAX_SFT_RETRIES )); then
       log "  max SFT retries reached — keeping incumbent model ${prev_adapter:-base}"
@@ -1213,8 +1289,13 @@ for (( k=START_ITER; k<=N_ITERS; k++ )); do
         paired_extra_report="$STATE/paired_harness_i${k}_a${attempt}.json"
         paired_extra_rc=0
         paired_accept "$prev_eval_job" "$job_bx" "$paired_extra_report" || paired_extra_rc=$?
-        if (( paired_extra_rc == 0 )); then
-          RATCHET_REASON="paired sign test passed (alpha=$PAIRED_EVAL_ALPHA)"
+        if { [[ "$ACCEPT_AGGREGATE_GAINS" == "1" ]] && (( SCORE_BX > INC_SCORE )); } || \
+           (( paired_extra_rc == 0 )); then
+          if [[ "$ACCEPT_AGGREGATE_GAINS" == "1" ]] && (( SCORE_BX > INC_SCORE )); then
+            RATCHET_REASON="aggregate holdout improved ${INC_SCORE} → ${SCORE_BX} (paired significance not required)"
+          else
+            RATCHET_REASON="paired sign test passed (alpha=$PAIRED_EVAL_ALPHA)"
+          fi
           log "  extra-round harness ACCEPTED: $RATCHET_REASON"
           harness_used="$newer"
           prev_harness="$newer"

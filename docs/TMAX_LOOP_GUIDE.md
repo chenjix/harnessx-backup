@@ -146,12 +146,13 @@ scripts/tmax/evaluate_tmax.sh
 |---|---|
 | `HARNESS_RATCHET` | `1` 时只有通过 gate 才采用新 harness |
 | `PAIRED_EVAL_ALPHA` | paired sign-test 显著性阈值 |
+| `ACCEPT_AGGREGATE_GAINS` | 默认 `1`；holdout 总通过数严格上涨时直接接受，无需 paired gate 显著 |
 | `HOLDOUT_CONCURRENT` | holdout evaluation 并发量 |
 | `HOLDOUT_TASKS_JSON` | 冻结的 holdout-102 |
 
-当前实际 acceptance 由 `paired_accept()` 决定。文件顶部关于
-`ACCEPT_TIES` 的描述属于旧/兼容语义；不要只看变量名推断当前 gate，应该看
-`recipe.tmax_eval.paired_gate compare` 的结果。
+当前实际 acceptance 是两条路径的 OR：总通过数严格上涨，或
+`paired_accept()` 通过。`ACCEPT_TIES` 属于旧/兼容语义；默认不会让总分平局
+绕过 paired gate。
 
 ### B2：Single-harness SFT rollout
 

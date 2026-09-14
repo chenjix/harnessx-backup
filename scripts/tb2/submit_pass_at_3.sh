@@ -28,5 +28,8 @@ done
 
 echo "Submitted Slurm job: $job_id"
 echo "Submission manifest: $MANIFEST"
-echo "After all jobs finish, run:"
+echo "If the job times out, resubmit with the same stamp to resume; completed"
+echo "evaluations are skipped:"
+echo "  PASS_AT_3_STAMP=$STAMP PASS_AT_3_MANIFEST='$MANIFEST' bash scripts/tb2/submit_pass_at_3.sh"
+echo "After all evaluations finish, run:"
 echo "  python3 scripts/tb2/summarize_pass_at_3.py --manifest '$MANIFEST'"
